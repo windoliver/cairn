@@ -531,6 +531,128 @@ async fn failed_processing_does_not_lock_signature() {
     succeeding_reg.shutdown().await;
 }
 
+// ---------------------------------------------------------------------------
+// Finding O — concurrent duplicate deliveries must not both succeed
+// ---------------------------------------------------------------------------
+
+/// Two goroutines posting the exact same signed webhook body concurrently must
+/// result in exactly one 204 and one 409 — not two 204s (Finding O).
+///
+/// The previous implementation used a "check-then-process-then-commit" pattern
+/// that left a window where two concurrent deliveries could both pass the check
+/// before either committed the replay marker, producing duplicate events.
+///
+/// The fix inserts a `Pending` marker atomically inside the same lock
+/// acquisition as the check. When the second delivery arrives (even
+/// concurrently), it sees `Pending` and returns 409 immediately.
+///
+/// The test spawns two `tokio::task`s that each issue the same signed request.
+/// After both complete, the `Capturer` must have exactly 1 event and the two
+/// status codes must be exactly one 204 and one 409.
+#[tokio::test(flavor = "multi_thread")]
+async fn concurrent_duplicate_deliveries_one_succeeds() {
+    let capturer = Arc::new(Capturer::default());
+    let creds = Arc::new(InMemoryCredentialStore::default());
+    provision_secret(&creds).await;
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let mut reg = ConnectorRegistry::builder()
+        .credentials(
+            Arc::clone(&creds) as Arc<dyn cairn_connectors_core::credential::CredentialStore>
+        )
+        .consent(Arc::new(
+            cairn_connectors_core::fixture::AcceptAllConsent::default(),
+        ))
+        .emit(capturer.clone() as Arc<dyn PipelineEmit>)
+        .spool_root(tmp.path().to_path_buf())
+        .build();
+
+    reg.register(FixtureConnector::with_default_manifest())
+        .expect("register must succeed");
+    reg.enable("fixture", default_grant())
+        .await
+        .expect("enable must succeed");
+
+    let router = reg.webhook_router();
+
+    let body = serde_json::json!({"concurrent": "dedup"}).to_string();
+    let sig = hex_hmac_sha256(WEBHOOK_SECRET, body.as_bytes());
+
+    // Spawn two tasks posting the identical signed request simultaneously.
+    // `axum::Router` is `Clone` — both tasks get their own clone of the router
+    // but share the underlying `Arc<RegistryWebhookState>`.
+    let (tx1, rx1) = tokio::sync::oneshot::channel::<StatusCode>();
+    let (tx2, rx2) = tokio::sync::oneshot::channel::<StatusCode>();
+
+    let router1 = router.clone();
+    let body1 = body.clone();
+    let sig1 = sig.clone();
+    tokio::spawn(async move {
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/webhooks/fixture")
+            .header("content-type", "application/json")
+            .header(SIG_HEADER, &sig1)
+            .body(Body::from(body1))
+            .expect("request 1 must build");
+        let resp = router1.oneshot(req).await.expect("router must respond");
+        let _ = tx1.send(resp.status());
+    });
+
+    let router2 = router.clone();
+    let body2 = body.clone();
+    let sig2 = sig.clone();
+    tokio::spawn(async move {
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/webhooks/fixture")
+            .header("content-type", "application/json")
+            .header(SIG_HEADER, &sig2)
+            .body(Body::from(body2))
+            .expect("request 2 must build");
+        let resp = router2.oneshot(req).await.expect("router must respond");
+        let _ = tx2.send(resp.status());
+    });
+
+    let status1 = rx1.await.expect("task 1 must complete");
+    let status2 = rx2.await.expect("task 2 must complete");
+
+    // Exactly one must be 204 (success) and one must be 409 (conflict).
+    let statuses = [status1, status2];
+    let num_success = statuses
+        .iter()
+        .filter(|&&s| s == StatusCode::NO_CONTENT)
+        .count();
+    let num_conflict = statuses
+        .iter()
+        .filter(|&&s| s == StatusCode::CONFLICT)
+        .count();
+
+    assert_eq!(
+        num_success, 1,
+        "exactly one concurrent duplicate must succeed (204); got statuses {statuses:?}",
+    );
+    assert_eq!(
+        num_conflict, 1,
+        "exactly one concurrent duplicate must be rejected (409); got statuses {statuses:?}",
+    );
+
+    // Only one event must have been emitted.
+    {
+        let events = capturer
+            .0
+            .lock()
+            .expect("invariant: Capturer mutex unpoisoned");
+        assert_eq!(
+            events.len(),
+            1,
+            "exactly 1 event must be emitted despite concurrent duplicates; got {events:?}",
+        );
+    }
+
+    reg.shutdown().await;
+}
+
 /// A registered connector that has NOT been enabled must not get a webhook
 /// route. Requests to its path must return 404.
 #[tokio::test]
