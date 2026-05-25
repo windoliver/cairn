@@ -22,3 +22,5 @@ The generated [config defaults](../reference/generated/config-defaults.md)
 are emitted from `CairnConfig::default()`. A new config field or changed default
 changes that file and fails `cairn-docgen --check` until the generated docs are
 updated.
+
+See the [capability matrix](../reference/capability-matrix.md) for what ships in each release.

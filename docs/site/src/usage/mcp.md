@@ -23,11 +23,13 @@ declarations, plugin manifest, and stdio serving entry point.
 
 Current truth:
 
-- The generated MCP tool list exists for the eight core verbs.
-- `CairnMcpHandler` can list tools from `cairn_mcp::generated::TOOLS`.
-- Tool calls return a P0 dispatch stub until verb dispatch is wired.
+- The generated MCP tool list covers the eight core verbs.
+- `CairnMcpHandler` dispatches tool calls through `cairn_mcp::generated::TOOLS`
+  to the fully wired verb layer backed by SQLite storage.
 - The runtime `cairn mcp` command starts the stdio server and blocks until the
   client closes stdin or sends shutdown.
 
 Use the generated [MCP tool reference](../reference/generated/mcp-tools.md) for
 tool names, auth metadata, root capabilities, and mode-level overrides.
+
+See the [capability matrix](../reference/capability-matrix.md) for what ships in each release.

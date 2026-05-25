@@ -62,3 +62,5 @@ A trace entry mentioning a record (only the `excluded` field on
 visibility to. Tier-1-invisible records are filtered before the
 rank-and-filter step that builds exclusions; their existence is never
 leaked through `policy_trace`.
+
+See the [capability matrix](capability-matrix.md) for what ships in each release.

@@ -22,9 +22,14 @@
 - [Codex](usage/codex.md)
 - [Cairn Skill](usage/skill.md)
 - [Claude Code Reference Consumer](usage/claude-code-reference.md)
+- [Migration Guides](usage/migration/index.md)
+  - [v0.1 → v0.2](usage/migration/v0.1-to-v0.2.md)
+  - [v0.2 → v0.3](usage/migration/v0.2-to-v0.3.md)
+  - [v0.3 → v0.4](usage/migration/v0.3-to-v0.4.md)
 
 # Reference
 
+- [Capability Matrix](reference/capability-matrix.md)
 - [Generated CLI Reference](reference/generated/cli.md)
   - [`cairn ingest`](reference/generated/commands/ingest.md)
   - [`cairn search`](reference/generated/commands/search.md)
@@ -75,3 +80,4 @@
 - [Codegen](maintainers/codegen.md)
 - [Docs](maintainers/docs.md)
 - [CI](maintainers/ci.md)
+- [Beta Readiness](maintainers/beta-readiness.md)

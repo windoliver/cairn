@@ -111,11 +111,16 @@ jobs:
           # Accept 403 because lib.rs / medium / similar hosts block bot UAs
           # even when the URL is valid; 429 is rate-limiting; 999 is
           # LinkedIn's anti-bot status. We still flag 4xx-other / 5xx / dead.
+          # Exclude docs/superpowers (plans + specs) — these dev artifacts
+          # embed illustrative markdown snippets in `markdown fenced blocks
+          # whose link targets describe files the engineer will create in
+          # docs/site/src/; lychee follows them anyway and reports false 404s.
           args: >-
             --no-progress
             --max-concurrency 4
             --accept '200,206,403,429,999'
             --exclude-path target
             --exclude-path '.git'
+            --exclude-path 'docs/superpowers'
             './**/*.md'
           fail: true

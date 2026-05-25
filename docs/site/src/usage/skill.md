@@ -23,3 +23,5 @@ Supported harness values are `claude-code`, `codex`, `gemini`, `opencode`,
 
 When the IDL changes, `cairn-codegen --check` catches generated skill drift and
 `cairn-docgen --check` catches the corresponding docs drift.
+
+See the [capability matrix](../reference/capability-matrix.md) for what ships in each release.

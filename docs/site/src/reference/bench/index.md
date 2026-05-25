@@ -36,3 +36,26 @@ Each release scorecard should commit or attach:
 
 The committed BrainBench fixture lives at `fixtures/v0/brainbench-world-v1/`.
 It is deterministic and the offline columns do not require external API keys.
+
+## Coherence gate (#137)
+
+The coherence gate runs on every PR and on `release/*` branches. It scores
+the extended replay cassettes (`research_domain`, `engineering_domain`,
+`support_domain` under `fixtures/v0/replay/`) against five deterministic
+metrics: `recall_precision`, `stale_avoidance`, `summary_quality`,
+`search_usefulness`, and `forget_completeness`. No LLM and no network are
+required.
+
+```bash
+cargo run --release -p cairn-bench --locked -- coherence run --gate beta
+```
+
+Use `--gate rc` on release branches. Gate floors and regression budgets live
+in `crates/cairn-bench/manifests/coherence.toml`. Threshold history is
+persisted append-only in `crates/cairn-bench/baselines/coherence-trend.jsonl`.
+
+The gate exits 69 (`EX_UNAVAILABLE`) when any metric falls below its floor or
+regresses more than 2 % from the committed baseline. `forget_completeness` has
+a floor of 1.00 and a zero regression budget — any drop fails immediately.
+
+See the [capability matrix](../capability-matrix.md) for what ships in each release.

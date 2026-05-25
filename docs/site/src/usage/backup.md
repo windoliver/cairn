@@ -26,3 +26,5 @@ its own registered backup artifacts and into restore operations that use
 `cairn admin restore`. It cannot redact or discover third-party backups that
 were copied outside this registry. Register imported backups before relying on
 forget-me guarantees across restore.
+
+See the [capability matrix](../reference/capability-matrix.md) for what ships in each release.

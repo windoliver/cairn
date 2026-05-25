@@ -39,3 +39,5 @@ generated MCP entry uses an empty `env` object and launches:
 ```bash
 cairn --vault <vault> mcp
 ```
+
+See the [capability matrix](../reference/capability-matrix.md) for what ships in each release.

@@ -118,3 +118,5 @@ Once a vault is bootstrapped and the embedding model is cached, Cairn
 runs fully offline: no network calls are made by any of the eight verbs
 during a normal session. Sensors, workflows, and MCP serving all stay
 local (brief §19).
+
+See the [capability matrix](../reference/capability-matrix.md) for what ships in each release.

@@ -1,7 +1,8 @@
 # Plugins
 
-Cairn currently ships seven bundled plugin crates:
+Cairn currently ships eight bundled plugin crates:
 
+- `cairn-agent-core`
 - `cairn-mcp`
 - `cairn-sensors-local`
 - `cairn-store-sqlite`
@@ -31,3 +32,5 @@ pending. Strict mode treats pending tier-2 cases as failures and exits 69.
 The generated [plugin reference](../reference/generated/plugins.md) is emitted
 from the bundled registry, so adding or changing a bundled plugin updates docs
 or fails CI.
+
+See the [capability matrix](../reference/capability-matrix.md) for what ships in each release.

@@ -1,5 +1,8 @@
 # Status
 
+> See the [capability matrix](reference/capability-matrix.md) for the
+> authoritative per-phase capability list.
+
 Cairn is pre-v0.1.
 
 Implemented:
@@ -14,13 +17,30 @@ Implemented:
 - Stdio `cairn mcp` server entry point
 - Cairn skill bundle install command
 - Docs generator and mdBook source site
+- Durable memory storage (`cairn-store-sqlite` wired into CLI dispatch)
+- Real dispatch for the eight core memory verbs (`ingest`, `search`, `retrieve`, `summarize`, `assemble_hot`, `capture_trace`, `lint`, `forget`)
+- Harness lifecycle hook runner (`cairn hook`)
+- Legacy archive import planner (`cairn import`)
+- Reference-consumer diagnostics (`cairn doctor`)
+- Benchmark scorecards and release gates (`cairn bench`)
+- Nexus sandbox setup and diagnostics (`cairn nexus`)
+- Harness integration setup (`cairn setup`)
+- Administrative operations (`cairn admin`)
+- Vault backup management (`cairn backup`)
+- LLM provider diagnostics (`cairn llm`)
+- Screen sensor diagnostics (`cairn screen`)
+- Session-tree inspection (`cairn session`)
+- Federation share-link management (`cairn share`)
+- Sensor consent and policy gates (`cairn sensor`)
+- Operator repair commands (`cairn repair`)
+- Vault identity management (`cairn identity`)
+- Human-review FlushPlan management (`cairn flush`)
+- Nexus sidecar reindex (`cairn reindex`)
 
 Stubbed or pending:
 
-- Durable memory storage
-- Real dispatch for the eight core memory verbs
-- Non-stdio MCP transports
-- LLM-backed enrichment
+- Non-stdio MCP transports (v0.2+)
+- LLM-backed enrichment (requires configured provider; local embedding available)
 
 ## Open Work
 

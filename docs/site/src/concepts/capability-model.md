@@ -16,3 +16,5 @@ The generated [contract verb reference](../reference/generated/contract-verbs.md
 [MCP tool reference](../reference/generated/mcp-tools.md), and
 [plugin reference](../reference/generated/plugins.md) are the committed views
 that CI keeps in sync.
+
+See the [capability matrix](../reference/capability-matrix.md) for which capabilities ship in which release.
