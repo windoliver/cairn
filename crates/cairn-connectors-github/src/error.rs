@@ -26,7 +26,13 @@ pub enum GhError {
         retry_after: Duration,
     },
 
-    /// 5xx — transient upstream failure.
+    /// Catch-all transient error.
+    ///
+    /// Carries a free-form message rather than a `#[source]` chain — callers
+    /// must encode any upstream cause as part of the string. Maps to
+    /// `ConnectorError::transient_msg` at the substrate boundary. Used for
+    /// 5xx responses and as the wildcard sink in the `BadRequest`/`Http`/`Jwt`/`Json`
+    /// fallthrough of `From<GhError> for ConnectorError`.
     #[error("github transient: {0}")]
     Transient(String),
 
@@ -98,5 +104,19 @@ mod tests {
     fn malformed_maps_to_malformed_payload() {
         let e: ConnectorError = GhError::Malformed("bad field `id`".into()).into();
         assert!(matches!(e, ConnectorError::MalformedPayload(s) if s.contains("bad field `id`")));
+    }
+
+    #[test]
+    fn bad_request_falls_through_to_transient() {
+        let e: ConnectorError = GhError::BadRequest {
+            status: 422,
+            message: "validation failed".into(),
+        }
+        .into();
+        // The wildcard arm wraps via transient_msg, which produces Transient.
+        match e {
+            ConnectorError::Transient(_) => {}
+            other => panic!("expected Transient, got {other:?}"),
+        }
     }
 }
