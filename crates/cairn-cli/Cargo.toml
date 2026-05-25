@@ -48,9 +48,11 @@ cairn-workflows = { workspace = true }
 cairn-llm-openai-compat = { workspace = true }
 tokio_rusqlite = { workspace = true }
 anyhow = { workspace = true }
+axum = { workspace = true }
 jsonschema = { workspace = true }
 clap = { workspace = true }
-tokio = { workspace = true, features = ["rt", "macros", "fs", "io-util"] }
+tokio = { workspace = true, features = ["rt", "macros", "fs", "io-util", "net", "signal"] }
+tracing-subscriber = { workspace = true }
 async-trait = { workspace = true }
 rusqlite = { workspace = true }
 regex = { workspace = true }
