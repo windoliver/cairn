@@ -146,15 +146,32 @@ if [ -z "$RUN_ID" ]; then
   echo "fail: no ci.yml run found for $SHA — push the commit and wait for CI"
   exit 1
 fi
-gh run view "$RUN_ID" --json jobs \
-  --jq '.jobs[] | select(.name | startswith("contract-drift")) | .conclusion'
+CONCLUSIONS=$(gh run view "$RUN_ID" --json jobs \
+  --jq '[.jobs[] | select(.name | startswith("contract-drift")) | .conclusion]')
+COUNT=$(printf '%s' "$CONCLUSIONS" | jq 'length')
+if [ "$COUNT" -eq 0 ]; then
+  echo "fail: no contract-drift job in run $RUN_ID"
+  exit 1
+fi
+NON_SUCCESS=$(printf '%s' "$CONCLUSIONS" | jq '[.[] | select(. != "success")] | length')
+if [ "$NON_SUCCESS" -ne 0 ]; then
+  echo "fail: contract-drift not green — conclusions: $CONCLUSIONS"
+  exit 1
+fi
+echo "ok: contract-drift green on $SHA"
 ```
 
-Expected: `"success"`. The matrix-shaped job name (`contract-drift / wire-compat …`) is matched via `startswith` because `gh` appends the matrix suffix to the configured job name.
+The script **fails closed** under every non-success path:
+- No CI run for the release SHA → exit 1.
+- Run exists but no `contract-drift` job present → exit 1.
+- One or more matching jobs has conclusion other than `"success"`
+  (including `null` if still in progress) → exit 1.
 
-If no run exists for the release SHA, the gate **fails closed** —
-never validate against an older run, because the commit you're
-releasing has not been CI-verified yet.
+Only "every matching `contract-drift*` job on the release SHA
+concluded as `success`" prints `ok` and exits 0. The matrix-shaped
+job name (`contract-drift / wire-compat …`) is matched via
+`startswith` because `gh` appends the matrix suffix to the configured
+job name.
 
 **Pass:** `contract-drift` succeeded on the release SHA, **and** no
 schema file under `crates/cairn-idl/schema/` was changed without an

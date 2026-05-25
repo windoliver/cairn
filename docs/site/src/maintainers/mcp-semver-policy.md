@@ -103,18 +103,28 @@ The same constraint applies to **emitting new `ErrorCode`** or
 
 Splits on direction:
 
-- **Request args** (verb args, signed-intent payload): adding an
-  `Option<T>` is additive. Older clients won't send the field; the
+- **Verb request args only** (the `args` block on a request): adding
+  an `Option<T>` is additive. Older clients won't send the field; the
   server defaults / ignores it. `#[serde(default)]` is auto-emitted by
   codegen for `Optional` fields (`cairn-idl::codegen::emit_sdk`).
   Re-run codegen, accept the wire-compat snapshot, commit.
-- **Responses / `StatusResponse` / envelope** (anything the server
-  emits to v1 clients): **NOT additive under v1**. The generated
-  response structs use `#[serde(deny_unknown_fields)]`, so older v1
-  clients reject responses carrying any field they don't know. Treat
-  this case as breaking and follow "Proposing a breaking change" —
-  either route the new field through `experimental["cairn.contracts"]`
-  (per [ADR 0004 §5.4](https://github.com/windoliver/cairn/blob/main/docs/design/decisions/0004-mcp-v1-semver-freeze.md))
+- **`signed_intent` / envelope / response / `StatusResponse`** (anything
+  in the frozen envelope surface or anything the server emits to v1
+  clients): **NOT additive under v1**.
+  - `envelope/signed_intent.json` is part of the frozen envelope (ADR
+    §1). Its non-signature fields are inputs to canonical-JSON
+    signing — adding a property changes the signed payload shape and
+    breaks signature verification against older clients regardless
+    of `Option<T>` typing. Any signed-intent or envelope change is a
+    breaking change.
+  - Generated response structs use `#[serde(deny_unknown_fields)]`,
+    so older v1 clients reject responses carrying any field they
+    don't know.
+
+  Treat all of these as breaking and follow "Proposing a breaking
+  change" below — either route the new field through
+  `experimental["cairn.contracts"]` (per
+  [ADR 0004 §5.4](https://github.com/windoliver/cairn/blob/main/docs/design/decisions/0004-mcp-v1-semver-freeze.md))
   or roll under `cairn.mcp.v2`.
 
 ## Proposing a breaking change
