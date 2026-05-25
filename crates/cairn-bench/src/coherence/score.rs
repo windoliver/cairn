@@ -115,7 +115,50 @@ pub fn classify(action: &ReplayAction) -> Option<MetricCategory> {
     {
         return Some(MetricCategory::StaleAvoidance);
     }
-    explicit_category(action)
+    let explicit = explicit_category(action)?;
+    // Reject tag/verb mismatches. Without this, a candidate can keep
+    // every category's denominator constant while swapping hard checks
+    // for easy ones — e.g. retag a `record_present` action as
+    // `forget_completeness` to claim privacy coverage without
+    // actually exercising forget. Returning None excludes the action
+    // from coherence scoring; if the category ends up empty as a
+    // result, `IncompleteCoverage` fails the gate downstream.
+    if category_allows_verb(explicit, action) {
+        Some(explicit)
+    } else {
+        None
+    }
+}
+
+/// Verb-to-category invariant. Each metric category is exercised by a
+/// specific subset of replay action verbs — relaxing this lets a
+/// candidate cassette satisfy the coverage guard while replacing the
+/// scoped behavior with a cheaper proxy.
+fn category_allows_verb(category: MetricCategory, action: &ReplayAction) -> bool {
+    match (category, action) {
+        (MetricCategory::RecallPrecision, a) => matches!(
+            a,
+            ReplayAction::RetrieveSession { .. }
+                | ReplayAction::RetrieveTurn { .. }
+                | ReplayAction::CaptureTrace { .. }
+                | ReplayAction::AssembleHot { .. }
+                | ReplayAction::RecordPresent {
+                    expected_present: true,
+                    ..
+                }
+        ),
+        (MetricCategory::SummaryQuality, ReplayAction::Summarize { .. })
+        | (MetricCategory::ForgetCompleteness, ReplayAction::ForgetRecord { .. }) => true,
+        (MetricCategory::SearchUsefulness, ReplayAction::Search(search)) => {
+            // Stale-avoidance auto-promotion already handled above;
+            // a search with non-empty stale_record_ids is never
+            // SearchUsefulness here.
+            search.stale_record_ids.is_empty()
+        }
+        // StaleAvoidance is set only via auto-promotion (above), so an
+        // explicit StaleAvoidance tag on any other shape is invalid.
+        _ => false,
+    }
 }
 
 fn explicit_category(action: &ReplayAction) -> Option<MetricCategory> {
@@ -242,6 +285,51 @@ mod tests {
     fn length_mismatch_returns_error() {
         let err = aggregate(&[summarize_action(None)], &[]).unwrap_err();
         assert!(matches!(err, ScoreError::LengthMismatch { .. }));
+    }
+
+    #[test]
+    fn classify_rejects_category_verb_mismatch() {
+        // RecordPresent tagged as forget_completeness must NOT classify
+        // as ForgetCompleteness — the verb-to-category invariant
+        // requires forget actions to be ForgetRecord.
+        let action = ReplayAction::RecordPresent {
+            story: "S".to_owned(),
+            record_id: "01HQZX9F5N0000000000000000".to_owned(),
+            expected_present: false,
+            metric_category: Some(MetricCategory::ForgetCompleteness),
+        };
+        assert_eq!(classify(&action), None);
+    }
+
+    #[test]
+    fn classify_rejects_summary_quality_tag_on_search() {
+        let action = ReplayAction::Search(ReplaySearchAction {
+            story: "s".to_owned(),
+            mode: ReplaySearchMode::Keyword,
+            query: "q".to_owned(),
+            limit: 1,
+            expected: ReplayExpectation::Hits { record_ids: vec![] },
+            metric_category: Some(MetricCategory::SummaryQuality),
+            stale_record_ids: vec![],
+        });
+        assert_eq!(classify(&action), None);
+    }
+
+    #[test]
+    fn classify_rejects_explicit_stale_avoidance_without_stale_ids() {
+        // StaleAvoidance is set only via auto-promotion when
+        // stale_record_ids is non-empty. An explicit tag without the
+        // ids is invalid.
+        let action = ReplayAction::Search(ReplaySearchAction {
+            story: "s".to_owned(),
+            mode: ReplaySearchMode::Keyword,
+            query: "q".to_owned(),
+            limit: 1,
+            expected: ReplayExpectation::Hits { record_ids: vec![] },
+            metric_category: Some(MetricCategory::StaleAvoidance),
+            stale_record_ids: vec![],
+        });
+        assert_eq!(classify(&action), None);
     }
 
     #[test]

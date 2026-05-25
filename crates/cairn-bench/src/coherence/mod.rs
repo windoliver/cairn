@@ -337,6 +337,28 @@ pub struct CoherenceArgs {
 pub enum CoherenceCmd {
     /// Run the coherence gate over the configured cassettes.
     Run(CoherenceRunArgs),
+    /// Verify that a candidate manifest/baseline pair does not weaken
+    /// the gate compared to a trusted base pair. Exits 0 when safe,
+    /// 78 when the candidate lowers floors, raises drop budgets, or
+    /// shrinks baseline totals.
+    VerifyDrift(VerifyDriftArgs),
+}
+
+/// Arguments for `cairn-bench coherence verify-drift`.
+#[derive(Debug, Args)]
+pub struct VerifyDriftArgs {
+    /// Candidate (HEAD) manifest path.
+    #[arg(long)]
+    pub head_manifest: PathBuf,
+    /// Trusted (base) manifest path.
+    #[arg(long)]
+    pub base_manifest: PathBuf,
+    /// Candidate (HEAD) baseline path.
+    #[arg(long)]
+    pub head_baseline: PathBuf,
+    /// Trusted (base) baseline path.
+    #[arg(long)]
+    pub base_baseline: PathBuf,
 }
 
 /// Arguments for `cairn-bench coherence run`.
@@ -420,7 +442,102 @@ fn default_includes() -> Vec<String> {
 pub async fn dispatch(args: CoherenceArgs) -> u8 {
     match args.cmd {
         CoherenceCmd::Run(run) => dispatch_run(run).await,
+        CoherenceCmd::VerifyDrift(verify) => dispatch_verify_drift(&verify),
     }
+}
+
+fn dispatch_verify_drift(args: &VerifyDriftArgs) -> u8 {
+    let head_manifest = match load_manifest(&args.head_manifest) {
+        Ok(m) => m,
+        Err(e) => {
+            eprintln!("coherence: {e}");
+            return GateError::from(e).exit_code();
+        }
+    };
+    let base_manifest = match load_manifest(&args.base_manifest) {
+        Ok(m) => m,
+        Err(e) => {
+            eprintln!("coherence: {e}");
+            return GateError::from(e).exit_code();
+        }
+    };
+    let head_baseline = match load_baseline(&args.head_baseline) {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("coherence: {e}");
+            return e.exit_code();
+        }
+    };
+    let base_baseline = match load_baseline(&args.base_baseline) {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("coherence: {e}");
+            return e.exit_code();
+        }
+    };
+    let issues = verify_no_weakening(
+        &head_manifest,
+        &base_manifest,
+        &head_baseline,
+        &base_baseline,
+    );
+    if issues.is_empty() {
+        println!("coherence verify-drift: OK");
+        0
+    } else {
+        for issue in &issues {
+            eprintln!("coherence: {issue}");
+        }
+        78
+    }
+}
+
+/// Compare a candidate manifest+baseline pair against trusted base
+/// versions. Returns a list of weakening issues; an empty result is
+/// "safe to merge". Floors may not decrease, `max_drop_pct` may not
+/// increase, and baseline `total`s may not shrink.
+#[must_use]
+pub fn verify_no_weakening(
+    head_manifest: &ThresholdManifest,
+    base_manifest: &ThresholdManifest,
+    head_baseline: &Baseline,
+    base_baseline: &Baseline,
+) -> Vec<String> {
+    let mut issues = Vec::new();
+    for category in ALL_CATEGORIES {
+        let label = as_str(category);
+        let h = head_manifest.for_category(category);
+        let b = base_manifest.for_category(category);
+        if h.beta_min < b.beta_min {
+            issues.push(format!(
+                "manifest weakened: {label}.beta_min dropped from {} to {}",
+                b.beta_min, h.beta_min
+            ));
+        }
+        if h.rc_min < b.rc_min {
+            issues.push(format!(
+                "manifest weakened: {label}.rc_min dropped from {} to {}",
+                b.rc_min, h.rc_min
+            ));
+        }
+        if h.max_drop_pct > b.max_drop_pct {
+            issues.push(format!(
+                "manifest weakened: {label}.max_drop_pct raised from {} to {}",
+                b.max_drop_pct, h.max_drop_pct
+            ));
+        }
+        if let (Some(hs), Some(bs)) = (
+            head_baseline.score_for(category),
+            base_baseline.score_for(category),
+        ) && hs.total < bs.total
+        {
+            issues.push(format!(
+                "baseline weakened: {label}.total shrank from {} to {}",
+                bs.total, hs.total
+            ));
+        }
+    }
+    issues
 }
 
 async fn dispatch_run(run: CoherenceRunArgs) -> u8 {
@@ -788,6 +905,87 @@ mod tests {
         );
         let err = validate_baseline(&b).unwrap_err();
         assert!(err.contains("disagrees"), "{err}");
+    }
+
+    fn good_manifest_for_verify() -> ThresholdManifest {
+        let t = CategoryThreshold {
+            beta_min: 0.9,
+            rc_min: 0.95,
+            max_drop_pct: 2.0,
+        };
+        let forget = CategoryThreshold {
+            beta_min: 1.0,
+            rc_min: 1.0,
+            max_drop_pct: 0.0,
+        };
+        ThresholdManifest {
+            schema_version: 1,
+            recall_precision: t,
+            stale_avoidance: CategoryThreshold {
+                beta_min: 0.95,
+                rc_min: 0.98,
+                max_drop_pct: 2.0,
+            },
+            summary_quality: CategoryThreshold {
+                beta_min: 0.85,
+                rc_min: 0.9,
+                max_drop_pct: 2.0,
+            },
+            search_usefulness: CategoryThreshold {
+                beta_min: 0.85,
+                rc_min: 0.9,
+                max_drop_pct: 2.0,
+            },
+            forget_completeness: forget,
+        }
+    }
+
+    #[test]
+    fn verify_no_weakening_accepts_identical_pair() {
+        let m = good_manifest_for_verify();
+        let b = good_baseline();
+        assert!(verify_no_weakening(&m, &m, &b, &b).is_empty());
+    }
+
+    #[test]
+    fn verify_no_weakening_rejects_lowered_floor() {
+        let base = good_manifest_for_verify();
+        let mut head = base.clone();
+        head.recall_precision.beta_min = 0.5;
+        let issues = verify_no_weakening(&head, &base, &good_baseline(), &good_baseline());
+        assert!(issues.iter().any(|s| s.contains("beta_min")), "{issues:?}");
+    }
+
+    #[test]
+    fn verify_no_weakening_rejects_raised_max_drop() {
+        let base = good_manifest_for_verify();
+        let mut head = base.clone();
+        head.stale_avoidance.max_drop_pct = 50.0;
+        let issues = verify_no_weakening(&head, &base, &good_baseline(), &good_baseline());
+        assert!(
+            issues.iter().any(|s| s.contains("max_drop_pct")),
+            "{issues:?}"
+        );
+    }
+
+    #[test]
+    fn verify_no_weakening_rejects_shrunk_baseline_total() {
+        let m = good_manifest_for_verify();
+        let base = good_baseline();
+        let mut head = good_baseline();
+        head.metrics.insert(
+            "recall_precision".to_owned(),
+            CategoryScore {
+                passed: 0,
+                total: 0,
+                score: 1.0,
+            },
+        );
+        let issues = verify_no_weakening(&m, &m, &head, &base);
+        assert!(
+            issues.iter().any(|s| s.contains("baseline weakened")),
+            "{issues:?}"
+        );
     }
 
     #[test]

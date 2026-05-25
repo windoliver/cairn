@@ -306,6 +306,17 @@ jobs:
             echo "baseline=crates/cairn-bench/baselines/coherence.json" >> "$GITHUB_OUTPUT"
           fi
           echo "cassettes=fixtures/v0/replay" >> "$GITHUB_OUTPUT"
+      - name: Verify HEAD manifest/baseline does not weaken trusted base
+        # Only meaningful when we actually have trusted base inputs
+        # (skipped during bootstrap fallback or push events to a
+        # trusted branch where in-tree IS the trusted source).
+        if: steps.gate.outputs.manifest == '.ci-trusted/coherence.toml'
+        run: |
+          ./target/release/cairn-bench coherence verify-drift \
+            --head-manifest crates/cairn-bench/manifests/coherence.toml \
+            --base-manifest .ci-trusted/coherence.toml \
+            --head-baseline crates/cairn-bench/baselines/coherence.json \
+            --base-baseline .ci-trusted/coherence.json
       - name: Run coherence gate
         run: |
           ./target/release/cairn-bench coherence run \
