@@ -41,7 +41,12 @@ async fn full_poll_emits_events_from_all_resources() {
     let handle = Arc::new(CredentialHandle::from_bytes(env.to_string().into_bytes()));
 
     let outcome = connector
-        .poll(&PollContext::new(handle.clone(), None, 600, CancellationToken::new()))
+        .poll(&PollContext::new(
+            handle.clone(),
+            None,
+            600,
+            CancellationToken::new(),
+        ))
         .await
         .expect("poll");
 
@@ -79,7 +84,12 @@ async fn poll_returns_error_when_first_resource_429s() {
     let handle = Arc::new(CredentialHandle::from_bytes(env.to_string().into_bytes()));
 
     let err = connector
-        .poll(&PollContext::new(handle, None, 600, CancellationToken::new()))
+        .poll(&PollContext::new(
+            handle,
+            None,
+            600,
+            CancellationToken::new(),
+        ))
         .await
         .expect_err("must error on 429");
 

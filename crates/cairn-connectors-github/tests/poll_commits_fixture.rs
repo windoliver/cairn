@@ -62,5 +62,8 @@ async fn commits_poll_stops_at_last_sha() {
     .await
     .expect("poll succeeds");
 
-    assert!(events.is_empty(), "first commit equals last_sha so walk stops");
+    assert!(
+        events.is_empty(),
+        "first commit equals last_sha so walk stops"
+    );
 }

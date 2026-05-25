@@ -45,9 +45,8 @@ impl GitHubConnector {
     ) -> Result<Self, ConnectorError> {
         let manifest = ConnectorManifest::parse_toml(MANIFEST_TOML)
             .map_err(|e| ConnectorError::fatal_msg(format!("github manifest: {e}")))?;
-        let sensor = Identity::parse("snr:local:connector:github:v1").map_err(|e| {
-            ConnectorError::fatal_msg(format!("github sensor identity: {e:?}"))
-        })?;
+        let sensor = Identity::parse("snr:local:connector:github:v1")
+            .map_err(|e| ConnectorError::fatal_msg(format!("github sensor identity: {e:?}")))?;
         let base_url = Url::parse(base.as_ref())
             .map_err(|e| ConnectorError::fatal_msg(format!("github base url: {e}")))?;
         Ok(Self {
@@ -184,13 +183,15 @@ mod tests {
     fn manifest_parses_and_name_matches() {
         let c = GitHubConnector::new("o", "r").expect("constructs");
         assert_eq!(c.name(), "github");
-        assert_eq!(c.sensor_identity().as_str(), "snr:local:connector:github:v1");
+        assert_eq!(
+            c.sensor_identity().as_str(),
+            "snr:local:connector:github:v1"
+        );
     }
 
     #[test]
     fn is_arc_dyn_connector() {
-        let c: Arc<dyn Connector> =
-            Arc::new(GitHubConnector::new("o", "r").expect("constructs"));
+        let c: Arc<dyn Connector> = Arc::new(GitHubConnector::new("o", "r").expect("constructs"));
         assert_eq!(c.name(), "github");
     }
 

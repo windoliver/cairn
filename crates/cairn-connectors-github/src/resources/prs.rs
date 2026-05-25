@@ -91,7 +91,10 @@ impl GhResource for PrsResource {
                 max_updated = Some(dto.updated_at);
             }
             // Apply `since` client-side because /pulls lacks a since param.
-            if sub_cursor.since.is_some_and(|since| dto.updated_at <= since) {
+            if sub_cursor
+                .since
+                .is_some_and(|since| dto.updated_at <= since)
+            {
                 continue;
             }
             events.push(pr_to_event(dto, repo, None));

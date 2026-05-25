@@ -99,8 +99,10 @@ impl GhClient {
             .and_then(|v| v.to_str().ok())
             .and_then(|s| s.parse::<i64>().ok())
             .and_then(|t| DateTime::<Utc>::from_timestamp(t, 0));
-        self.rate_state
-            .store(Arc::new(RateState { remaining, reset_at }));
+        self.rate_state.store(Arc::new(RateState {
+            remaining,
+            reset_at,
+        }));
     }
 
     fn check_status(&self, resp: &reqwest::Response) -> Result<(), GhError> {
@@ -161,10 +163,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let client = GhClient::new(
-            pat_auth("test-pat"),
-            Url::parse(&server.uri()).unwrap(),
-        );
+        let client = GhClient::new(pat_auth("test-pat"), Url::parse(&server.uri()).unwrap());
         let _: serde_json::Value = client.get_json("/repos/o/r/issues", &[]).await.unwrap();
     }
 

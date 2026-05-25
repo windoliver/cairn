@@ -88,10 +88,8 @@ impl GhResource for CommitsResource {
             .branch
             .clone()
             .unwrap_or_else(|| "main".to_string());
-        let mut query: Vec<(&str, String)> = vec![
-            ("sha", branch.clone()),
-            ("per_page", per_page.to_string()),
-        ];
+        let mut query: Vec<(&str, String)> =
+            vec![("sha", branch.clone()), ("per_page", per_page.to_string())];
         if let Some(since) = sub_cursor.since {
             query.push(("since", since.to_rfc3339()));
         }
@@ -264,9 +262,10 @@ mod tests {
             owner: "o".into(),
             name: "r".into(),
         };
-        assert!(r
-            .parse_webhook("issues", "d", "s", b"{}", &repo)
-            .unwrap()
-            .is_empty());
+        assert!(
+            r.parse_webhook("issues", "d", "s", b"{}", &repo)
+                .unwrap()
+                .is_empty()
+        );
     }
 }

@@ -79,16 +79,10 @@ async fn backfill_walks_two_pages_then_terminates() {
 
     // Second poll: thread `cursor_after_p1` (with page=2) → fetches page 2
     // (3 items < per_page=50 means end-of-stream; page resets to 1).
-    let (events_p2, cursor_after_p2) = testkit::run_issues_poll_with_cursor(
-        &handle,
-        &base,
-        "o",
-        "r",
-        cursor_after_p1,
-        50,
-    )
-    .await
-    .expect("page 2 poll");
+    let (events_p2, cursor_after_p2) =
+        testkit::run_issues_poll_with_cursor(&handle, &base, "o", "r", cursor_after_p1, 50)
+            .await
+            .expect("page 2 poll");
     assert_eq!(events_p2.len(), 3);
     assert_eq!(
         cursor_after_p2.page,

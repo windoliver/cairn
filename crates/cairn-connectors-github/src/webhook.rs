@@ -79,7 +79,10 @@ mod tests {
             owner: "o".into(),
             name: "r".into(),
         };
-        assert!(matches!(dispatch(&req, "s", &repo), Err(GhError::Malformed(_))));
+        assert!(matches!(
+            dispatch(&req, "s", &repo),
+            Err(GhError::Malformed(_))
+        ));
     }
 
     #[test]

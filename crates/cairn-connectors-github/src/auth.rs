@@ -143,7 +143,9 @@ impl GitHubAuth {
         let status = resp.status();
         if !status.is_success() {
             if status.as_u16() == 401 || status.as_u16() == 403 {
-                return Err(GhError::Auth { status: status.as_u16() });
+                return Err(GhError::Auth {
+                    status: status.as_u16(),
+                });
             }
             return Err(GhError::Transient(format!(
                 "installation token fetch returned {status}"
@@ -220,14 +222,17 @@ mod tests {
     #[test]
     fn malformed_envelope_rejected() {
         let handle = CredentialHandle::from_bytes(b"{\"kind\":\"oops\"}".to_vec());
-        assert!(matches!(GitHubAuth::from_handle(&handle), Err(GhError::Malformed(_))));
+        assert!(matches!(
+            GitHubAuth::from_handle(&handle),
+            Err(GhError::Malformed(_))
+        ));
     }
 }
 
 #[cfg(test)]
 mod app_tests {
-    use base64::engine::Engine as _;
     use super::*;
+    use base64::engine::Engine as _;
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -253,7 +258,11 @@ mod app_tests {
         assert_eq!(json["iss"], "42");
         let iat = json["iat"].as_i64().unwrap();
         let exp = json["exp"].as_i64().unwrap();
-        assert_eq!(exp - iat, 600, "iat..exp window is 600 seconds (9 + 1 min slack)");
+        assert_eq!(
+            exp - iat,
+            600,
+            "iat..exp window is 600 seconds (9 + 1 min slack)"
+        );
     }
 
     #[tokio::test]
@@ -262,12 +271,10 @@ mod app_tests {
 
         Mock::given(method("POST"))
             .and(path("/app/installations/67890/access_tokens"))
-            .respond_with(
-                ResponseTemplate::new(201).set_body_json(serde_json::json!({
-                    "token": "ghs_installtoken",
-                    "expires_at": "2099-01-01T00:00:00Z",
-                })),
-            )
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                "token": "ghs_installtoken",
+                "expires_at": "2099-01-01T00:00:00Z",
+            })))
             .expect(1) // must be called exactly once across both bearer() calls
             .mount(&server)
             .await;
@@ -285,7 +292,10 @@ mod app_tests {
         let base = url::Url::parse(&server.uri()).unwrap();
 
         let tok1 = auth.bearer(&http, &base).await.expect("first bearer");
-        let tok2 = auth.bearer(&http, &base).await.expect("second bearer cached");
+        let tok2 = auth
+            .bearer(&http, &base)
+            .await
+            .expect("second bearer cached");
         assert_eq!(tok1, "ghs_installtoken");
         assert_eq!(tok2, "ghs_installtoken");
         // Mock's .expect(1) verifies caching at drop time.

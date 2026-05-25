@@ -17,10 +17,7 @@ fn req(event: &str, delivery: &str, body: &[u8]) -> WebhookRequest {
         headers: vec![
             ("X-GitHub-Event".into(), event.into()),
             ("X-GitHub-Delivery".into(), delivery.into()),
-            (
-                "X-Hub-Signature-256".into(),
-                "sha256=abc123deadbeef".into(),
-            ),
+            ("X-Hub-Signature-256".into(), "sha256=abc123deadbeef".into()),
         ],
     }
 }
