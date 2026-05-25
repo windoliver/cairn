@@ -132,10 +132,15 @@ schema file under `crates/cairn-idl/schema/` was changed without an
 accompanying ADR amendment, **and** no `x-cairn-deprecated` markers were
 added or removed since the previous release without a CHANGELOG entry.
 
-**Failure:** `contract-drift` is red. Inspect the failing test
-(`wire_compat_v1`, `capability_matrix_v1`, or `mcp_conformance`); if the
-change is intended and additive, regenerate fixtures per the test's
-inline guidance. If the change is breaking, **stop**: file a v2 design
+**Failure:** `contract-drift` is red. Inspect the failing step
+(`cairn-codegen --check`, `cairn-docgen --check`, `wire_compat_v1`,
+`capability_matrix_v1`, the per-surface status / parity snapshots,
+or the SDK transport filter test); if the change is intended and
+additive, follow the snapshot-accept recipe in
+[MCP Semver Policy](mcp-semver-policy.md) ("Adding a capability" /
+"Adding an optional field"). The MCP envelope conformance suite
+(`mcp_conformance`) ships in the regular `test` job — verify that's
+green too. If the change is breaking, **stop**: file a v2 design
 issue and follow the procedure in
 [MCP Semver Policy](mcp-semver-policy.md).
 

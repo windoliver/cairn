@@ -46,7 +46,7 @@ on any un-advertised code (brief §8.0.a).
 | `forget` modes | `cairn.mcp.v1.forget.record`, `.session`, `.scope` | frozen v1.0 |
 | Consolidation tiers | `cairn.mcp.v1.summarize.rolling`, `.reflection`, `.rem`, `.deep` | frozen v1.0 |
 | Extension namespaces | `cairn.admin.v1.*` | frozen v1.0 |
-| Extension namespaces | `cairn.aggregate.v1.*`, `cairn.federation.v1.*`, `cairn.sessiontree.v1.*` | independent (per-namespace) |
+| Extension namespaces | `cairn.aggregate.v1.*`, `cairn.coord.v1.*`, `cairn.federation.v1.*`, `cairn.sessiontree.v1.*` | independent (per-namespace) |
 | Sensors | `cairn.sensors.v1.<sensor>` (local + remote) | sensors namespace (independent) |
 
 Stability tiers and the freeze rules are governed by

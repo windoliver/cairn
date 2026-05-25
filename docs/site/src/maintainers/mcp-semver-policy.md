@@ -29,6 +29,7 @@ NOT frozen under `cairn.mcp.v1` — each carries its own
 `<namespace>.v1` semver:
 
 - `cairn.aggregate.v1` (ships v0.2)
+- `cairn.coord.v1` (ships v0.3)
 - `cairn.federation.v1` (ships v0.3)
 - `cairn.sessiontree.v1` (ships v0.3)
 
@@ -44,15 +45,32 @@ for the exhaustive list.
 3. Update the corresponding row in [Capability Matrix](../reference/capability-matrix.md)
    and the `REMEDIATION` table in `cairn-core::status::REMEDIATION` if the
    code can be returned in a `CapabilityUnavailable.data.remediation` hint.
-4. Re-run codegen: `cargo run -p cairn-idl --bin cairn-codegen` and commit
-   the snapshot deltas.
+4. Re-run codegen: `cargo run -p cairn-idl --bin cairn-codegen`.
+5. Accept the wire-compat snapshot updates. The fingerprint over every
+   contract file (`crates/cairn-idl/tests/snapshots/`) will change
+   because `capabilities.json` changed:
+   ```bash
+   cargo nextest run -p cairn-idl --test wire_compat_v1   # expect FAIL
+   cargo insta review    # review the diff — must show ONLY the new code
+   cargo insta accept    # accept after review
+   cargo nextest run -p cairn-idl --test wire_compat_v1   # expect PASS
+   ```
+6. Same for the capability-matrix advertise snapshot:
+   ```bash
+   cargo nextest run -p cairn-core --test capability_matrix_v1
+   ```
+7. Commit the schema change, regenerated code, and accepted snapshots
+   together. `contract-drift` should now be green.
 
 ## Adding an optional field (additive, no version bump)
 
-1. Add the field as `Option<T>` in the IDL.
-2. Mark it `#[serde(default)]` (codegen does this automatically — verify).
-3. Re-run codegen; commit the snapshot deltas.
-4. The `contract-drift` job will pass because the change is additive.
+1. Add the field as `Option<T>` in the IDL (`#[serde(default)]` is
+   auto-emitted by codegen for `Optional` fields — see
+   `cairn-idl::codegen::emit_sdk`).
+2. Re-run codegen: `cargo run -p cairn-idl --bin cairn-codegen`.
+3. The wire-compat fingerprint will change because the verb schema file
+   changed. Follow steps 5–7 of "Adding a capability" above to review
+   and accept the snapshot deltas, then commit.
 
 ## Proposing a breaking change
 
@@ -75,16 +93,26 @@ reshape) do **not** edit `crates/cairn-idl/schema/`. Instead:
 The release-blocking gate is the **`contract-drift` CI job**
 (`.github/workflows/ci.yml`). It runs:
 
-| Test | Catches |
+| Step | Catches |
 |------|---------|
-| `crates/cairn-idl/tests/wire_compat_v1.rs` | Any edit to a contract file (manifest, envelope, errors, capabilities, extensions, common, prelude, verbs, plugin). |
+| `cairn-codegen --check` | IDL ↔ generated-code drift. |
+| `cairn-docgen --check` | IDL ↔ generated-docs drift. |
+| `crates/cairn-idl/tests/wire_compat_v1.rs` | Any edit to a contract file (manifest, envelope, errors, capabilities, extensions, common, prelude, verbs, plugin). Uses insta snapshots over a SHA256 fingerprint + per-file bytes. |
 | `crates/cairn-core/tests/capability_matrix_v1.rs` | Over- or under-advertise drift from `cairn-core::status::advertise`. |
-| `crates/cairn-mcp/tests/mcp_conformance.rs` | Envelope-shape drift; missing happy-path coverage. |
+| `crates/cairn-cli/tests/status_snapshot_insta.rs` | Default + degraded `cairn status` surfaces drifted. |
+| `crates/cairn-cli/tests/sdk_cli_parity.rs` | CLI ↔ SDK signature drift. |
+| `crates/cairn-sdk/tests/surface.rs` | SDK transport capability filter drift. |
+| `crates/cairn-mcp/tests/init_status_parity.rs` | MCP `initialize` ↔ `status` drift. |
 
-A red `contract-drift` means **stop and reconcile**. Re-running
-`cargo run -p cairn-idl --bin cairn-codegen` to regenerate snapshots
-is the right move only if the change is intended and additive. If it
-is breaking, follow the "Proposing a breaking change" section instead.
+The full MCP envelope conformance replay
+(`crates/cairn-mcp/tests/mcp_conformance.rs`) ships separately as part
+of the standard `test` jobs. Both gates are required by branch
+protection.
+
+A red `contract-drift` means **stop and reconcile**. If the change is
+intended and additive, follow the recipe in "Adding a capability" or
+"Adding an optional field" above (which includes the snapshot-accept
+step). If it is breaking, follow "Proposing a breaking change" instead.
 
 ## Cross-references
 

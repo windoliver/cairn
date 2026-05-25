@@ -57,6 +57,7 @@ requires `cairn.mcp.v2`.
 ### 2. NOT frozen under `cairn.mcp.v1`
 
 - `cairn.aggregate.v1` (ships v0.2) — independent semver.
+- `cairn.coord.v1` (ships v0.3) — independent semver.
 - `cairn.federation.v1` (ships v0.3) — independent semver.
 - `cairn.sessiontree.v1` (ships v0.3) — independent semver.
 
@@ -109,10 +110,14 @@ The following changes are **breaking** and trigger a v2 cut:
 3. **Window.** Minimum two minor releases between the announcement and
    v2 cutover.
 4. **Cut.** `cairn.mcp.v2` ships in a separate
-   `crates/cairn-idl/schema-v2/` directory with its own manifest;
-   `cairn mcp` advertises both contracts in `status.contract` (the field
-   becomes an array during the deprecation window); clients pin via the
-   `contract` field on every envelope.
+   `crates/cairn-idl/schema-v2/` directory with its own manifest. The
+   v1 `status.contract` field stays a scalar `cairn.mcp.v1` (mutating it
+   would itself be breaking per §4). v2 negotiation rides on an additive
+   `supported_contracts: ["cairn.mcp.v1", "cairn.mcp.v2"]` field added
+   to the `status` response — older v1 clients ignore it per §3.
+   `cairn mcp` dispatches v1 vs v2 verbs by the inbound envelope's
+   `contract` value; clients that wish to negotiate to v2 pin the
+   contract on every envelope they send.
 5. **Retire.** After the deprecation window plus one full minor release
    past v2 cutover, `cairn.mcp.v1` retirement ships as a separate major
    Cairn release.
@@ -135,20 +140,32 @@ The following changes are **breaking** and trigger a v2 cut:
 
 The release-blocking enforcement mechanism is the existing
 **`contract-drift` CI job** (added in
-[#98](https://github.com/windoliver/cairn/issues/98)). It runs:
+[#98](https://github.com/windoliver/cairn/issues/98)). Per
+`.github/workflows/ci.yml` it runs:
 
-- `crates/cairn-idl/tests/wire_compat_v1.rs` — SHA256 fingerprint of
-  every contract file (manifest + envelope + errors + capabilities +
-  extensions + common + prelude + verbs + plugin) plus an exact-equality
-  check on `index.json#x-cairn-files`.
+- `cairn-codegen --check` and `cairn-docgen --check` (no IDL or doc drift).
+- `crates/cairn-idl/tests/wire_compat_v1.rs` — insta snapshot of the
+  SHA256 fingerprint over every contract file (manifest + envelope +
+  errors + capabilities + extensions + common + prelude + verbs +
+  plugin), plus per-file snapshots and an exact-equality check on
+  `index.json#x-cairn-files`.
 - `crates/cairn-core/tests/capability_matrix_v1.rs` —
   `HashSet<Capabilities>` equality against `advertise()` for five
   scenario configurations.
-- `crates/cairn-mcp/tests/mcp_conformance.rs` — envelope-replay over
-  canonical fixtures; gap-fill happy-path coverage for every v0.1 verb.
+- `crates/cairn-cli/tests/status_snapshot_insta.rs`,
+  `crates/cairn-cli/tests/sdk_cli_parity.rs`,
+  `crates/cairn-sdk/tests/surface.rs`,
+  `crates/cairn-mcp/tests/init_status_parity.rs` — per-surface
+  status / parity / SDK transport filter snapshots.
 
 The job is the **v1-freeze gate** and is required on `main` for v1.0+.
 A red `contract-drift` job blocks merge regardless of other approvals.
+
+The full MCP envelope conformance replay
+(`crates/cairn-mcp/tests/mcp_conformance.rs`, landed in
+[#67](https://github.com/windoliver/cairn/issues/67)) runs as part of
+the standard `test` jobs — it's a separate gate, not part of
+`contract-drift`. Both are required by branch protection.
 
 ## Consequences
 
