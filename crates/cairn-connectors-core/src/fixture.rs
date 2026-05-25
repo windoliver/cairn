@@ -144,13 +144,22 @@ fn sample_event() -> ConnectorEvent {
 
 /// Build a minimal [`ConsentGrant`] covering the fixture connector.
 ///
+/// The `manifest_hash` is computed from [`DEFAULT_MANIFEST`] so that the
+/// framework's hash-stability check in `process_event` passes as long as the
+/// connector's manifest has not drifted since the grant was issued.
+///
 /// Used by integration tests that need a pre-populated consent journal entry
 /// without calling `ConnectorRegistry::enable`.
 #[must_use]
 pub fn default_grant() -> ConsentGrant {
+    // Compute the hash from the canonical fixture manifest so the framework's
+    // manifest-drift check (brief §14) passes in tests that use this helper.
+    let manifest_hash = ConnectorManifest::parse_toml(DEFAULT_MANIFEST)
+        .expect("invariant: DEFAULT_MANIFEST must be valid TOML")
+        .hash();
     ConsentGrant::new(
         "fixture",
-        "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+        manifest_hash,
         BTreeSet::from(["note".to_string(), "comment".to_string()]),
         vec!["project:*".to_string()],
         1_700_000_000,

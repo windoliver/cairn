@@ -57,6 +57,9 @@ enum ConnectorState {
     Disabled,
     /// Connector is enabled and has a live consent grant.
     Enabled {
+        /// Full consent grant stored at enable-time. Used to verify
+        /// manifest-hash stability and to check `allowed_labels` on every emit.
+        grant: ConsentGrant,
         /// Opaque consent-grant id returned by [`ConnectorConsentJournal::put_grant`].
         grant_id: ConsentGrantId,
     },
@@ -170,13 +173,13 @@ impl ConnectorRegistry {
 
         let grant_id = self
             .consent
-            .put_grant(grant)
+            .put_grant(grant.clone())
             .await
             .map_err(ConnectorError::fatal_msg)?;
 
         entry
             .state
-            .store(Arc::new(ConnectorState::Enabled { grant_id }));
+            .store(Arc::new(ConnectorState::Enabled { grant, grant_id }));
 
         // Lazily spawn a poll task if the connector supports polling.
         // see #[cfg(any(test, feature = "fixture"))] block in T18 for poll_now
@@ -234,7 +237,7 @@ impl ConnectorRegistry {
             .ok_or_else(|| ConnectorError::fatal_msg(format!("unknown connector {name}")))?;
 
         let state = (**entry.state.load()).clone();
-        if let ConnectorState::Enabled { grant_id } = state {
+        if let ConnectorState::Enabled { grant_id, .. } = state {
             self.consent
                 .revoke(&grant_id)
                 .await
@@ -343,14 +346,41 @@ async fn process_event(
     //    We read from the shared ArcSwap (not a stale snapshot) so a
     //    concurrent `disable()` call is visible immediately.
     let current_state = (**state.load()).clone();
-    if matches!(current_state, ConnectorState::Disabled) {
-        return Err(ConnectorError::fatal_msg(format!(
-            "connector {} is Disabled; cannot process events",
-            event.connector
-        )));
+    let grant = match current_state {
+        ConnectorState::Disabled => {
+            return Err(ConnectorError::fatal_msg(format!(
+                "connector {} is Disabled; cannot process events",
+                event.connector
+            )));
+        }
+        ConnectorState::Enabled { grant, .. } => grant,
+    };
+
+    // 1a. Manifest-hash check (brief §14 "no silent scope widening").
+    //     If the connector's manifest was changed after the consent grant was
+    //     issued, the hash will differ and the emit is rejected immediately.
+    let current_hash = connector.manifest().hash();
+    if current_hash != grant.manifest_hash {
+        return Err(ConnectorError::ConsentRevoked {
+            connector: event.connector.clone(),
+        });
     }
 
-    // 2. Label allow-list check (brief §9.1 / manifest constraint).
+    // 1b. Grant label check — every emitted label must appear in the
+    //     grant's `allowed_labels` (the set the user approved at enable time).
+    //     This is checked before the manifest allow-list so that a grant
+    //     narrower than the manifest is also enforced.
+    for label in &event.labels {
+        if !grant.allowed_labels.contains(label) {
+            return Err(ConnectorError::UndeclaredLabel {
+                label: label.clone(),
+            });
+        }
+    }
+
+    // 2. Label allow-list check against manifest (defense-in-depth,
+    //    brief §9.1). Same check, from the manifest's perspective, in case
+    //    the grant was wider than the manifest somehow.
     for label in &event.labels {
         if !connector.manifest().allowed_label(label) {
             return Err(ConnectorError::UndeclaredLabel {
@@ -585,10 +615,14 @@ max_depth = 10
     }
 
     /// Build a minimal `ConsentGrant` for the stub connector.
+    ///
+    /// Uses the real manifest hash so tests that exercise `process_event`
+    /// beyond step 0 do not fail on the manifest-drift check.
     fn stub_grant() -> ConsentGrant {
+        let manifest_hash = stub_manifest().hash();
         ConsentGrant::new(
             "stub",
-            "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+            manifest_hash,
             BTreeSet::from(["note".to_string()]),
             vec!["project:*".to_string()],
             1_700_000_000,
@@ -755,6 +789,7 @@ max_depth = 10
         // The connector is enabled so state is not the failure cause.
         let state: Arc<ArcSwap<ConnectorState>> =
             Arc::new(ArcSwap::from_pointee(ConnectorState::Enabled {
+                grant: stub_grant(),
                 grant_id: ConsentGrantId::new("gnt:stub:test"),
             }));
 

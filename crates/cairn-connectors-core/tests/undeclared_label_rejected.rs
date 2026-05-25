@@ -200,13 +200,17 @@ async fn undeclared_label_rejected_at_framework_boundary() {
 
 /// Build a minimal `ConsentGrant` for the evil connector.
 ///
-/// Mirrors `default_grant()` in the fixture module but covers the "evil"
-/// connector name and its allowed label set.
+/// Uses the real manifest hash so the framework's manifest-drift check passes,
+/// allowing the test to reach the label-allow-list gate (the actual failure
+/// being tested).
 fn default_grant_for_evil() -> cairn_core::contract::connector_consent::ConsentGrant {
     use std::collections::BTreeSet;
+    let manifest_hash = ConnectorManifest::parse_toml(EVIL_MANIFEST)
+        .expect("invariant: EVIL_MANIFEST must be valid TOML")
+        .hash();
     cairn_core::contract::connector_consent::ConsentGrant::new(
         "evil",
-        "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+        manifest_hash,
         BTreeSet::from(["note".to_string()]),
         vec!["project:*".to_string()],
         1_700_000_000,
