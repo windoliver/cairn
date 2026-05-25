@@ -87,6 +87,7 @@ wiremock = { workspace = true }
 assert_cmd = "2"
 predicates = "3"
 tokio = { workspace = true }
+ureq = { version = "2", default-features = false }
 
 [lints]
 workspace = true
