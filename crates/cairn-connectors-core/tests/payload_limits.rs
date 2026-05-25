@@ -201,10 +201,20 @@ impl ConnectorPlugin for StrictConnector {
 // ---------------------------------------------------------------------------
 
 /// An event whose `scope.kind` is not listed in `scopes.declared` must be
-/// rejected with `MalformedPayload`.
+/// rejected before reaching `PipelineEmit::emit`.
+///
+/// With the Finding F grant `scope_patterns` check now running BEFORE
+/// `validate_against_manifest`, an out-of-scope event may be caught by either:
+/// - `ConsentRevoked` (Finding F: scope key doesn't match any grant pattern).
+/// - `MalformedPayload` (original Fix 4 check: scope kind not in manifest).
+///
+/// Both are acceptable — what matters is that the event is blocked.
 #[tokio::test]
 async fn event_with_undeclared_scope_rejected() {
     // Manifest only declares kind="project"; emit kind="channel".
+    // Grant has scope_patterns = ["project:*"], so "channel:#general" is
+    // rejected by Finding F's consent scope-pattern check (ConsentRevoked)
+    // before Fix 4's validate_against_manifest can fire (MalformedPayload).
     let event = base_event(
         ConnectorScope::new("channel", "#general"),
         ConnectorPayload::Json {
@@ -230,9 +240,14 @@ async fn event_with_undeclared_scope_rejected() {
         .await
         .expect_err("poll_now must fail for undeclared scope");
 
+    // Accept either error: Finding F catches it first with ConsentRevoked;
+    // if the grant scope_patterns were wider, Fix 4's MalformedPayload would fire.
     assert!(
-        matches!(err, ConnectorError::MalformedPayload(ref msg) if msg.contains("scope")),
-        "expected MalformedPayload about scope, got {err:?}",
+        matches!(
+            err,
+            ConnectorError::MalformedPayload(ref msg) if msg.contains("scope")
+        ) || matches!(err, ConnectorError::ConsentRevoked { .. }),
+        "expected MalformedPayload(scope) or ConsentRevoked, got {err:?}",
     );
 
     reg.shutdown().await;

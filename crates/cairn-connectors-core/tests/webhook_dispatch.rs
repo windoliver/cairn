@@ -306,6 +306,98 @@ async fn webhook_post_rejects_missing_credential() {
     reg.shutdown().await;
 }
 
+/// Sending the exact same signed webhook request twice must return 204 on the
+/// first delivery and 409 Conflict on the second (replay guard, Finding I).
+///
+/// The in-memory replay set uses `(connector_name, signature_id)` as the key.
+/// Since the signature is HMAC-SHA256 of a fixed body+secret, the same request
+/// will always produce the same `signature_id` and therefore be recognised as a
+/// replay.
+#[tokio::test]
+async fn replay_returns_conflict() {
+    let capturer = Arc::new(Capturer::default());
+    let creds = Arc::new(InMemoryCredentialStore::default());
+    provision_secret(&creds).await;
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let mut reg = ConnectorRegistry::builder()
+        .credentials(
+            Arc::clone(&creds) as Arc<dyn cairn_connectors_core::credential::CredentialStore>
+        )
+        .consent(Arc::new(
+            cairn_connectors_core::fixture::AcceptAllConsent::default(),
+        ))
+        .emit(capturer.clone() as Arc<dyn PipelineEmit>)
+        .spool_root(tmp.path().to_path_buf())
+        .build();
+
+    reg.register(cairn_connectors_core::fixture::FixtureConnector::with_default_manifest())
+        .expect("register must succeed");
+    reg.enable("fixture", cairn_connectors_core::fixture::default_grant())
+        .await
+        .expect("enable must succeed");
+
+    let router = reg.webhook_router();
+
+    let body = serde_json::json!({"replay": "test"}).to_string();
+    let sig = hex_hmac_sha256(WEBHOOK_SECRET, body.as_bytes());
+
+    // First delivery — must succeed with 204.
+    let req1 = Request::builder()
+        .method(Method::POST)
+        .uri("/webhooks/fixture")
+        .header("content-type", "application/json")
+        .header(SIG_HEADER, &sig)
+        .body(Body::from(body.clone()))
+        .expect("request 1 must build");
+
+    let resp1 = router
+        .clone()
+        .oneshot(req1)
+        .await
+        .expect("router must respond to first request");
+    assert_eq!(
+        resp1.status(),
+        StatusCode::NO_CONTENT,
+        "first delivery of a valid webhook must return 204",
+    );
+
+    // Second delivery with the EXACT same signature — must return 409 Conflict.
+    let req2 = Request::builder()
+        .method(Method::POST)
+        .uri("/webhooks/fixture")
+        .header("content-type", "application/json")
+        .header(SIG_HEADER, &sig)
+        .body(Body::from(body.clone()))
+        .expect("request 2 must build");
+
+    let resp2 = router
+        .clone()
+        .oneshot(req2)
+        .await
+        .expect("router must respond to second request");
+    assert_eq!(
+        resp2.status(),
+        StatusCode::CONFLICT,
+        "replayed webhook (same signature) must return 409 Conflict",
+    );
+
+    // Only one event must have been emitted (the first delivery).
+    {
+        let events = capturer
+            .0
+            .lock()
+            .expect("invariant: Capturer mutex unpoisoned");
+        assert_eq!(
+            events.len(),
+            1,
+            "exactly 1 event must be emitted; the replay must not produce a second event",
+        );
+    }
+
+    reg.shutdown().await;
+}
+
 /// A registered connector that has NOT been enabled must not get a webhook
 /// route. Requests to its path must return 404.
 #[tokio::test]

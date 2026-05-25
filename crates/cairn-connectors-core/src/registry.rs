@@ -26,9 +26,9 @@
 //!
 //! Issue #130, brief §9.1 source sensors, §19 v0.3.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
 use arc_swap::ArcSwap;
@@ -44,7 +44,7 @@ use cairn_core::contract::connector_consent::{
 use cairn_core::domain::capture::PayloadHash;
 
 use crate::connector::{Connector, ConnectorPlugin, PollContext, WebhookContext};
-use crate::credential::{CredentialHandle, CredentialStore};
+use crate::credential::CredentialStore;
 use crate::emit::{PipelineEmit, build_capture_event};
 use crate::error::ConnectorError;
 use crate::event::ConnectorPayload;
@@ -131,6 +131,16 @@ struct WebhookEntryState {
     signature_header: String,
 }
 
+/// Maximum number of `(connector_name, signature_id)` pairs held in the
+/// in-memory replay set before the oldest entries are evicted.
+///
+/// At 10 000 entries the set occupies roughly 1–2 MiB of memory (two
+/// `String`s per entry, typical connector name ~16 B, SHA-256 hex ~64 B).
+/// This bound is intentionally conservative — the set is process-local and
+/// is not durable across restarts (issue #131 will persist it in the consent
+/// journal).
+const REPLAY_SET_MAX: usize = 10_000;
+
 /// State for all webhook routes, shared via `Arc` across `axum::State`.
 struct RegistryWebhookState {
     /// Per-connector handler data, keyed by connector name.
@@ -143,6 +153,23 @@ struct RegistryWebhookState {
     emit: Arc<dyn PipelineEmit>,
     /// Root directory for spooling connector payload bytes (Finding H).
     spool_root: PathBuf,
+    /// In-memory replay guard (Finding I).
+    ///
+    /// Keyed by `(connector_name, signature_id)` — two strings whose
+    /// concatenation uniquely identifies a webhook delivery. Insertion
+    /// order is tracked by `replay_order` so the oldest entries can be
+    /// evicted when the set grows beyond [`REPLAY_SET_MAX`].
+    ///
+    /// **Durability**: this set is in-memory only; a process restart forgets
+    /// all seen signatures. Issue #131 will persist the replay set in the
+    /// consent journal.
+    ///
+    /// Uses `std::sync::Mutex` because the critical section is
+    /// synchronous (no `.await` inside the lock).
+    replay_seen: StdMutex<HashSet<(String, String)>>,
+    /// Insertion-order queue for evicting the oldest entries from `replay_seen`
+    /// when the set reaches [`REPLAY_SET_MAX`].
+    replay_order: StdMutex<VecDeque<(String, String)>>,
 }
 
 // ---------------------------------------------------------------------------
@@ -320,6 +347,9 @@ impl ConnectorRegistry {
     /// - The connector name is not registered.
     /// - The connector is already enabled (call `disable` first).
     /// - The consent journal fails to write the grant.
+    // The function body is long because it captures many variables into the
+    // spawned poll task closure. Extracting a helper would not improve clarity.
+    #[allow(clippy::too_many_lines)]
     pub async fn enable(&mut self, name: &str, grant: ConsentGrant) -> Result<(), ConnectorError> {
         let entry = self
             .entries
@@ -356,6 +386,9 @@ impl ConnectorRegistry {
             let cursor_ref = Arc::clone(&entry.cursor);
             let spool_root = self.spool_root.clone();
             let name_owned = name.to_owned();
+            // Clone the credential store into the task closure so each poll
+            // tick can resolve the connector's current credential (Finding H).
+            let credentials_store = Arc::clone(&self.credentials);
             let interval = Duration::from_mins(5);
             // Clone the token for the task; store the original for cancel.
             let task_token = entry_token.clone();
@@ -382,12 +415,56 @@ impl ConnectorRegistry {
                             // Read the current cursor before calling poll so
                             // the upstream window starts from where we left off.
                             let last_cursor = cursor_ref.lock().await.clone();
+
+                            // Load the connector's credential from the store
+                            // (Finding H). The convention key is
+                            // `"connector/<name>"` — adapters look up their
+                            // token using `cx.credentials.bytes()`.
+                            //
+                            // If the credential is absent or expired, skip this
+                            // tick (do NOT advance the cursor) and warn. Auth
+                            // expiry is transient — the operator can re-provision
+                            // and the next tick will retry. We deliberately do
+                            // NOT treat this as Fatal so the registry stays
+                            // running while the operator fixes the credential.
+                            let cred_key = format!("connector/{name_owned}");
+                            let credential = match credentials_store.get(&cred_key).await {
+                                Ok(c) => c,
+                                Err(ConnectorError::AuthExpired { .. }) => {
+                                    tracing::warn!(
+                                        connector = %name_owned,
+                                        "poll tick skipped: credential absent or expired; \
+                                         re-provision via CredentialStore::put(\"{cred_key}\", …)",
+                                    );
+                                    continue;
+                                }
+                                Err(err) => {
+                                    tracing::warn!(
+                                        connector = %name_owned,
+                                        ?err,
+                                        "poll tick skipped: credential lookup error",
+                                    );
+                                    continue;
+                                }
+                            };
+
                             let cx = PollContext {
-                                credentials: Arc::new(CredentialHandle::empty()),
+                                credentials: credential,
                                 last_cursor,
                                 budget_remaining_items: u32::MAX,
+                                cancel: task_token.clone(),
                             };
-                            match connector.poll(&cx).await {
+                            // Wrap the adapter poll call so that a concurrent
+                            // `disable()` can cancel and return without waiting
+                            // for the full upstream HTTP round-trip to finish.
+                            // When the token fires the task exits the loop via
+                            // the top-level select arm on the next iteration;
+                            // returning here immediately lets `disable()` complete.
+                            let poll_result = tokio::select! {
+                                () = task_token.cancelled() => break,
+                                r = connector.poll(&cx) => r,
+                            };
+                            match poll_result {
                                 Ok(outcome) => {
                                     // Track whether all events were accepted.
                                     let mut all_accepted = true;
@@ -564,6 +641,8 @@ impl ConnectorRegistry {
             consent: Arc::clone(&self.consent),
             emit: Arc::clone(&self.emit),
             spool_root: self.spool_root.clone(),
+            replay_seen: StdMutex::new(HashSet::new()),
+            replay_order: StdMutex::new(VecDeque::new()),
         });
 
         let mut wr = WebhookRouter::new();
@@ -613,10 +692,32 @@ impl ConnectorRegistry {
             .ok_or_else(|| ConnectorError::fatal_msg(format!("unknown connector {name}")))?;
 
         let last_cursor = entry.cursor.lock().await.clone();
+
+        // Load credential from the store (Finding H). Fall back to an empty
+        // handle when the key is not provisioned (test / fixture connectors that
+        // do not require authentication).
+        let cred_key = format!("connector/{name}");
+        let credentials = match self.credentials.get(&cred_key).await {
+            Ok(c) => c,
+            Err(ConnectorError::AuthExpired { .. }) => {
+                // Not provisioned — use empty handle (consistent with the
+                // pre-Finding-H behaviour; fixture connectors don't need auth).
+                Arc::new(crate::credential::CredentialHandle::empty())
+            }
+            Err(err) => {
+                return Err(ConnectorError::fatal_msg(format!(
+                    "poll_now: credential lookup error for connector {name}: {err}"
+                )));
+            }
+        };
+
         let cx = crate::connector::PollContext {
-            credentials: Arc::new(crate::credential::CredentialHandle::empty()),
+            credentials,
             last_cursor,
             budget_remaining_items: u32::MAX,
+            // poll_now is synchronous / test-driven; supply a never-cancelled
+            // token so adapters that read cx.cancel do not see a spurious signal.
+            cancel: CancellationToken::new(),
         };
         let outcome = entry.connector.poll(&cx).await?;
         for event in outcome.events {
@@ -784,6 +885,46 @@ async fn spool_bytes(
 }
 
 // ---------------------------------------------------------------------------
+// Scope-pattern glob helper (Finding F)
+// ---------------------------------------------------------------------------
+
+/// Match `scope_key` (a `"<kind>:<value>"` string) against one `pattern`
+/// from a consent grant's `scope_patterns` list.
+///
+/// Pattern semantics (simple glob, P0 — same rules as
+/// [`ConnectorManifest::scope_matches`]):
+///
+/// Patterns are in the same `"<kind>:<value_pattern>"` wire form as scope keys.
+///
+/// - `"*"` at the top level matches any scope key (bare wildcard).
+/// - `"<kind>:*"` matches any scope key whose `kind` segment equals `<kind>`,
+///   regardless of the `value` segment.
+/// - `"<kind>:<exact>"` requires both the `kind` and the `value` to match exactly.
+///
+/// Richer globs (prefix wildcards, `?`) are deferred to P1.
+fn scope_pattern_matches(pattern: &str, scope_key: &str) -> bool {
+    if pattern == "*" {
+        return true;
+    }
+    // Split pattern into kind and value_pattern on the first ':'.
+    if let Some((p_kind, p_value)) = pattern.split_once(':') {
+        // Split scope_key into kind and value on the first ':'.
+        if let Some((s_kind, s_value)) = scope_key.split_once(':') {
+            if p_kind != s_kind {
+                return false;
+            }
+            p_value == "*" || p_value == s_value
+        } else {
+            // scope_key has no ':' — cannot match a kind:value pattern.
+            false
+        }
+    } else {
+        // pattern has no ':' — require exact match.
+        pattern == scope_key
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Shared event-processing helper
 // ---------------------------------------------------------------------------
 
@@ -817,6 +958,10 @@ async fn spool_bytes(
 /// 7. Call `emit.emit(captured)` to hand the event to the pipeline.
 ///
 /// [`ConnectorEvent`]: crate::event::ConnectorEvent
+// The validation + redaction + spool + emit pipeline has many sequential
+// steps; splitting it would break the logical narrative without improving
+// readability.
+#[allow(clippy::too_many_lines)]
 async fn process_event(
     event: crate::event::ConnectorEvent,
     connector: &Arc<dyn Connector>,
@@ -883,8 +1028,24 @@ async fn process_event(
         }
     }
 
-    // 3. Consent gate — fail closed (brief §14).
+    // 1c. Grant scope_patterns check (Finding F) — enforce that the event's
+    //     scope key matches at least one of the patterns the user approved at
+    //     grant time. This is checked BEFORE the consent journal lookup so a
+    //     narrow grant (e.g. `scope_patterns = ["project:specific"]`) is
+    //     enforced even when the journal returns `Granted` for the wider
+    //     manifest scope.
     let scope_key = event.scope.lookup_key();
+    let scope_allowed_by_grant = grant
+        .scope_patterns
+        .iter()
+        .any(|p| scope_pattern_matches(p, &scope_key));
+    if !scope_allowed_by_grant {
+        return Err(ConnectorError::ConsentRevoked {
+            connector: event.connector.clone(),
+        });
+    }
+
+    // 3. Consent gate — fail closed (brief §14).
     let lookup_result = consent
         .lookup(&event.connector, &scope_key)
         .await
@@ -899,11 +1060,11 @@ async fn process_event(
     // 3b. Payload validation — scope, MIME, size (brief §130 Fix 4).
     event.validate_against_manifest(connector.manifest())?;
 
-    // 3c. Rate-limit charge — deduct one item token from the per-scope bucket
-    //     (Finding A). Scopes are registered lazily on first event so the
-    //     registry does not need to enumerate them up front.
+    // Ensure the per-scope rate-limit bucket exists before the emit path so
+    // that `charge` (called after a successful emit) can locate the bucket.
+    // The actual token deduction happens AFTER `emit.emit` succeeds so that
+    // transient downstream failures do not permanently consume budget.
     rate_limit.ensure_scope(&scope_key);
-    rate_limit.charge(&scope_key, 1)?;
 
     // 4. Redact PII before the event crosses any boundary (brief §5.2 + §14).
     //    Use the manifest's max_depth limit for the JSON walker.
@@ -987,7 +1148,18 @@ async fn process_event(
     )?;
 
     // 7. Hand the event to the downstream pipeline.
-    emit.emit(captured).await
+    //
+    // Budget is charged on successful emit only (Finding G). Transient
+    // downstream failures do not consume a token; the event will be retried
+    // on the next tick and the budget remains available.
+    emit.emit(captured).await?;
+
+    // 8. Rate-limit charge — deduct one item token from the per-scope bucket.
+    //    Done AFTER a successful emit so that failed emits do not permanently
+    //    reduce available budget.
+    rate_limit.charge(&scope_key, 1)?;
+
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -1020,6 +1192,10 @@ async fn process_event(
 /// | `process_event` auth error             | 401    |
 /// | `process_event` other                  | 422    |
 /// | All events accepted                    | 204    |
+// The handler has many sequential gates (size, auth, HMAC, replay, ingest,
+// process_event). Each gate is a single concern; extracting them would just
+// add indirection without reducing complexity.
+#[allow(clippy::too_many_lines)]
 async fn handle_webhook(
     state: Arc<RegistryWebhookState>,
     connector_name: String,
@@ -1083,9 +1259,42 @@ async fn handle_webhook(
         body: body_bytes.to_vec(),
         headers: raw_headers,
     };
-    if verify_hmac_sha256(&webhook_req, &entry.signature_header, credential.bytes()).is_err() {
+    let Ok(sig_id) = verify_hmac_sha256(&webhook_req, &entry.signature_header, credential.bytes())
+    else {
         return resp(StatusCode::UNAUTHORIZED, "signature mismatch");
-    }
+    };
+
+    // Replay guard (Finding I): reject duplicate deliveries by checking the
+    // `(connector_name, signature_id)` pair against the in-memory replay set.
+    //
+    // The set is bounded at [`REPLAY_SET_MAX`] entries; when full the oldest
+    // entry is evicted (FIFO order). This is a best-effort guard — it is NOT
+    // durable across restarts. Issue #131 will add persistence.
+    {
+        // SAFETY: we never hold this lock across an `.await` point.
+        let mut seen = state
+            .replay_seen
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut order = state
+            .replay_order
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+
+        let key = (connector_name.clone(), sig_id.0.clone());
+        if seen.contains(&key) {
+            return resp(StatusCode::CONFLICT, "duplicate webhook delivery");
+        }
+
+        // Evict the oldest entry when we hit the cap.
+        if seen.len() >= REPLAY_SET_MAX
+            && let Some(oldest) = order.pop_front()
+        {
+            seen.remove(&oldest);
+        }
+        seen.insert(key.clone());
+        order.push_back(key);
+    } // lock released here
 
     // Build WebhookContext and call ingest_webhook (Finding G §5-6).
     let webhook_cx = WebhookContext {
