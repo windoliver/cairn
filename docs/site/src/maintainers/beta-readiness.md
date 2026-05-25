@@ -113,7 +113,35 @@ for the target phase.
 **Pass:** the advertised set equals the matrix row exactly. No extras, no omissions.
 **Failure:** the runtime advertises a capability the matrix says shouldn't ship yet (or vice versa). Reconcile in `cairn-core::status::advertise` plus the matching `wiring::*_WIRED` constant per CLAUDE.md §4 invariant 6.
 
-### 10. Migration guide review (manual)
+### 10. Contract freeze verified (manual)
+
+Verify the `contract-drift` CI job is green on the release SHA. From the
+PR or the release branch:
+
+```bash
+gh run list --branch "$(git rev-parse --abbrev-ref HEAD)" \
+  --workflow ci.yml --limit 1 --json conclusion,jobs \
+  | jq '.[0].jobs[] | select(.name == "contract-drift") | .conclusion'
+```
+
+Expected: `"success"`.
+
+**Pass:** `contract-drift` succeeded on the release SHA, **and** no
+schema file under `crates/cairn-idl/schema/` was changed without an
+accompanying ADR amendment, **and** no `x-cairn-deprecated` markers were
+added or removed since the previous release without a CHANGELOG entry.
+
+**Failure:** `contract-drift` is red. Inspect the failing test
+(`wire_compat_v1`, `capability_matrix_v1`, or `mcp_conformance`); if the
+change is intended and additive, regenerate fixtures per the test's
+inline guidance. If the change is breaking, **stop**: file a v2 design
+issue and follow the procedure in
+[MCP Semver Policy](mcp-semver-policy.md).
+
+See [ADR 0004](https://github.com/windoliver/cairn/blob/main/docs/design/decisions/0004-mcp-v1-semver-freeze.md)
+for the authoritative freeze rules.
+
+### 11. Migration guide review (manual)
 
 Open the per-pair migration guide for the target phase
 ([usage/migration/](../usage/migration/index.md)). Verify all seven sections
@@ -126,7 +154,7 @@ the runtime now advertises.
 **Failure:** a capability advertised by `cairn status` has no migration
 content. Fill the section.
 
-### 11. Known limitations (manual)
+### 12. Known limitations (manual)
 
 Review [status.md](../status.md) "Stubbed or pending" against the current
 capability matrix. Anything still stubbed must be either:
@@ -134,7 +162,7 @@ capability matrix. Anything still stubbed must be either:
 - removed from the stubbed list (because it now ships), or
 - explicitly called out in the release notes as a known limitation.
 
-### 12. Cassette replay (manual)
+### 13. Cassette replay (manual)
 
 ```bash
 cargo run -p cairn-bench --release --locked -- coherence run --gate beta
@@ -143,7 +171,7 @@ cargo run -p cairn-bench --release --locked -- coherence run --gate beta
 **Pass:** all replay cassettes from #136 pass under the beta gate; all five
 coherence metrics (per #137) meet their floors.
 
-### 13. Privacy posture (manual)
+### 14. Privacy posture (manual)
 
 Exercise the consent + forget round-trip on a real session:
 
@@ -157,7 +185,7 @@ cairn search "test memory" --json | jq '.hits | length'   # 0
 Spot-check `.cairn/consent.log` for the `delete` entry. Verify the presidio
 scrub pass redacts at least one PII pattern in a known-PII fixture.
 
-### 14. Release notes draft (manual)
+### 15. Release notes draft (manual)
 
 Populate the per-phase release notes template. Cross-link every capability
 delta to the matching row in the [migration guide](../usage/migration/index.md).
@@ -178,6 +206,7 @@ delta to the matching row in the [migration guide](../usage/migration/index.md).
 | Install smoke | The verb that printed `fail: <verb>` and the temp vault path. |
 | Package dry-run | The crate that failed; check its `Cargo.toml` for missing version metadata. |
 | Capability sync (gate 9) | `cairn-core::status::advertise` and the `wiring::*_WIRED` constants. |
+| Contract freeze (gate 10) | `cairn-core::status::advertise`, `crates/cairn-idl/schema/`, ADR 0004. |
 
 ## Sign-off block
 
@@ -195,11 +224,12 @@ Copy this block into the release issue:
 - [ ] Gate 7: install smoke
 - [ ] Gate 8: package dry-run
 - [ ] Gate 9: capability sync (manual)
-- [ ] Gate 10: migration guide review (manual)
-- [ ] Gate 11: known limitations (manual)
-- [ ] Gate 12: cassette replay (manual)
-- [ ] Gate 13: privacy posture (manual)
-- [ ] Gate 14: release notes draft (manual)
+- [ ] Gate 10: contract freeze verified (manual)
+- [ ] Gate 11: migration guide review (manual)
+- [ ] Gate 12: known limitations (manual)
+- [ ] Gate 13: cassette replay (manual)
+- [ ] Gate 14: privacy posture (manual)
+- [ ] Gate 15: release notes draft (manual)
 
 Reviewed by: <maintainer>
 Date: <YYYY-MM-DD>
