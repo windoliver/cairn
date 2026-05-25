@@ -194,11 +194,22 @@ fn run_install(args: &ArgMatches, explicit_vault: Option<&str>) -> ExitCode {
             if any_unhealthy {
                 println!();
                 println!(
-                    "note: at least one candidate is not promotable. Inspect each \
-                     candidate's gate-report.json for details; some gates (LLM eval) \
-                     are intentionally Blocked when running install without an LLM \
-                     provider configured."
+                    "warning: at least one installed candidate is NOT promotable.\n\
+                     The vault has been modified (archive bytes are durable on\n\
+                     disk) but no candidate that fails re-gate may be promoted.\n\
+                     Inspect each candidate's gate-report.json for details.\n\
+                     Note: some gates (LLM eval) are intentionally Blocked when\n\
+                     running install without an LLM provider configured —\n\
+                     enable LLM credentials and re-run install if you need them\n\
+                     to pass."
                 );
+                // Round-15 hardening: any unhealthy candidate must surface
+                // a non-zero exit so automation does not treat partial
+                // installs as success. The vault changes are intentionally
+                // NOT rolled back — installed bytes remain on disk for
+                // operator inspection — but the exit code reflects the
+                // re-gate outcome.
+                return ExitCode::from(1);
             }
             ExitCode::SUCCESS
         }

@@ -391,6 +391,36 @@ impl SkillifyPipeline {
                 e.to_string(),
             ))
         })?;
+
+        // Round-15 hardening: the returned spec.source_refs must be
+        // SET-EQUAL to the payload's source_record_ids. Without this an
+        // LLM could fabricate a skill grounded in records that weren't
+        // in the request, or silently drop the actual evidence — the
+        // promotion plan's source_events would then point at records
+        // the spec doesn't reflect.
+        //
+        // TODO(#128-followup): full grounding requires passing the
+        // actual source-record CONTENT (trace turns / failed call /
+        // success criteria) to the LLM, which needs a MemoryStore
+        // dependency on SkillifyPipeline. That's a contract change
+        // tracked separately. The set-equality check is the minimum
+        // safety net that doesn't require new dependencies.
+        let payload_set: std::collections::BTreeSet<&str> = payload
+            .source_record_ids
+            .iter()
+            .map(String::as_str)
+            .collect();
+        let spec_set: std::collections::BTreeSet<&str> =
+            spec.source_refs.iter().map(String::as_str).collect();
+        if payload_set != spec_set {
+            return Err(SkillifyPipelineError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "spec.source_refs {spec_set:?} does not match payload.source_record_ids {payload_set:?}"
+                ),
+            )));
+        }
+
         Ok(spec)
     }
 

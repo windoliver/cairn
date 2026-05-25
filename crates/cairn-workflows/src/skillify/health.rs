@@ -90,6 +90,52 @@ impl HealthCheckRunner {
             report.gates.push(result.clone().into_gate());
         }
 
+        // Round-15 hardening: after gate execution, re-verify every
+        // declared artifact's bytes against its content_sha256. The main
+        // pipeline does this before Promote (a self-mutating script
+        // appending to $0 would otherwise drift the manifest); health
+        // check needs the SAME guarantee or installs/health-checks can
+        // record a passing report for bytes that no longer match the
+        // manifest, making `candidate_ready` trust stale evidence.
+        for artifact in &bundle.artifacts {
+            let artifact_path = candidate_dir.join(&artifact.path);
+            let bytes = match std::fs::read(&artifact_path) {
+                Ok(b) => b,
+                Err(e) => {
+                    let msg = format!("post-gate verify: missing artifact {}: {e}", artifact.path);
+                    regressions.push(format!("post_gate_verify[{}]", artifact.path));
+                    report
+                        .gates
+                        .push(cairn_core::pipeline::skillify::SkillifyGate {
+                            name: format!("post_gate_verify[{}]", artifact.path),
+                            status: SkillifyGateStatus::Failed,
+                            message: Some(msg),
+                        });
+                    continue;
+                }
+            };
+            let actual = {
+                use sha2::Digest as _;
+                let mut h = sha2::Sha256::new();
+                h.update(&bytes);
+                format!("sha256:{:x}", h.finalize())
+            };
+            if actual != artifact.content_sha256 {
+                let msg = format!(
+                    "post-gate verify: {} hash drifted (expected {}, got {actual})",
+                    artifact.path, artifact.content_sha256
+                );
+                regressions.push(format!("post_gate_verify[{}]", artifact.path));
+                report
+                    .gates
+                    .push(cairn_core::pipeline::skillify::SkillifyGate {
+                        name: format!("post_gate_verify[{}]", artifact.path),
+                        status: SkillifyGateStatus::Failed,
+                        message: Some(msg),
+                    });
+            }
+        }
+
         std::fs::write(
             candidate_dir.join("gate-report.json"),
             serde_json::to_vec_pretty(&report)?,
