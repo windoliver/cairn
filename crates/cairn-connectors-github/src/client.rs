@@ -112,7 +112,48 @@ impl GhClient {
         }
         let code = status.as_u16();
         match code {
-            401 | 403 => Err(GhError::Auth { status: code }),
+            401 => Err(GhError::Auth { status: 401 }),
+            403 => {
+                // GitHub returns 403 for both authentication failures AND
+                // primary rate-limit exhaustion.  Distinguish the two cases by
+                // inspecting the `X-RateLimit-Remaining` and `Retry-After`
+                // headers:
+                //
+                // - `X-RateLimit-Remaining: 0` → primary rate limit hit.
+                // - `Retry-After` present → secondary rate limit (abuse
+                //   detection) — also treat as `RateLimited`.
+                // - Neither header set → genuine auth failure (`Auth`).
+                //
+                // Mapping a rate-limit 403 to `Auth` causes the connector to
+                // surface an `AuthExpired` error and skip all subsequent poll
+                // ticks until the operator re-provisions credentials — even
+                // though the token is fine and the limit will reset on its own.
+                let remaining = resp
+                    .headers()
+                    .get("X-RateLimit-Remaining")
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(|s| s.parse::<u32>().ok());
+                let retry_after_hdr = resp
+                    .headers()
+                    .get("Retry-After")
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(|s| s.parse::<u64>().ok())
+                    .map(Duration::from_secs);
+
+                if remaining == Some(0) || retry_after_hdr.is_some() {
+                    // Rate-limited 403: compute the back-off duration.
+                    let retry_after = retry_after_hdr.unwrap_or_else(|| {
+                        self.rate_state
+                            .load()
+                            .hint_if_low(u32::MAX)
+                            .unwrap_or(Duration::from_mins(1))
+                    });
+                    Err(GhError::RateLimited { retry_after })
+                } else {
+                    // Auth failure: token is invalid or lacks the required scope.
+                    Err(GhError::Auth { status: 403 })
+                }
+            }
             429 => {
                 let retry_after = resp
                     .headers()
@@ -230,5 +271,89 @@ mod tests {
             .await
             .expect_err("401 must error");
         assert!(matches!(err, GhError::Auth { status: 401 }));
+    }
+
+    /// Fix 5: a 403 with `X-RateLimit-Remaining: 0` must map to `RateLimited`,
+    /// not `Auth`.  Without this fix the connector surfaces `AuthExpired` and
+    /// skips all subsequent poll ticks even though the token is still valid.
+    #[tokio::test]
+    async fn status_403_with_zero_remaining_maps_to_rate_limited() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/x"))
+            .respond_with(
+                ResponseTemplate::new(403)
+                    .insert_header("X-RateLimit-Remaining", "0")
+                    .insert_header("X-RateLimit-Reset", "9999999999")
+                    .set_body_json(serde_json::json!({
+                        "message": "API rate limit exceeded",
+                        "documentation_url": "https://docs.github.com/en/rest/overview/rate-limiting"
+                    })),
+            )
+            .mount(&server)
+            .await;
+
+        let client = GhClient::new(pat_auth("p"), Url::parse(&server.uri()).unwrap());
+        let err = client
+            .get_json::<serde_json::Value>("/x", &[])
+            .await
+            .expect_err("403+zero-remaining must error");
+        match err {
+            GhError::RateLimited { .. } => {}
+            other => panic!("expected RateLimited, got {other:?}"),
+        }
+    }
+
+    /// Fix 5: a plain 403 without rate-limit headers must still map to `Auth`.
+    #[tokio::test]
+    async fn status_403_without_rate_limit_headers_maps_to_auth() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/x"))
+            .respond_with(ResponseTemplate::new(403).set_body_json(serde_json::json!({
+                "message": "Must have push access to repository"
+            })))
+            .mount(&server)
+            .await;
+
+        let client = GhClient::new(pat_auth("p"), Url::parse(&server.uri()).unwrap());
+        let err = client
+            .get_json::<serde_json::Value>("/x", &[])
+            .await
+            .expect_err("403 without rate-limit headers must error");
+        assert!(
+            matches!(err, GhError::Auth { status: 403 }),
+            "expected Auth {{status: 403}}, got {err:?}"
+        );
+    }
+
+    /// Fix 5: a 403 with `Retry-After` (secondary/abuse rate limit) must also
+    /// map to `RateLimited`.
+    #[tokio::test]
+    async fn status_403_with_retry_after_maps_to_rate_limited() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/x"))
+            .respond_with(
+                ResponseTemplate::new(403)
+                    .insert_header("Retry-After", "60")
+                    .set_body_json(serde_json::json!({
+                        "message": "You have exceeded a secondary rate limit"
+                    })),
+            )
+            .mount(&server)
+            .await;
+
+        let client = GhClient::new(pat_auth("p"), Url::parse(&server.uri()).unwrap());
+        let err = client
+            .get_json::<serde_json::Value>("/x", &[])
+            .await
+            .expect_err("403+Retry-After must error");
+        match err {
+            GhError::RateLimited { retry_after } => {
+                assert_eq!(retry_after, Duration::from_mins(1));
+            }
+            other => panic!("expected RateLimited, got {other:?}"),
+        }
     }
 }

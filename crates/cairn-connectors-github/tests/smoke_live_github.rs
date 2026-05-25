@@ -56,10 +56,15 @@ async fn live_issues_poll_parses_real_wire_shape() {
         "expected at least one issue event from {TEST_OWNER}/{TEST_REPO}"
     );
     for e in &events {
-        assert!(e.labels.contains("kind:issue"), "every event has kind:issue label");
+        assert!(
+            e.labels.contains("kind:issue"),
+            "every event has kind:issue label"
+        );
         assert_eq!(e.source_ref.kind, "issue");
         assert!(
-            e.source_ref.system_id.starts_with("gh:octocat/hello-world#"),
+            e.source_ref
+                .system_id
+                .starts_with("gh:octocat/hello-world#"),
             "system_id starts with gh:owner/repo#: got {}",
             e.source_ref.system_id
         );
@@ -112,7 +117,11 @@ async fn live_commits_poll_parses_real_wire_shape() {
     for e in &events {
         assert!(e.labels.contains("kind:commit"));
         assert_eq!(e.source_ref.kind, "commit");
-        assert!(e.source_ref.system_id.starts_with("gh:octocat/hello-world@"));
+        assert!(
+            e.source_ref
+                .system_id
+                .starts_with("gh:octocat/hello-world@")
+        );
     }
     assert!(cursor.last_sha.is_some(), "cursor recorded a sha");
 }
