@@ -36,15 +36,17 @@ cargo run -p cairn-cli --locked -- plugins verify
 `plugins verify` exits 0 in default mode when tier-2 P0 cases are pending. Add
 `--strict` when you want pending tier-2 cases to fail with exit code 69.
 
-The memory verbs are present for interface stability, but they are not storage
-backed yet:
+The memory verbs are wired through to the SQLite-backed store:
 
 ```bash
 cargo run -p cairn-cli --locked -- search --json
 ```
 
-Today those verbs return an `Internal`/aborted response rather than silently
-pretending memory work succeeded.
+Modes the active configuration does not advertise (for example `semantic` /
+`hybrid` when `search.local_embeddings: false`) fail closed with
+`CapabilityUnavailable` rather than silently degrading. See the
+[capability matrix](reference/capability-matrix.md) for what each release
+ships.
 
 Install the agent skill bundle when you want a shell-oriented harness to learn
 the Cairn contract and conventions:
