@@ -127,6 +127,23 @@ fn run_install(args: &ArgMatches, explicit_vault: Option<&str>) -> ExitCode {
     let vault_root = resolve_vault(explicit_vault);
     let cairn_version = env!("CARGO_PKG_VERSION");
 
+    // Round-20: build the tokio runtime BEFORE staging the install. If
+    // the runtime build fails after staging, the early-return drops
+    // the InstallTransaction without commit/rollback and the vault is
+    // left mutated (new candidates in place, originals stranded under
+    // `.bak-*`). Building runtime first means a failure here happens
+    // before any disk mutation.
+    let runtime = match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(rt) => rt,
+        Err(e) => {
+            eprintln!("cairn skillpack install: tokio runtime: {e}");
+            return ExitCode::from(1);
+        }
+    };
+
     match cairn_workflows::skillify::packer::unpack_archive_staged(
         archive_path,
         &vault_root,
@@ -155,16 +172,6 @@ fn run_install(args: &ArgMatches, explicit_vault: Option<&str>) -> ExitCode {
             // which is the right behavior for an unauthenticated CLI
             // install. Operators who want LLM eval should run a separate
             // workflow with LLM credentials.
-            let runtime = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build();
-            let runtime = match runtime {
-                Ok(rt) => rt,
-                Err(e) => {
-                    eprintln!("cairn skillpack install: tokio runtime: {e}");
-                    return ExitCode::from(1);
-                }
-            };
             let health =
                 cairn_workflows::skillify::health::HealthCheckRunner::new(vault_root.clone(), None);
 

@@ -12,7 +12,9 @@
 
 use std::path::Path;
 
-use cairn_core::pipeline::skillify::{SkillLintSkill, SkillLintSnapshot, SkillifyGateReport};
+use cairn_core::pipeline::skillify::{
+    SkillArtifactKind, SkillLintSkill, SkillLintSnapshot, SkillifyGateReport, SkillifyGateStatus,
+};
 
 /// Build a [`SkillLintSnapshot`] from the vault filesystem.
 ///
@@ -69,13 +71,21 @@ pub fn build_vault_snapshot(
             if candidate_id.starts_with('.') {
                 continue;
             }
-            // Round 19 hardening: only candidates whose gate report says
-            // `ready_for_promotion()` participate in collision detection.
-            // A failed/blocked candidate must not "claim" a lane against
-            // siblings — letting it do so masks the real collision (the
-            // promotion-ready candidate would falsely appear conflicted
-            // with a doomed-to-rollback sibling).
-            if !candidate_is_promotion_ready(&candidate_dir) {
+            // Round 20 hardening (supersedes Round 19): a candidate
+            // participates in collision detection when it is either
+            // in-flight (no gate report yet, or the materialize-time
+            // stub marker) OR promotion-ready. Candidates whose gates
+            // actually ran and failed are excluded — those will
+            // rollback and must not block siblings.
+            //
+            // Including in-flight candidates closes a concurrent-run
+            // race: two pipeline invocations for the same lane would
+            // each materialize then build a snapshot; with only
+            // promotion-ready siblings in scope, neither would see the
+            // other and both would pass collision gates. With in-flight
+            // included, the snapshots cross-detect and at least one
+            // (typically both, conservatively) fails collision.
+            if !candidate_in_collision_scope(&candidate_dir) {
                 continue;
             }
             let skills_dir = candidate_dir.join("bundle/skills");
@@ -96,22 +106,54 @@ pub fn build_vault_snapshot(
     Ok(SkillLintSnapshot { skills })
 }
 
-/// Returns true when the candidate at `candidate_dir` has a parseable
-/// `gate-report.json` that satisfies the promotion-readiness predicate.
-///
-/// Returns false when the report is missing, unreadable, malformed, or
-/// reports any required gate as not-passed-or-skipped. Fail-closed: a
-/// candidate without a verifiable green gate report cannot influence
-/// sibling collision checks.
-fn candidate_is_promotion_ready(candidate_dir: &Path) -> bool {
+/// Returns true when a candidate should participate in collision
+/// detection. Includes promotion-ready candidates, in-flight candidates
+/// (no gate report yet, or the materialize-time stub marker), and
+/// candidates with malformed gate reports (fail-safe: prefer
+/// over-reporting collisions to under-reporting). Excludes only
+/// candidates whose gates actually ran and at least one failed.
+fn candidate_in_collision_scope(candidate_dir: &Path) -> bool {
     let report_path = candidate_dir.join("gate-report.json");
     let Ok(bytes) = std::fs::read(&report_path) else {
-        return false;
+        // No gate report yet — in-flight materialization. Include so
+        // a concurrent same-lane sibling's snapshot sees us.
+        return true;
     };
     let Ok(report) = serde_json::from_slice::<SkillifyGateReport>(&bytes) else {
-        return false;
+        // Malformed report — include for safety (false-positive
+        // collisions are recoverable; false negatives let two same-
+        // lane candidates both pass and corrupt the vault).
+        return true;
     };
-    report.ready_for_promotion()
+    if report.ready_for_promotion() {
+        return true;
+    }
+    // Distinguish the materialize-time stub (all required gates
+    // Blocked, no messages, no extra gates) from an actually-failed
+    // run. The stub means gates have not yet executed, so the
+    // candidate is still in-flight.
+    is_materialize_stub_marker(&report)
+}
+
+/// True when the report matches the shape `materialize_bundle` writes
+/// at candidate creation: every required gate is present, each is
+/// `Blocked` with no message, and there are no extra gates.
+fn is_materialize_stub_marker(report: &SkillifyGateReport) -> bool {
+    let required = SkillArtifactKind::required();
+    if report.gates.len() != required.len() {
+        return false;
+    }
+    let required_names: std::collections::HashSet<&str> =
+        required.iter().map(|k| k.as_str()).collect();
+    let report_names: std::collections::HashSet<&str> =
+        report.gates.iter().map(|g| g.name.as_str()).collect();
+    if required_names != report_names {
+        return false;
+    }
+    report
+        .gates
+        .iter()
+        .all(|g| matches!(g.status, SkillifyGateStatus::Blocked) && g.message.is_none())
 }
 
 fn read_live_skill(vault_root: &Path, path: &Path) -> std::io::Result<SkillLintSkill> {
@@ -427,38 +469,11 @@ mod tests {
     }
 
     #[test]
-    fn failed_candidate_is_excluded_from_snapshot() {
-        // Round-19 regression: a candidate whose gate report is not
-        // promotion-ready must not appear in the collision snapshot. The
-        // failed candidate's lane/triggers belong to it only until it
-        // rolls back; treating them as live collisions would falsely
-        // block sibling promotions.
-        let temp = TempDir::new().unwrap();
-        write_md(
-            &temp
-                .path()
-                .join(".cairn/evolution/skillify/skc_good/bundle/skills/skill_good.md"),
-            "---\nname: good\nlane: test.shared\ntriggers: [\"go\"]\nuses: scripts/g.sh\nfiles_to: wiki/g/\n---\nBody.",
-        );
-        write_gate_report(temp.path(), "skc_good", true);
-
-        write_md(
-            &temp
-                .path()
-                .join(".cairn/evolution/skillify/skc_failed/bundle/skills/skill_failed.md"),
-            "---\nname: failed\nlane: test.shared\ntriggers: [\"go\"]\nuses: scripts/f.sh\nfiles_to: wiki/g/\n---\nBody.",
-        );
-        write_gate_report(temp.path(), "skc_failed", false);
-
-        let snap = build_vault_snapshot(temp.path(), None).unwrap();
-        assert_eq!(snap.skills.len(), 1, "failed candidate must be excluded");
-        assert_eq!(snap.skills[0].skill_id, "skc_good");
-    }
-
-    #[test]
-    fn candidate_without_gate_report_is_excluded() {
-        // Fail-closed: a candidate missing its gate report has not yet
-        // been gated and cannot influence collision detection.
+    fn candidate_without_gate_report_is_included_as_in_flight() {
+        // Round-20 fix: a candidate missing its gate report is treated
+        // as in-flight (materializing but not yet gated) and MUST
+        // appear in the snapshot so concurrent same-lane siblings
+        // detect the collision before both pass gates.
         let temp = TempDir::new().unwrap();
         write_md(
             &temp
@@ -468,11 +483,15 @@ mod tests {
         );
         // Intentionally no gate-report.json.
         let snap = build_vault_snapshot(temp.path(), None).unwrap();
-        assert!(snap.skills.is_empty());
+        assert_eq!(snap.skills.len(), 1, "in-flight candidate must be visible");
+        assert_eq!(snap.skills[0].skill_id, "skc_ungated");
     }
 
     #[test]
-    fn candidate_with_malformed_gate_report_is_excluded() {
+    fn candidate_with_malformed_gate_report_is_included_for_safety() {
+        // Fail-safe: a malformed gate report is treated as in-flight
+        // rather than silently dropped — false-positive collisions are
+        // recoverable, false-negative collisions corrupt the vault.
         let temp = TempDir::new().unwrap();
         write_md(
             &temp
@@ -485,7 +504,98 @@ mod tests {
             .join(".cairn/evolution/skillify/skc_bad/gate-report.json");
         std::fs::write(&report_path, b"not valid json").unwrap();
         let snap = build_vault_snapshot(temp.path(), None).unwrap();
-        assert!(snap.skills.is_empty());
+        assert_eq!(snap.skills.len(), 1);
+        assert_eq!(snap.skills[0].skill_id, "skc_bad");
+    }
+
+    #[test]
+    fn candidate_with_materialize_stub_marker_is_included() {
+        // Round-20 race regression: the materialize-time stub marker
+        // (all-Blocked, no messages) means gates have not yet run.
+        // The candidate must remain in the snapshot so concurrent
+        // same-lane siblings cross-detect the collision.
+        let temp = TempDir::new().unwrap();
+        write_md(
+            &temp
+                .path()
+                .join(".cairn/evolution/skillify/skc_stub/bundle/skills/skill_stub.md"),
+            "---\nname: stub\nlane: test.s\ntriggers: [\"s\"]\nuses: scripts/s.sh\nfiles_to: wiki/s/\n---\nBody.",
+        );
+        // materialize_bundle writes this exact shape: every required
+        // gate present, all Blocked, no messages.
+        write_gate_report(temp.path(), "skc_stub", false);
+        let snap = build_vault_snapshot(temp.path(), None).unwrap();
+        assert_eq!(snap.skills.len(), 1, "in-flight stub marker must be visible");
+    }
+
+    #[test]
+    fn concurrent_same_lane_candidates_cross_detect() {
+        // Round-20 hardening: two pipeline invocations for the same
+        // lane each materialize a candidate. Before either runs gates,
+        // each builds a snapshot excluding itself. The snapshot MUST
+        // surface the sibling so collision gates can fail at least one.
+        let temp = TempDir::new().unwrap();
+        write_md(
+            &temp
+                .path()
+                .join(".cairn/evolution/skillify/skc_race_a/bundle/skills/skill_race_a.md"),
+            "---\nname: race-a\nlane: test.shared\ntriggers: [\"go\"]\nuses: scripts/a.sh\nfiles_to: wiki/g/\n---\nBody.",
+        );
+        write_md(
+            &temp
+                .path()
+                .join(".cairn/evolution/skillify/skc_race_b/bundle/skills/skill_race_b.md"),
+            "---\nname: race-b\nlane: test.shared\ntriggers: [\"go\"]\nuses: scripts/b.sh\nfiles_to: wiki/g/\n---\nBody.",
+        );
+        // Both candidates carry only the materialize-time stub marker.
+        write_gate_report(temp.path(), "skc_race_a", false);
+        write_gate_report(temp.path(), "skc_race_b", false);
+
+        // From A's perspective: B must be visible.
+        let snap_a = build_vault_snapshot(temp.path(), Some("skc_race_a")).unwrap();
+        assert_eq!(snap_a.skills.len(), 1);
+        assert_eq!(snap_a.skills[0].skill_id, "skc_race_b");
+
+        // And vice-versa.
+        let snap_b = build_vault_snapshot(temp.path(), Some("skc_race_b")).unwrap();
+        assert_eq!(snap_b.skills.len(), 1);
+        assert_eq!(snap_b.skills[0].skill_id, "skc_race_a");
+    }
+
+    #[test]
+    fn gated_failed_candidate_is_excluded_from_snapshot() {
+        // Round-19 preserved: a candidate whose gates RAN and at
+        // least one returned a real failure (with a message) is
+        // excluded so the doomed candidate does not block its
+        // promotion-ready sibling.
+        let temp = TempDir::new().unwrap();
+        write_md(
+            &temp
+                .path()
+                .join(".cairn/evolution/skillify/skc_dead/bundle/skills/skill_dead.md"),
+            "---\nname: dead\nlane: test.d\ntriggers: [\"d\"]\nuses: scripts/d.sh\nfiles_to: wiki/d/\n---\nBody.",
+        );
+        // Construct a report that looks like real gate output (has a
+        // message), not the all-Blocked stub marker.
+        let report = SkillifyGateReport {
+            candidate_id: "skc_dead".to_owned(),
+            gates: SkillArtifactKind::required()
+                .iter()
+                .map(|kind| SkillifyGate {
+                    name: kind.as_str().to_owned(),
+                    status: SkillifyGateStatus::Failed,
+                    message: Some("real failure".to_owned()),
+                })
+                .collect(),
+        };
+        let path = temp
+            .path()
+            .join(".cairn/evolution/skillify/skc_dead/gate-report.json");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, serde_json::to_vec_pretty(&report).unwrap()).unwrap();
+
+        let snap = build_vault_snapshot(temp.path(), None).unwrap();
+        assert!(snap.skills.is_empty(), "gated-failed candidate must be excluded");
     }
 
     #[test]
