@@ -35,6 +35,7 @@ url = { workspace = true }
 [dev-dependencies]
 base64 = { workspace = true }
 cairn-connectors-core = { workspace = true, features = ["fixture"] }
+cairn-core = { workspace = true }
 insta = { workspace = true }
 proptest = { workspace = true }
 serde_json = { workspace = true }
