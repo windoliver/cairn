@@ -216,10 +216,12 @@ impl PipelineEmit for Capturer {
 #[tokio::test]
 async fn text_payload_emits_real_sha256_hash() {
     let capturer = Arc::new(Capturer::default());
+    let tmp = tempfile::tempdir().expect("tempdir");
     let mut registry = ConnectorRegistry::builder()
         .credentials(Arc::new(InMemoryCredentialStore::default()))
         .consent(Arc::new(AcceptAllConsent::default()))
         .emit(capturer.clone() as Arc<dyn PipelineEmit>)
+        .spool_root(tmp.path().to_path_buf())
         .build();
 
     registry
@@ -276,18 +278,24 @@ async fn text_payload_emits_real_sha256_hash() {
     );
 }
 
-/// A connector emitting a Binary payload must produce a `CaptureEvent` whose
-/// `payload_hash` equals the adapter-declared `sha256` field verbatim.
+/// A connector emitting a Binary payload must be accepted end-to-end, with
+/// the adapter-declared `sha256` forwarded as the `payload_hash` on the
+/// emitted `CaptureEvent` (Finding D).
+///
+/// The framework trusts the adapter-declared hash; the spool verification
+/// layer (#131) will cross-check it against the actual content at `bytes_ref`.
 #[tokio::test]
-async fn binary_payload_uses_adapter_declared_hash() {
+async fn binary_payload_uses_adapter_declared_sha256() {
     // A known 64-char lowercase hex string (sha256 of b"deadbeef").
     let declared_sha256 = format!("sha256:{}", hex::encode(Sha256::digest(b"deadbeef")));
 
     let capturer = Arc::new(Capturer::default());
+    let tmp = tempfile::tempdir().expect("tempdir");
     let mut registry = ConnectorRegistry::builder()
         .credentials(Arc::new(InMemoryCredentialStore::default()))
         .consent(Arc::new(AcceptAllConsent::default()))
         .emit(capturer.clone() as Arc<dyn PipelineEmit>)
+        .spool_root(tmp.path().to_path_buf())
         .build();
 
     registry
@@ -299,22 +307,37 @@ async fn binary_payload_uses_adapter_declared_hash() {
         .await
         .expect("enable must succeed");
 
+    // poll_now must succeed — Binary payloads use the adapter-declared sha256
+    // as the payload hash and do not require the spool verification layer
+    // (deferred to #131).
     registry
         .poll_now("binary-fixture")
         .await
-        .expect("poll_now must succeed");
+        .expect("poll_now must succeed for Binary payloads with a declared sha256");
 
     registry.shutdown().await;
 
+    // Exactly one event must reach the emit pipeline.
     let events = capturer
         .0
         .lock()
         .expect("invariant: Capturer mutex unpoisoned");
-    assert_eq!(events.len(), 1, "expected exactly one emitted CaptureEvent");
-
     assert_eq!(
-        events[0].payload_hash.as_str(),
-        declared_sha256,
-        "binary payload must use the adapter-declared sha256 verbatim"
+        events.len(),
+        1,
+        "Binary payload must produce exactly one CaptureEvent; got {events:?}"
+    );
+
+    // The emitted payload_hash must equal the adapter-declared sha256.
+    let hash = events[0].payload_hash.as_str();
+    assert_eq!(
+        hash, declared_sha256,
+        "payload_hash must equal the adapter-declared sha256 for Binary payloads"
+    );
+
+    // Must not be the all-zero placeholder.
+    assert_ne!(
+        hash, "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+        "payload_hash must not be the all-zero placeholder"
     );
 }
