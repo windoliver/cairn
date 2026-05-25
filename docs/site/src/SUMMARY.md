@@ -80,3 +80,4 @@
 - [Codegen](maintainers/codegen.md)
 - [Docs](maintainers/docs.md)
 - [CI](maintainers/ci.md)
+- [Beta Readiness](maintainers/beta-readiness.md)
