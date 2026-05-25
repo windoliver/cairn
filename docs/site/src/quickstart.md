@@ -67,3 +67,5 @@ five expected hook entries are present.
 Use the [Claude Code reference consumer guide](usage/claude-code-reference.md)
 for the full hook-loop smoke test, P0 acceptance checklist, and daily dogfood
 workflow.
+
+For what each release supports, see the [capability matrix](reference/capability-matrix.md).

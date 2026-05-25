@@ -17,5 +17,11 @@ The eight memory verbs are already in the CLI and generated references:
 `ingest`, `search`, `retrieve`, `summarize`, `assemble_hot`, `capture_trace`,
 `lint`, and `forget`. They fail closed until storage and dispatch are wired.
 
+## Phase scope
+
+The [capability matrix](reference/capability-matrix.md) is the authoritative
+view of which capability ships in which Cairn release. Concept and usage
+pages link into it rather than restating phase claims.
+
 Start with the [quickstart](quickstart.md), then use the generated
 [CLI reference](reference/generated/cli.md) for exact flags.
