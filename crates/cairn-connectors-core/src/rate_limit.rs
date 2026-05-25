@@ -139,7 +139,29 @@ impl RateLimit {
     ///
     /// - the scope was never registered, **or**
     /// - the bucket is exhausted after accounting for any refill.
+    ///
+    /// This is the legacy one-shot deduction API. For the reserve/release
+    /// pattern used by `process_event` prefer [`Self::try_reserve`] +
+    /// [`Self::refund`].
     pub fn charge(&self, scope: &str, amount: u32) -> Result<(), ConnectorError> {
+        self.try_reserve(scope, amount)
+    }
+
+    /// Reserve `amount` tokens from the named `scope`'s bucket **before**
+    /// performing the downstream operation.
+    ///
+    /// This is the first half of the reserve/release pattern used by
+    /// `process_event` (Finding K). If the downstream operation succeeds the
+    /// reservation is implicitly committed (tokens stay deducted). If it
+    /// fails, call [`Self::refund`] to restore the tokens so the event can be
+    /// retried without permanently reducing available budget.
+    ///
+    /// Semantically identical to [`Self::charge`]; provided as a separate
+    /// entry-point to make the reserve/release intent explicit at call sites.
+    ///
+    /// Returns [`ConnectorError::BudgetExceeded`] if the scope is unknown or
+    /// the bucket is exhausted.
+    pub fn try_reserve(&self, scope: &str, amount: u32) -> Result<(), ConnectorError> {
         let mut map = self.inner.lock().unwrap_or_else(|poisoned| {
             // The lock was poisoned by a panicking thread. Recovering here is
             // safe because we only read and update numeric fields; no structural
@@ -166,6 +188,31 @@ impl RateLimit {
         }
         bucket.remaining -= amount;
         Ok(())
+    }
+
+    /// Refund `amount` tokens to the named `scope`'s bucket.
+    ///
+    /// This is the release half of the reserve/release pattern (Finding K).
+    /// Call this when an operation that previously succeeded [`Self::try_reserve`]
+    /// later fails (e.g. `emit` returns an error), so the reserved tokens are
+    /// returned and the event can be retried on the next tick without
+    /// permanently reducing available budget.
+    ///
+    /// The refund is clamped at `capacity` — adding back more tokens than the
+    /// bucket can hold is silently ignored. This prevents a buggy call site
+    /// from inflating the budget beyond its configured maximum.
+    ///
+    /// If the scope was never registered this is a no-op (the refund cannot
+    /// make the budget negative, so silent discard is safe).
+    pub fn refund(&self, scope: &str, amount: u32) {
+        let mut map = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(bucket) = map.get_mut(scope) {
+            bucket.remaining = bucket.remaining.saturating_add(amount).min(bucket.capacity);
+        }
+        // Unknown scope: no-op (see doc-comment).
     }
 }
 

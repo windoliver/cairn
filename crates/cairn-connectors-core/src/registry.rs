@@ -989,11 +989,17 @@ fn sanitize_path_component(component: &str) -> Result<&str, ConnectorError> {
 ///    requirement; return [`ConnectorError::ConsentRevoked`] if the journal
 ///    returns `Revoked` or an error.
 /// 4. Run [`RedactionPipeline::new().redact(event)`] to strip PII.
-/// 5. Spool the post-redaction bytes to `{spool_root}/connector/<name>/…` and
+/// 5. **Reserve budget (Finding K):** call `rate_limit.try_reserve` to
+///    atomically deduct one token from the per-scope bucket BEFORE emit.
+///    If the budget is exhausted, return [`ConnectorError::BudgetExceeded`]
+///    without calling `emit`. On emit failure, `rate_limit.refund` restores
+///    the reserved token so the event can be retried.
+/// 6. Spool the post-redaction bytes to `{spool_root}/connector/<name>/…` and
 ///    compute a real SHA-256 hash from those bytes (Finding H). The hash
 ///    is guaranteed to match the bytes on disk.
-/// 6. Call [`build_capture_event`] with the spooled path and real hash.
-/// 7. Call `emit.emit(captured)` to hand the event to the pipeline.
+/// 7. Call [`build_capture_event`] with the spooled path and real hash.
+/// 8. Call `emit.emit(captured)` to hand the event to the pipeline.
+///    On error, refund the budget reservation (step 5).
 ///
 /// [`ConnectorEvent`]: crate::event::ConnectorEvent
 // The validation + redaction + spool + emit pipeline has many sequential
@@ -1109,10 +1115,11 @@ async fn process_event(
     // 3b. Payload validation — scope, MIME, size (brief §130 Fix 4).
     event.validate_against_manifest(connector.manifest())?;
 
-    // Ensure the per-scope rate-limit bucket exists before the emit path so
-    // that `charge` (called after a successful emit) can locate the bucket.
-    // The actual token deduction happens AFTER `emit.emit` succeeds so that
-    // transient downstream failures do not permanently consume budget.
+    // Ensure the per-scope rate-limit bucket exists before the reservation so
+    // that `try_reserve` can locate it. The reservation itself (Finding K) is
+    // performed BEFORE `emit.emit` so that over-budget events are rejected
+    // without calling emit — preventing the duplicate-delivery loop that the
+    // old post-emit charge created.
     rate_limit.ensure_scope(&scope_key);
 
     // 4. Redact PII before the event crosses any boundary (brief §5.2 + §14).
@@ -1203,17 +1210,25 @@ async fn process_event(
         payload_hash,
     )?;
 
-    // 7. Hand the event to the downstream pipeline.
+    // 7. Reserve one budget token BEFORE calling emit (Finding K).
     //
-    // Budget is charged on successful emit only (Finding G). Transient
-    // downstream failures do not consume a token; the event will be retried
-    // on the next tick and the budget remains available.
-    emit.emit(captured).await?;
+    //    Reserve/release pattern:
+    //    - `try_reserve` atomically deducts the token now. Over-budget events
+    //      are rejected here — before `emit` — so the provider never receives
+    //      the event and the cursor is NOT advanced, preventing the duplicate-
+    //      delivery loop that the old post-emit charge caused.
+    //    - If `emit` succeeds the reservation is implicitly committed.
+    //    - If `emit` fails, `refund` restores the token so the event can be
+    //      retried on the next poll tick without permanently reducing budget.
+    rate_limit.try_reserve(&scope_key, 1)?;
 
-    // 8. Rate-limit charge — deduct one item token from the per-scope bucket.
-    //    Done AFTER a successful emit so that failed emits do not permanently
-    //    reduce available budget.
-    rate_limit.charge(&scope_key, 1)?;
+    // 8. Hand the event to the downstream pipeline.
+    //    On error, refund the reservation so the budget remains available for
+    //    a retry (reserve/release pattern, Finding K).
+    if let Err(emit_err) = emit.emit(captured).await {
+        rate_limit.refund(&scope_key, 1);
+        return Err(emit_err);
+    }
 
     Ok(())
 }

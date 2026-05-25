@@ -345,22 +345,17 @@ impl ConnectorPlugin for SiblingConnector {
 // Tests
 // ---------------------------------------------------------------------------
 
-/// The registry must charge the `RateLimit` for every event and reject with
-/// `BudgetExceeded` once the per-hour item budget is exhausted.
+/// The registry must reserve the budget BEFORE emit and reject over-budget events
+/// without calling emit (Finding K — reserve/release pattern).
 ///
 /// Budget = 2, events emitted by connector = 3 (all same scope).
 ///
-/// Finding G fix: the rate-limit charge happens AFTER `emit` succeeds, so
-/// all 3 events are forwarded to the pipeline before the charge for the 3rd
-/// event fails. The token is only consumed on durable acceptance, so a
-/// transient emit failure does not permanently reduce available budget.
+/// Finding K fix: budget is reserved before `emit`. Over-budget events are
+/// rejected with `BudgetExceeded` BEFORE `emit` is called. This prevents
+/// duplicate delivery when the same window retries after a `BudgetExceeded`.
 ///
-/// Expected: all 3 events reach `emit` (count = 3); `poll_now` returns
-/// `Err(BudgetExceeded)` because the charge for the 3rd event fails after
-/// emit (budget was already exhausted by the first 2 charges).
-///
-/// `poll_now` propagates the first error it encounters, so the call returns
-/// `Err(BudgetExceeded)` after processing the 3rd event.
+/// Expected: only 2 events reach `emit` (count = 2); `poll_now` returns
+/// `Err(BudgetExceeded)` because the 3rd event cannot reserve a token.
 #[tokio::test]
 async fn registry_charges_budget_per_event() {
     // Three distinct ULIDs to ensure the events are distinct objects.
@@ -397,11 +392,138 @@ async fn registry_charges_budget_per_event() {
         "expected BudgetExceeded, got {err:?}",
     );
 
-    // All 3 events are emitted BEFORE the 3rd charge fails (Finding G fix).
+    // Finding K fix: the 3rd event is rejected BEFORE emit — only 2 events reach emit.
     let count = *emit.0.lock().expect("mutex unpoisoned");
     assert_eq!(
-        count, 3,
-        "all 3 events must reach emit; budget is charged after emit succeeds (got {count})",
+        count, 2,
+        "only events within budget must reach emit; over-budget event must be blocked before emit (got {count})",
+    );
+
+    reg.shutdown().await;
+}
+
+/// Over-budget events must not reach `emit` (Finding K).
+///
+/// Budget = 1. First `poll_now` exhausts the budget (count = 1). Second
+/// `poll_now` is rejected with `BudgetExceeded` BEFORE `emit` is called, so
+/// the `PipelineEmit` recorder count stays at 1.
+///
+/// Uses two separate `poll_now` calls rather than a single poll returning two
+/// events so the test can be expressed without defining local `impl` blocks
+/// (which trigger `clippy::items_after_statements`).
+#[tokio::test]
+async fn over_budget_event_rejected_before_emit() {
+    let emit = Arc::new(CountEmit::default());
+    let tmp = tempfile::tempdir().expect("tempdir");
+
+    let mut reg = ConnectorRegistry::builder()
+        .credentials(Arc::new(InMemoryCredentialStore::default()))
+        .consent(Arc::new(AcceptAllConsent::default()))
+        .emit(emit.clone() as Arc<dyn PipelineEmit>)
+        .spool_root(tmp.path().to_path_buf())
+        .build();
+
+    // OneItemConnector uses BUDGET_ONE_MANIFEST (budget = 1).
+    reg.register(OneItemConnector::new("01ARZ3NDEKTSV4RRFFQ69G5FA1"))
+        .expect("register must succeed");
+    reg.enable("budget-test", one_grant())
+        .await
+        .expect("enable must succeed");
+
+    // First poll — budget available; emit is called.
+    reg.poll_now("budget-test")
+        .await
+        .expect("first poll_now must succeed");
+
+    {
+        let count = *emit.0.lock().expect("mutex unpoisoned");
+        assert_eq!(count, 1, "first poll_now must emit exactly 1 event");
+    }
+
+    // Second poll — budget is now zero; emit must NOT be called.
+    let err = reg
+        .poll_now("budget-test")
+        .await
+        .expect_err("second poll_now must fail: budget exhausted");
+
+    assert!(
+        matches!(err, ConnectorError::BudgetExceeded { .. }),
+        "expected BudgetExceeded, got {err:?}",
+    );
+
+    // emit count must still be 1 — the over-budget event never reached emit.
+    let count = *emit.0.lock().expect("mutex unpoisoned");
+    assert_eq!(
+        count, 1,
+        "over-budget event must not reach emit; count must remain 1 (got {count})",
+    );
+
+    reg.shutdown().await;
+}
+
+/// A failed emit must refund the reserved budget token (Finding K).
+///
+/// Budget = 1. `FailOnceEmit` fails on the first call then succeeds.
+///
+/// Step 1: first event → emit fails → budget refunded → `poll_now` returns Transient.
+/// Step 2: disable+re-enable; same event → emit succeeds → budget consumed.
+/// Step 3: disable+re-enable; budget zero → `poll_now` returns `BudgetExceeded`.
+#[tokio::test]
+async fn failed_emit_refunds_budget() {
+    let fail_emit = Arc::new(OnceFailEmit::default());
+    let tmp = tempfile::tempdir().expect("tempdir");
+
+    // A connector that always emits the same single event.
+    let mut reg = ConnectorRegistry::builder()
+        .credentials(Arc::new(InMemoryCredentialStore::default()))
+        .consent(Arc::new(AcceptAllConsent::default()))
+        .emit(fail_emit.clone() as Arc<dyn PipelineEmit>)
+        .spool_root(tmp.path().to_path_buf())
+        .build();
+
+    reg.register(OneItemConnector::new("01ARZ3NDEKTSV4RRFFQ69G5FB1"))
+        .expect("register must succeed");
+    reg.enable("budget-test", one_grant())
+        .await
+        .expect("enable must succeed");
+
+    // Step 1: emit fails → budget must be refunded.
+    let err1 = reg
+        .poll_now("budget-test")
+        .await
+        .expect_err("first poll_now must fail because emit fails");
+    assert!(
+        matches!(err1, ConnectorError::Transient(_)),
+        "expected Transient (from failed emit), got {err1:?}",
+    );
+
+    // Step 2: disable + re-enable; emit now succeeds; budget still available thanks to refund.
+    reg.disable("budget-test")
+        .await
+        .expect("disable must succeed");
+    reg.enable("budget-test", one_grant())
+        .await
+        .expect("re-enable must succeed");
+
+    reg.poll_now("budget-test")
+        .await
+        .expect("second poll_now must succeed: emit succeeds and budget was refunded");
+
+    // Step 3: budget exhausted after step 2 success.
+    reg.disable("budget-test")
+        .await
+        .expect("disable must succeed");
+    reg.enable("budget-test", one_grant())
+        .await
+        .expect("third enable must succeed");
+
+    let err3 = reg
+        .poll_now("budget-test")
+        .await
+        .expect_err("third poll_now must fail because budget is now exhausted");
+    assert!(
+        matches!(err3, ConnectorError::BudgetExceeded { .. }),
+        "expected BudgetExceeded on third attempt, got {err3:?}",
     );
 
     reg.shutdown().await;
