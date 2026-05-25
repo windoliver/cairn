@@ -1,0 +1,11 @@
+---
+source: crates/cairn-bench/src/coherence/report.rs
+expression: rendered
+---
+coherence gate=beta  cassettes=3  actions=21
+  recall_precision       1.000  pass  (9/9)   Δ=+0.005
+  stale_avoidance        1.000  pass  (3/3)   Δ=+0.000
+  summary_quality        1.000  pass  (3/3)   Δ=+0.020
+  search_usefulness      1.000  pass  (3/3)   Δ=-0.005
+  forget_completeness    1.000  pass  (3/3)   Δ=+0.000
+  overall                1.000  PASS

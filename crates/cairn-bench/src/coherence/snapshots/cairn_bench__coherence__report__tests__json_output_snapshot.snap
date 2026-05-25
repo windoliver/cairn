@@ -1,0 +1,49 @@
+---
+source: crates/cairn-bench/src/coherence/report.rs
+expression: rendered
+---
+{
+  "actions": 21,
+  "cassettes": 3,
+  "deltas": {
+    "forget_completeness": 0.0,
+    "recall_precision": 0.005,
+    "search_usefulness": -0.005,
+    "stale_avoidance": 0.0,
+    "summary_quality": 0.02
+  },
+  "failures": [],
+  "gate": "beta",
+  "metrics": {
+    "forget_completeness": {
+      "passed": 3,
+      "score": 1.0,
+      "total": 3
+    },
+    "recall_precision": {
+      "passed": 9,
+      "score": 1.0,
+      "total": 9
+    },
+    "search_usefulness": {
+      "passed": 3,
+      "score": 1.0,
+      "total": 3
+    },
+    "stale_avoidance": {
+      "passed": 3,
+      "score": 1.0,
+      "total": 3
+    },
+    "summary_quality": {
+      "passed": 3,
+      "score": 1.0,
+      "total": 3
+    }
+  },
+  "outcome": "pass",
+  "overall": 1.0,
+  "run_id": "01J000000000000000000000RUN",
+  "schema_version": 1,
+  "trend_path": "crates/cairn-bench/baselines/coherence-trend.jsonl"
+}

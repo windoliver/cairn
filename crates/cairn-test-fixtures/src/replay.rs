@@ -147,6 +147,28 @@ pub struct ReplayRecord {
     pub parent_event_id: Option<String>,
 }
 
+/// Coherence metric category assigned to a replay action.
+///
+/// `cairn-bench coherence` aggregates per-category pass rates. An action
+/// without a `metric_category` is excluded from coherence scoring.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MetricCategory {
+    /// Long-horizon recall — `retrieve_session`, `retrieve_turn`,
+    /// `assemble_hot`, `capture_trace`, `record_present(true)`.
+    RecallPrecision,
+    /// Stale-context avoidance — search actions with a non-empty
+    /// `stale_record_ids` set.
+    StaleAvoidance,
+    /// Summary quality — `summarize` actions matching the expected record set.
+    SummaryQuality,
+    /// Search relevance — search actions whose top-1 hit matches expected.
+    SearchUsefulness,
+    /// Forget completeness — `forget_record` actions whose follow-up search
+    /// excludes the tombstoned record.
+    ForgetCompleteness,
+}
+
 /// Ordered replay action.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(tag = "verb", rename_all = "snake_case", deny_unknown_fields)]
@@ -159,6 +181,10 @@ pub enum ReplayAction {
         story: String,
         /// Expected record ids included in the hot-memory debug trace.
         expected_record_ids: Vec<String>,
+        /// Coherence metric category. `None` excludes the action from
+        /// `cairn-bench coherence` scoring.
+        #[serde(default)]
+        metric_category: Option<MetricCategory>,
     },
     /// Capture-trace-shaped session event expectation.
     CaptureTrace {
@@ -168,6 +194,10 @@ pub enum ReplayAction {
         session_id: String,
         /// Expected trace events in sequence order.
         expected_trace_events: Vec<String>,
+        /// Coherence metric category. `None` excludes the action from
+        /// `cairn-bench coherence` scoring.
+        #[serde(default)]
+        metric_category: Option<MetricCategory>,
     },
     /// Summary replay expectation.
     Summarize {
@@ -177,6 +207,10 @@ pub enum ReplayAction {
         session_id: String,
         /// Expected summary record ids.
         expected_record_ids: Vec<String>,
+        /// Coherence metric category. `None` excludes the action from
+        /// `cairn-bench coherence` scoring.
+        #[serde(default)]
+        metric_category: Option<MetricCategory>,
     },
     /// Lint replay expectation.
     Lint {
@@ -184,6 +218,10 @@ pub enum ReplayAction {
         story: String,
         /// Expected lint status.
         expected_status: String,
+        /// Coherence metric category. `None` excludes the action from
+        /// `cairn-bench coherence` scoring.
+        #[serde(default)]
+        metric_category: Option<MetricCategory>,
     },
     /// Session replay expectation.
     RetrieveSession {
@@ -195,6 +233,10 @@ pub enum ReplayAction {
         expected_turn_ids: Vec<String>,
         /// Expected trace events in sequence order.
         expected_trace_events: Vec<String>,
+        /// Coherence metric category. `None` excludes the action from
+        /// `cairn-bench coherence` scoring.
+        #[serde(default)]
+        metric_category: Option<MetricCategory>,
     },
     /// Single-turn replay expectation.
     RetrieveTurn {
@@ -206,6 +248,10 @@ pub enum ReplayAction {
         turn_id: String,
         /// Expected trace events in sequence order.
         expected_trace_events: Vec<String>,
+        /// Coherence metric category. `None` excludes the action from
+        /// `cairn-bench coherence` scoring.
+        #[serde(default)]
+        metric_category: Option<MetricCategory>,
     },
     /// Direct record presence check.
     RecordPresent {
@@ -215,6 +261,10 @@ pub enum ReplayAction {
         record_id: String,
         /// Expected presence.
         expected_present: bool,
+        /// Coherence metric category. `None` excludes the action from
+        /// `cairn-bench coherence` scoring.
+        #[serde(default)]
+        metric_category: Option<MetricCategory>,
     },
     /// Record-level forget expectation.
     ForgetRecord {
@@ -226,6 +276,10 @@ pub enum ReplayAction {
         followup_query: String,
         /// Whether the record must be absent from follow-up search.
         expected_absent_from_search: bool,
+        /// Coherence metric category. `None` excludes the action from
+        /// `cairn-bench coherence` scoring.
+        #[serde(default)]
+        metric_category: Option<MetricCategory>,
     },
 }
 
@@ -253,6 +307,14 @@ pub struct ReplaySearchAction {
     pub limit: usize,
     /// Expected outcome.
     pub expected: ReplayExpectation,
+    /// Coherence metric category. `None` excludes this action from coherence
+    /// scoring.
+    #[serde(default)]
+    pub metric_category: Option<MetricCategory>,
+    /// Records that must NOT appear in the result. When non-empty, coherence
+    /// scoring auto-classifies the action as `StaleAvoidance`.
+    #[serde(default)]
+    pub stale_record_ids: Vec<String>,
 }
 
 /// Search mode in scenario manifests.
@@ -513,11 +575,13 @@ async fn run_action(
         ReplayAction::AssembleHot {
             story,
             expected_record_ids,
+            ..
         } => run_assemble_hot_action(store, scenario, story, expected_record_ids).await,
         ReplayAction::CaptureTrace {
             story,
             session_id,
             expected_trace_events,
+            ..
         } => {
             run_capture_trace_action(store, scenario, story, session_id, expected_trace_events)
                 .await
@@ -526,16 +590,19 @@ async fn run_action(
             story,
             session_id,
             expected_record_ids,
+            ..
         } => run_summarize_action(store, scenario, story, session_id, expected_record_ids).await,
         ReplayAction::Lint {
             story,
             expected_status,
+            ..
         } => run_lint_action(store, scenario, story, expected_status).await,
         ReplayAction::RetrieveSession {
             story,
             session_id,
             expected_turn_ids,
             expected_trace_events,
+            ..
         } => {
             run_retrieve_session_action(
                 store,
@@ -552,6 +619,7 @@ async fn run_action(
             session_id,
             turn_id,
             expected_trace_events,
+            ..
         } => {
             run_retrieve_turn_action(
                 store,
@@ -567,12 +635,14 @@ async fn run_action(
             story,
             record_id,
             expected_present,
+            ..
         } => run_record_present_action(store, scenario, story, record_id, *expected_present).await,
         ReplayAction::ForgetRecord {
             story,
             record_id,
             followup_query,
             expected_absent_from_search,
+            ..
         } => {
             run_forget_record_action(
                 store,
@@ -763,6 +833,23 @@ async fn run_search_action(
 ) -> ReplayCheckReport {
     let expected = expected_search_value(&action.expected);
     let actual = run_search(store, scenario, action).await;
+    // Stale-avoidance search actions use a broader `limit` so the
+    // disjointness check sees lower-ranked leaks. They assert only the
+    // top-K hits in `expected.record_ids` AND no stale id anywhere in
+    // the returned list. A plain exact-match would force the cassette
+    // author to predict every result the BM25 ranker may emit, which is
+    // brittle. So when `stale_record_ids` is non-empty we use a prefix
+    // comparison plus an explicit disjointness assertion.
+    if !action.stale_record_ids.is_empty() {
+        return stale_search_check(
+            &action.query,
+            &action.story,
+            scenario,
+            &action.expected,
+            &action.stale_record_ids,
+            &actual,
+        );
+    }
     report_check(
         &scenario.id,
         &action.story,
@@ -771,6 +858,74 @@ async fn run_search_action(
         expected,
         actual,
     )
+}
+
+fn stale_search_check(
+    query: &str,
+    story_label: &str,
+    scenario: &ReplayScenario,
+    expectation: &ReplayExpectation,
+    stale_ids: &[String],
+    actual: &Value,
+) -> ReplayCheckReport {
+    let expected_prefix = match expectation {
+        ReplayExpectation::Hits { record_ids } => record_ids.clone(),
+        ReplayExpectation::CapabilityUnavailable { .. } => Vec::new(),
+    };
+    let prefix_ok = actual_prefix_matches(actual, &expected_prefix);
+    let stale_absent = !actual_contains_any(actual, stale_ids);
+    let passed = matches!(actual.get("status").and_then(Value::as_str), Some("hits"))
+        && prefix_ok
+        && stale_absent;
+    let expected_view = json!({
+        "status": "hits",
+        "record_ids_prefix": expected_prefix,
+        "stale_record_ids_absent": stale_ids,
+    });
+    let actual_view = json!({
+        "status": actual.get("status").cloned().unwrap_or(Value::Null),
+        "record_ids": actual.get("record_ids").cloned().unwrap_or(Value::Null),
+    });
+    ReplayCheckReport {
+        scenario_id: scenario.id.clone(),
+        story: story_label.to_owned(),
+        verb: "search".to_owned(),
+        query: Some(query.to_owned()),
+        message: if passed {
+            None
+        } else if !prefix_ok {
+            Some("stale search: expected prefix did not match top hits".to_owned())
+        } else if !stale_absent {
+            Some("stale search: stale record id appeared in results".to_owned())
+        } else {
+            Some("stale search: response was not status=hits".to_owned())
+        },
+        expected: expected_view,
+        actual: actual_view,
+        passed,
+    }
+}
+
+fn actual_prefix_matches(actual: &Value, expected_prefix: &[String]) -> bool {
+    let Some(arr) = actual.get("record_ids").and_then(Value::as_array) else {
+        return false;
+    };
+    if arr.len() < expected_prefix.len() {
+        return false;
+    }
+    expected_prefix
+        .iter()
+        .zip(arr.iter())
+        .all(|(want, got)| got.as_str() == Some(want.as_str()))
+}
+
+fn actual_contains_any(actual: &Value, candidates: &[String]) -> bool {
+    let Some(arr) = actual.get("record_ids").and_then(Value::as_array) else {
+        return false;
+    };
+    arr.iter()
+        .filter_map(Value::as_str)
+        .any(|id| candidates.iter().any(|c| c == id))
 }
 
 async fn assemble_hot_replay(store: &SqliteMemoryStore) -> Result<Value, ReplayError> {
@@ -1171,6 +1326,8 @@ async fn forget_record(
         query: followup_query.to_owned(),
         limit: 10,
         expected: ReplayExpectation::Hits { record_ids: vec![] },
+        metric_category: None,
+        stale_record_ids: vec![],
     };
     let search_actual = run_search(store, scenario, &action).await;
     if search_actual.get("status").and_then(Value::as_str) != Some("hits") {
@@ -1230,6 +1387,45 @@ fn error_value(error: &ReplayError) -> Value {
 mod tests {
     use super::*;
 
+    #[test]
+    fn metric_category_round_trips_through_serde() {
+        let raw = serde_json::json!({
+            "verb": "summarize",
+            "story": "RESEARCH_SUMMARY_GOLDEN",
+            "session_id": "research-literature",
+            "expected_record_ids": ["01HQZX9F5N00000000000000R4"],
+            "metric_category": "summary_quality"
+        });
+        let action: ReplayAction = serde_json::from_value(raw).expect("parse action");
+        match action {
+            ReplayAction::Summarize {
+                metric_category, ..
+            } => {
+                assert_eq!(metric_category, Some(MetricCategory::SummaryQuality));
+            }
+            other => panic!("expected Summarize, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn metric_category_absent_parses_as_none() {
+        let raw = serde_json::json!({
+            "verb": "summarize",
+            "story": "RESEARCH_SUMMARY_GOLDEN",
+            "session_id": "research-literature",
+            "expected_record_ids": ["01HQZX9F5N00000000000000R4"]
+        });
+        let action: ReplayAction = serde_json::from_value(raw).expect("parse action");
+        match action {
+            ReplayAction::Summarize {
+                metric_category, ..
+            } => {
+                assert_eq!(metric_category, None);
+            }
+            other => panic!("expected Summarize, got {other:?}"),
+        }
+    }
+
     fn trace_seed() -> ReplayRecord {
         ReplayRecord {
             id: "01HQZX9F5N00000000000000C0".to_owned(),
@@ -1261,6 +1457,44 @@ mod tests {
         record.extra_frontmatter = trace_frontmatter(&trace_seed());
 
         assert_eq!(trace_projection(&record, Some("session-a"), None), None);
+    }
+
+    #[test]
+    fn stale_record_ids_round_trip() {
+        let raw = serde_json::json!({
+            "verb": "search",
+            "story": "RESEARCH_STALE_AVOIDANCE",
+            "mode": "keyword",
+            "query": "lattice biology",
+            "limit": 5,
+            "expected": { "status": "hits", "record_ids": ["01HQZX9F5N00000000000000R5"] },
+            "stale_record_ids": ["01HQZX9F5N00000000000000R7"]
+        });
+        let action: ReplayAction = serde_json::from_value(raw).expect("parse action");
+        let ReplayAction::Search(search) = action else {
+            panic!("expected Search variant");
+        };
+        assert_eq!(
+            search.stale_record_ids,
+            vec!["01HQZX9F5N00000000000000R7".to_owned()]
+        );
+    }
+
+    #[test]
+    fn stale_record_ids_absent_defaults_to_empty() {
+        let raw = serde_json::json!({
+            "verb": "search",
+            "story": "RESEARCH_SEARCH_RELEVANCE",
+            "mode": "keyword",
+            "query": "lattice biology drift marker",
+            "limit": 1,
+            "expected": { "status": "hits", "record_ids": ["01HQZX9F5N00000000000000R5"] }
+        });
+        let action: ReplayAction = serde_json::from_value(raw).expect("parse action");
+        let ReplayAction::Search(search) = action else {
+            panic!("expected Search variant");
+        };
+        assert!(search.stale_record_ids.is_empty());
     }
 
     #[test]

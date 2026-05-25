@@ -6,6 +6,7 @@ pub mod adapter;
 pub mod all;
 pub mod cache;
 pub mod cached_embedder;
+pub mod coherence;
 pub mod fixture;
 pub mod gates;
 pub mod latency;

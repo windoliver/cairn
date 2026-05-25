@@ -325,6 +325,7 @@ cargo test --doc --workspace --locked
 ./scripts/check-core-boundary.sh
 cargo run -p cairn-idl --bin cairn-codegen --locked -- --check
 cargo run -p cairn-bench --release --locked -- all
+cargo run -p cairn-bench --release --locked -- coherence run --gate beta
 
 # docs.yml
 cargo run -p cairn-cli --bin cairn-docgen --locked -- --check

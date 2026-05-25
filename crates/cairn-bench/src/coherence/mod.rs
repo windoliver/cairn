@@ -1,0 +1,1057 @@
+//! Coherence release-gate (issue #137).
+//!
+//! See `docs/design/2026-05-24-coherence-benchmarks-design.md`.
+//! Public API will be wired up in a later task.
+
+pub mod category;
+pub mod report;
+pub mod score;
+pub mod threshold;
+pub mod trend;
+
+pub use category::{ALL as ALL_CATEGORIES, DisplayCategory, MetricCategory, as_str};
+pub use report::{GateReport, build as build_report, render_human, render_json};
+pub use score::{CategoryScore, CategoryScores, ScoreError, aggregate, classify};
+pub use threshold::{
+    Baseline, CategoryThreshold, GateMode, MetricOutcome, MetricResult, ThresholdError,
+    ThresholdManifest, all_pass, evaluate, load_manifest,
+};
+pub use trend::{TrendEntry, TrendError, append as append_trend, load as load_trend};
+
+use std::path::PathBuf;
+
+/// Knobs for one gate run. Constructed by the CLI wrapper in `main.rs`.
+#[derive(Debug, Clone)]
+pub struct GateOptions {
+    /// Gate mode.
+    pub mode: GateMode,
+    /// Directory containing cassette JSON files.
+    pub cassettes_dir: PathBuf,
+    /// Cassette IDs to load from `cassettes_dir` (without `.json` extension).
+    pub include: Vec<String>,
+    /// Path to the threshold manifest TOML.
+    pub manifest_path: PathBuf,
+    /// Path to the committed baseline JSON. `None` skips the delta check.
+    pub baseline_path: Option<PathBuf>,
+    /// Path to the append-only trend JSONL.
+    pub trend_path: PathBuf,
+    /// Rewrite the baseline with this run's scores.
+    pub update_baseline: bool,
+    /// Allow the baseline rewrite to shrink any category's `total`.
+    /// Off by default to prevent a seed run on a reduced cassette set
+    /// from silently weakening the gate.
+    pub allow_coverage_shrink: bool,
+    /// Append a line to the trend file.
+    pub write_trend: bool,
+    /// Cairn version string for the trend record.
+    pub cairn_version: String,
+    /// Git SHA for the trend record.
+    pub git_sha: String,
+    /// RFC-3339 timestamp for the trend record (`captured_at`).
+    pub now: String,
+    /// Stable run identifier for the trend record.
+    pub run_id: String,
+}
+
+/// What `run_coherence_gate` returns. The caller maps `gate_passed` to a
+/// process exit code.
+#[derive(Debug, Clone)]
+pub struct GateOutcome {
+    /// `true` iff every metric passed (or `--gate none`).
+    pub gate_passed: bool,
+    /// Compact report (also serialised under `--json`).
+    pub report: GateReport,
+    /// Pre-rendered human-readable table.
+    pub human: String,
+}
+
+/// Errors surfaced from the orchestrator.
+#[derive(Debug, thiserror::Error)]
+pub enum GateError {
+    /// Cassette replay failure.
+    #[error(transparent)]
+    Replay(#[from] cairn_test_fixtures::replay::ReplayError),
+    /// Score aggregation failure.
+    #[error(transparent)]
+    Score(#[from] ScoreError),
+    /// Threshold manifest load failure.
+    #[error(transparent)]
+    Threshold(#[from] ThresholdError),
+    /// Trend file load or append failure.
+    #[error(transparent)]
+    Trend(#[from] TrendError),
+    /// Baseline filesystem read or write failure.
+    #[error("baseline {path}: {source}")]
+    BaselineIo {
+        /// Path that failed.
+        path: String,
+        /// Underlying I/O error.
+        #[source]
+        source: std::io::Error,
+    },
+    /// Baseline JSON parse or serialise failure.
+    #[error("baseline {path}: {source}")]
+    BaselineJson {
+        /// Path that failed.
+        path: String,
+        /// Underlying JSON error.
+        #[source]
+        source: serde_json::Error,
+    },
+    /// Baseline parsed but violated a content invariant (unsupported
+    /// `schema_version`, missing/unknown category, score out of range,
+    /// passed > total, etc.).
+    #[error("baseline {path}: {reason}")]
+    BaselineInvalid {
+        /// Path that failed.
+        path: String,
+        /// Human-readable invariant that was violated.
+        reason: String,
+    },
+    /// An enforced gate (`beta` or `rc`) ran against cassettes that did
+    /// not exercise every canonical category. Zero-coverage categories
+    /// score 1.0 vacuously, so without this check a candidate could
+    /// remove `metric_category` tags from the checked-out cassettes and
+    /// the floor / delta gate would still pass.
+    #[error(
+        "coherence: category {category} has 0 actions under --gate {mode}; cassettes must exercise every category for enforced gates"
+    )]
+    IncompleteCoverage {
+        /// Wire-string name of the first empty category.
+        category: &'static str,
+        /// Gate mode that triggered the check (`"beta"` or `"rc"`).
+        mode: &'static str,
+    },
+    /// Enforced gate observed fewer actions in a category than the
+    /// committed baseline records. The score is a ratio, so a smaller
+    /// denominator with all-pass numerator still hits 1.0 even though
+    /// the actual coverage shrank — defeats the gate as a release
+    /// signal. We compare current `total` against baseline `total` and
+    /// fail closed on any drop.
+    #[error(
+        "coherence: category {category} total dropped from {baseline_total} to {current_total} under --gate {mode}; cassettes must not shed actions without an explicit baseline update"
+    )]
+    CoverageRegression {
+        /// Wire-string name of the category whose denominator shrank.
+        category: &'static str,
+        /// Total recorded in the trusted baseline.
+        baseline_total: u32,
+        /// Total observed in the current run.
+        current_total: u32,
+        /// Gate mode that triggered the check (`"beta"` or `"rc"`).
+        mode: &'static str,
+    },
+}
+
+impl GateError {
+    /// Map an error to its sysexits-style process exit code.
+    ///
+    /// - `78` (`EX_CONFIG`) — bad manifest, baseline, or cassette content.
+    /// - `1` — runtime error (trend I/O, score invariant, etc.).
+    #[must_use]
+    pub const fn exit_code(&self) -> u8 {
+        match self {
+            Self::Threshold(_)
+            | Self::BaselineIo { .. }
+            | Self::BaselineJson { .. }
+            | Self::BaselineInvalid { .. }
+            | Self::IncompleteCoverage { .. }
+            | Self::CoverageRegression { .. } => 78,
+            // Replay errors split by variant: content-shaped problems are
+            // config (78), store/runtime problems are runtime (1).
+            Self::Replay(replay) => match replay {
+                cairn_test_fixtures::replay::ReplayError::Io { .. }
+                | cairn_test_fixtures::replay::ReplayError::Json { .. }
+                | cairn_test_fixtures::replay::ReplayError::InvalidManifest(_) => 78,
+                cairn_test_fixtures::replay::ReplayError::Store(_) => 1,
+            },
+            Self::Score(_) | Self::Trend(_) => 1,
+        }
+    }
+}
+
+/// Drive every included cassette through the replay engine, score per
+/// category, evaluate the gate, render the report, optionally write the
+/// trend line, and optionally rewrite the baseline.
+///
+/// # Errors
+/// Returns any error from replay, scoring, threshold loading, or trend I/O.
+#[allow(clippy::too_many_lines)]
+pub async fn run_coherence_gate(opts: GateOptions) -> Result<GateOutcome, GateError> {
+    let manifest = load_manifest(&opts.manifest_path)?;
+    // A configured `baseline_path` MUST exist and parse. Silently treating
+    // a missing file as "no baseline" would disable the regression-delta
+    // check; a typo or accidental deletion in CI would turn the 2% gate
+    // into floor-only validation. `baseline_path: None` (programmatic
+    // first-run / smoke tests) is the only path that skips the delta.
+    let baseline = match &opts.baseline_path {
+        Some(p) => Some(load_baseline(p)?),
+        None => None,
+    };
+
+    let mut all_actions: Vec<cairn_test_fixtures::replay::ReplayAction> = Vec::new();
+    let mut all_reports: Vec<cairn_test_fixtures::replay::ReplayCheckReport> = Vec::new();
+    for cassette in &opts.include {
+        let path = opts.cassettes_dir.join(format!("{cassette}.json"));
+        let scenario = cairn_test_fixtures::replay::load_scenario_file(&path)?;
+        let report = cairn_test_fixtures::replay::run_scenario(&scenario).await?;
+        all_actions.extend(scenario.actions);
+        all_reports.extend(report.checks);
+    }
+    let cassettes = u32::try_from(opts.include.len()).unwrap_or(u32::MAX);
+    let actions = u32::try_from(all_actions.len()).unwrap_or(u32::MAX);
+
+    let scores = aggregate(&all_actions, &all_reports)?;
+    // Enforced gates (beta / rc) require non-zero coverage on every
+    // canonical category. Without this check a candidate could remove
+    // metric_category tags from the checked-out cassettes and the
+    // floor / delta evaluator would happily pass because empty buckets
+    // score the vacuous 1.0. --gate none is the explicit escape hatch
+    // for seeding / first-run / debug.
+    if let Some(mode_label) = enforced_mode_label(opts.mode) {
+        if let Some(category) = first_empty_score_category(&scores) {
+            return Err(GateError::IncompleteCoverage {
+                category,
+                mode: mode_label,
+            });
+        }
+        // Coverage-regression guard: scores are ratios, so dropping
+        // 6 of 9 recall actions while keeping 3 passing yields 1.0
+        // again. Compare current `total` per category against the
+        // trusted baseline; any shrinkage fails closed. The check is
+        // skipped when no baseline is provided (programmatic seeding
+        // or first-ever run).
+        if let Some(b) = baseline.as_ref()
+            && let Some((category, baseline_total, current_total)) =
+                first_shrunk_category(&scores, b)
+        {
+            return Err(GateError::CoverageRegression {
+                category,
+                baseline_total,
+                current_total,
+                mode: mode_label,
+            });
+        }
+    }
+    let results = evaluate(opts.mode, &scores, &manifest, baseline.as_ref());
+    let gate_passed = all_pass(&results);
+    let report = build_report(opts.mode, &results, cassettes, actions);
+    let human = render_human(&report, &results);
+
+    if opts.write_trend {
+        let entry = TrendEntry {
+            schema_version: 1,
+            run_id: opts.run_id.clone(),
+            ts: opts.now.clone(),
+            cairn_version: opts.cairn_version.clone(),
+            git_sha: opts.git_sha.clone(),
+            gate: report.gate.to_owned(),
+            outcome: report.outcome.to_owned(),
+            failures: report.failures.iter().map(|s| (*s).to_owned()).collect(),
+            metrics: report.metrics.clone(),
+        };
+        append_trend(&opts.trend_path, &entry)?;
+    }
+
+    // Refuse to rewrite the baseline when the gate failed: a regression
+    // that just tripped the delta check would otherwise be normalised into
+    // the committed floor on the very next run. `--gate none` always
+    // "passes" (GateNone is_pass), which is the intended seeding path.
+    //
+    // Also refuse when any canonical category has zero coverage. An
+    // empty `--include` set (or cassettes that simply forgot to tag
+    // their actions) produces a vacuous-pass score of 1.0 / 0 actions
+    // for every empty category, which `validate_baseline` happily
+    // accepts. Writing that as the new baseline would silently destroy
+    // the prior measurement and lock in 0/0 perfect scores.
+    //
+    // Finally, when an existing baseline is loaded, refuse to write a
+    // baseline whose `total` for any category is smaller than the
+    // current value. `--gate none --update-baseline --include
+    // research_domain` would otherwise produce a smaller-denominator
+    // baseline that locks in for future runs. Override via
+    // `allow_coverage_shrink` when intentionally retiring cassettes.
+    if opts.update_baseline
+        && gate_passed
+        && let Some(path) = &opts.baseline_path
+    {
+        if let Some(empty) = first_empty_category(&report.metrics) {
+            return Err(GateError::BaselineInvalid {
+                path: path.display().to_string(),
+                reason: format!(
+                    "refusing to --update-baseline: category {empty} has 0 actions; \
+                     pass --include cassettes that exercise every category",
+                ),
+            });
+        }
+        if !opts.allow_coverage_shrink
+            && let Some(b) = baseline.as_ref()
+            && let Some((category, baseline_total, current_total)) =
+                first_shrunk_category(&scores, b)
+        {
+            return Err(GateError::BaselineInvalid {
+                path: path.display().to_string(),
+                reason: format!(
+                    "refusing to --update-baseline: category {category} total would shrink \
+                     from {baseline_total} to {current_total}; pass --allow-coverage-shrink \
+                     to confirm an intentional reduction",
+                ),
+            });
+        }
+        write_baseline(
+            path,
+            &Baseline {
+                schema_version: 1,
+                captured_at: opts.now.clone(),
+                cairn_version: opts.cairn_version.clone(),
+                git_sha: opts.git_sha.clone(),
+                metrics: report.metrics.clone(),
+            },
+        )?;
+    } else if opts.update_baseline && !gate_passed {
+        eprintln!(
+            "coherence: refusing to --update-baseline because the gate failed; \
+             fix the regression first or rerun with --gate none"
+        );
+    }
+
+    Ok(GateOutcome {
+        gate_passed,
+        report,
+        human,
+    })
+}
+
+use clap::{Args, ValueEnum};
+
+/// CLI args block for the `coherence` subcommand.
+#[derive(Debug, Args)]
+pub struct CoherenceArgs {
+    /// Subcommand selector.
+    #[command(subcommand)]
+    pub cmd: CoherenceCmd,
+}
+
+/// `cairn-bench coherence <subcommand>` variants.
+#[derive(Debug, clap::Subcommand)]
+pub enum CoherenceCmd {
+    /// Run the coherence gate over the configured cassettes.
+    Run(CoherenceRunArgs),
+    /// Verify that a candidate manifest/baseline pair does not weaken
+    /// the gate compared to a trusted base pair. Exits 0 when safe,
+    /// 78 when the candidate lowers floors, raises drop budgets, or
+    /// shrinks baseline totals.
+    VerifyDrift(VerifyDriftArgs),
+}
+
+/// Arguments for `cairn-bench coherence verify-drift`.
+#[derive(Debug, Args)]
+pub struct VerifyDriftArgs {
+    /// Candidate (HEAD) manifest path.
+    #[arg(long)]
+    pub head_manifest: PathBuf,
+    /// Trusted (base) manifest path.
+    #[arg(long)]
+    pub base_manifest: PathBuf,
+    /// Candidate (HEAD) baseline path.
+    #[arg(long)]
+    pub head_baseline: PathBuf,
+    /// Trusted (base) baseline path.
+    #[arg(long)]
+    pub base_baseline: PathBuf,
+}
+
+/// Arguments for `cairn-bench coherence run`.
+#[derive(Debug, Args)]
+#[allow(clippy::struct_excessive_bools)]
+pub struct CoherenceRunArgs {
+    /// Gate mode.
+    #[arg(long, value_enum, default_value_t = CliGate::Beta)]
+    pub gate: CliGate,
+    /// Cassettes directory.
+    #[arg(long, default_value = "fixtures/v0/replay")]
+    pub cassettes: PathBuf,
+    /// Cassettes to include (default: extended #136 cassettes).
+    #[arg(long = "include", num_args = 1.., default_values_t = default_includes())]
+    pub include: Vec<String>,
+    /// Threshold manifest path.
+    #[arg(long, default_value = "crates/cairn-bench/manifests/coherence.toml")]
+    pub manifest: PathBuf,
+    /// Baseline path.
+    #[arg(long, default_value = "crates/cairn-bench/baselines/coherence.json")]
+    pub baseline: PathBuf,
+    /// Trend file path.
+    #[arg(
+        long,
+        default_value = "crates/cairn-bench/baselines/coherence-trend.jsonl"
+    )]
+    pub trend: PathBuf,
+    /// Overwrite the baseline with this run's scores.
+    #[arg(long)]
+    pub update_baseline: bool,
+    /// Permit `--update-baseline` to write a baseline whose `total` for
+    /// any category is smaller than the existing committed baseline.
+    /// Required when intentionally retiring cassettes — without it,
+    /// shrinking the baseline is rejected to prevent a seed run on a
+    /// reduced `--include` set from quietly weakening the gate.
+    #[arg(long)]
+    pub allow_coverage_shrink: bool,
+    /// Skip appending to the trend file.
+    #[arg(long)]
+    pub no_trend_write: bool,
+    /// Machine-readable output on stdout.
+    #[arg(long)]
+    pub json: bool,
+}
+
+/// `clap` value-enum for `--gate`.
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum CliGate {
+    /// Beta gate (uses `beta_min`).
+    Beta,
+    /// Release-candidate gate (uses `rc_min`).
+    Rc,
+    /// Record only, never fail.
+    None,
+}
+
+impl From<CliGate> for GateMode {
+    fn from(v: CliGate) -> Self {
+        match v {
+            CliGate::Beta => Self::Beta,
+            CliGate::Rc => Self::Rc,
+            CliGate::None => Self::None,
+        }
+    }
+}
+
+fn default_includes() -> Vec<String> {
+    vec![
+        "research_domain".to_owned(),
+        "engineering_domain".to_owned(),
+        "support_domain".to_owned(),
+    ]
+}
+
+/// Dispatch the `coherence` subcommand. Returns the process exit code.
+///
+/// Maps orchestrator errors to their sysexits-style exit codes
+/// (see [`GateError::exit_code`]) and writes a one-line diagnostic to
+/// stderr instead of bubbling the error up to `main`, which would print
+/// the chain and exit with code 1.
+pub async fn dispatch(args: CoherenceArgs) -> u8 {
+    match args.cmd {
+        CoherenceCmd::Run(run) => dispatch_run(run).await,
+        CoherenceCmd::VerifyDrift(verify) => dispatch_verify_drift(&verify),
+    }
+}
+
+fn dispatch_verify_drift(args: &VerifyDriftArgs) -> u8 {
+    let head_manifest = match load_manifest(&args.head_manifest) {
+        Ok(m) => m,
+        Err(e) => {
+            eprintln!("coherence: {e}");
+            return GateError::from(e).exit_code();
+        }
+    };
+    let base_manifest = match load_manifest(&args.base_manifest) {
+        Ok(m) => m,
+        Err(e) => {
+            eprintln!("coherence: {e}");
+            return GateError::from(e).exit_code();
+        }
+    };
+    let head_baseline = match load_baseline(&args.head_baseline) {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("coherence: {e}");
+            return e.exit_code();
+        }
+    };
+    let base_baseline = match load_baseline(&args.base_baseline) {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("coherence: {e}");
+            return e.exit_code();
+        }
+    };
+    let issues = verify_no_weakening(
+        &head_manifest,
+        &base_manifest,
+        &head_baseline,
+        &base_baseline,
+    );
+    if issues.is_empty() {
+        println!("coherence verify-drift: OK");
+        0
+    } else {
+        for issue in &issues {
+            eprintln!("coherence: {issue}");
+        }
+        78
+    }
+}
+
+/// Compare a candidate manifest+baseline pair against trusted base
+/// versions. Returns a list of weakening issues; an empty result is
+/// "safe to merge". Floors may not decrease, `max_drop_pct` may not
+/// increase, and baseline `total`s may not shrink.
+#[must_use]
+pub fn verify_no_weakening(
+    head_manifest: &ThresholdManifest,
+    base_manifest: &ThresholdManifest,
+    head_baseline: &Baseline,
+    base_baseline: &Baseline,
+) -> Vec<String> {
+    let mut issues = Vec::new();
+    for category in ALL_CATEGORIES {
+        let label = as_str(category);
+        let h = head_manifest.for_category(category);
+        let b = base_manifest.for_category(category);
+        if h.beta_min < b.beta_min {
+            issues.push(format!(
+                "manifest weakened: {label}.beta_min dropped from {} to {}",
+                b.beta_min, h.beta_min
+            ));
+        }
+        if h.rc_min < b.rc_min {
+            issues.push(format!(
+                "manifest weakened: {label}.rc_min dropped from {} to {}",
+                b.rc_min, h.rc_min
+            ));
+        }
+        if h.max_drop_pct > b.max_drop_pct {
+            issues.push(format!(
+                "manifest weakened: {label}.max_drop_pct raised from {} to {}",
+                b.max_drop_pct, h.max_drop_pct
+            ));
+        }
+        if let (Some(hs), Some(bs)) = (
+            head_baseline.score_for(category),
+            base_baseline.score_for(category),
+        ) {
+            // Total shrink: smaller denominator → future runs may shed
+            // actions and still 1.0.
+            if hs.total < bs.total {
+                issues.push(format!(
+                    "baseline weakened: {label}.total shrank from {} to {}",
+                    bs.total, hs.total
+                ));
+            }
+            // Score / passed-count downgrade with same denominator
+            // would lower the floor the regression-delta check
+            // compares against — future regressions would have more
+            // room before tripping the 2 % budget. Use a small epsilon
+            // to tolerate float rounding from the consistency check.
+            if hs.score + 1e-9 < bs.score {
+                issues.push(format!(
+                    "baseline weakened: {label}.score dropped from {} to {}",
+                    bs.score, hs.score
+                ));
+            }
+            if hs.passed < bs.passed {
+                issues.push(format!(
+                    "baseline weakened: {label}.passed dropped from {} to {}",
+                    bs.passed, hs.passed
+                ));
+            }
+        }
+    }
+    issues
+}
+
+async fn dispatch_run(run: CoherenceRunArgs) -> u8 {
+    let trend_path = run.trend.clone();
+    let json = run.json;
+    let opts = GateOptions {
+        mode: run.gate.into(),
+        cassettes_dir: run.cassettes,
+        include: run.include,
+        manifest_path: run.manifest,
+        baseline_path: Some(run.baseline),
+        trend_path: run.trend,
+        update_baseline: run.update_baseline,
+        allow_coverage_shrink: run.allow_coverage_shrink,
+        write_trend: !run.no_trend_write,
+        cairn_version: env!("CARGO_PKG_VERSION").to_owned(),
+        git_sha: std::env::var("GIT_SHA").unwrap_or_else(|_| "unknown".to_owned()),
+        now: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        run_id: ulid_like(),
+    };
+    let run_id = opts.run_id.clone();
+    let outcome = match run_coherence_gate(opts).await {
+        Ok(o) => o,
+        Err(e) => {
+            eprintln!("coherence: {e}");
+            return e.exit_code();
+        }
+    };
+    if json {
+        let value = render_json(&outcome.report, &trend_path.display().to_string(), &run_id);
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&value).unwrap_or_default()
+        );
+    } else {
+        print!("{}", outcome.human);
+    }
+    if outcome.gate_passed { 0 } else { 69 }
+}
+
+fn ulid_like() -> String {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos());
+    format!("run-{nanos:032x}")
+}
+
+fn load_baseline(path: &std::path::Path) -> Result<Baseline, GateError> {
+    let raw = std::fs::read_to_string(path).map_err(|source| GateError::BaselineIo {
+        path: path.display().to_string(),
+        source,
+    })?;
+    let baseline: Baseline =
+        serde_json::from_str(&raw).map_err(|source| GateError::BaselineJson {
+            path: path.display().to_string(),
+            source,
+        })?;
+    validate_baseline(&baseline).map_err(|reason| GateError::BaselineInvalid {
+        path: path.display().to_string(),
+        reason,
+    })?;
+    Ok(baseline)
+}
+
+/// Verify the typed invariants that the JSON schema alone cannot catch
+/// once the file is deserialised: supported `schema_version`, exactly
+/// the five canonical category keys (no missing, no unknown), per-metric
+/// score in `[0, 1]`, and `passed <= total`. Returns the first violation
+/// found so the caller can map it to `EX_CONFIG`.
+fn validate_baseline(baseline: &Baseline) -> Result<(), String> {
+    use std::collections::BTreeSet;
+    if baseline.schema_version != 1 {
+        return Err(format!(
+            "unsupported baseline schema_version {}",
+            baseline.schema_version
+        ));
+    }
+    let expected: BTreeSet<&'static str> = ALL_CATEGORIES.iter().copied().map(as_str).collect();
+    let actual: BTreeSet<&str> = baseline.metrics.keys().map(String::as_str).collect();
+    if actual != expected {
+        let missing: Vec<&&str> = expected.difference(&actual).collect();
+        let unknown: Vec<&&str> = actual.difference(&expected).collect();
+        return Err(format!(
+            "metrics keys mismatch (missing: {missing:?}, unknown: {unknown:?})"
+        ));
+    }
+    for (name, score) in &baseline.metrics {
+        if !score.score.is_finite() || !(0.0..=1.0).contains(&score.score) {
+            return Err(format!(
+                "metric {name}: score {} out of [0, 1] or non-finite",
+                score.score
+            ));
+        }
+        if score.passed > score.total {
+            return Err(format!(
+                "metric {name}: passed ({}) > total ({})",
+                score.passed, score.total
+            ));
+        }
+        // Score must be consistent with passed/total. Without this check a
+        // malicious or buggy baseline can claim passed=3,total=3,score=0.0
+        // — the validator would have accepted it before, and the delta
+        // gate would compare against the false 0.0, making a real
+        // regression invisible if the current score stays above the floor.
+        let expected_score = if score.total == 0 {
+            1.0
+        } else {
+            f64::from(score.passed) / f64::from(score.total)
+        };
+        if (score.score - expected_score).abs() > 1e-9 {
+            return Err(format!(
+                "metric {name}: score {} disagrees with passed/total = {}",
+                score.score, expected_score
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Wire-string label of an enforced gate mode (`beta` / `rc`), or
+/// `None` for `GateMode::None`. Used by the coverage guard to decide
+/// whether to enforce non-zero coverage on every category.
+const fn enforced_mode_label(mode: GateMode) -> Option<&'static str> {
+    match mode {
+        GateMode::Beta => Some("beta"),
+        GateMode::Rc => Some("rc"),
+        GateMode::None => None,
+    }
+}
+
+/// First canonical category whose score has zero `total`. Used by the
+/// enforced-gate coverage guard to fail the gate before a tag-removal
+/// candidate can pass via vacuous 1.0 buckets.
+fn first_empty_score_category(scores: &CategoryScores) -> Option<&'static str> {
+    for category in ALL_CATEGORIES {
+        if scores.get(&category).is_none_or(|s| s.total == 0) {
+            return Some(as_str(category));
+        }
+    }
+    None
+}
+
+/// First canonical category whose current total is strictly less than
+/// the baseline's recorded total. Used by the enforced-gate
+/// coverage-regression guard. Returns `(category, baseline_total,
+/// current_total)`.
+fn first_shrunk_category(
+    scores: &CategoryScores,
+    baseline: &Baseline,
+) -> Option<(&'static str, u32, u32)> {
+    for category in ALL_CATEGORIES {
+        let label = as_str(category);
+        let baseline_total = match baseline.score_for(category) {
+            Some(s) => s.total,
+            None => continue,
+        };
+        let current_total = scores.get(&category).map_or(0, |s| s.total);
+        if current_total < baseline_total {
+            return Some((label, baseline_total, current_total));
+        }
+    }
+    None
+}
+
+/// Return the first canonical category whose recorded `total` is zero,
+/// so the orchestrator can refuse a baseline rewrite that would lock in
+/// a vacuous-pass score for a category nothing exercised this run.
+fn first_empty_category(
+    metrics: &std::collections::BTreeMap<String, CategoryScore>,
+) -> Option<&'static str> {
+    for category in ALL_CATEGORIES {
+        let label = as_str(category);
+        if metrics.get(label).is_none_or(|score| score.total == 0) {
+            return Some(label);
+        }
+    }
+    None
+}
+
+fn write_baseline(path: &std::path::Path, baseline: &Baseline) -> Result<(), GateError> {
+    let tmp = path.with_extension("json.tmp");
+    let body =
+        serde_json::to_string_pretty(baseline).map_err(|source| GateError::BaselineJson {
+            path: path.display().to_string(),
+            source,
+        })?;
+    std::fs::write(&tmp, body).map_err(|source| GateError::BaselineIo {
+        path: tmp.display().to_string(),
+        source,
+    })?;
+    std::fs::rename(&tmp, path).map_err(|source| GateError::BaselineIo {
+        path: path.display().to_string(),
+        source,
+    })?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn exit_code_maps_config_errors_to_78() {
+        let cases = [
+            GateError::Threshold(ThresholdError::UnsupportedManifestVersion { version: 99 }),
+            GateError::BaselineIo {
+                path: "p".to_owned(),
+                source: std::io::Error::from(std::io::ErrorKind::NotFound),
+            },
+            GateError::BaselineJson {
+                path: "p".to_owned(),
+                source: serde_json::from_str::<serde_json::Value>("not json").unwrap_err(),
+            },
+            GateError::BaselineInvalid {
+                path: "p".to_owned(),
+                reason: "missing metric".to_owned(),
+            },
+            GateError::Replay(cairn_test_fixtures::replay::ReplayError::InvalidManifest(
+                "bad".to_owned(),
+            )),
+        ];
+        for err in cases {
+            assert_eq!(err.exit_code(), 78, "{err:?} should map to 78");
+        }
+    }
+
+    #[test]
+    fn exit_code_maps_runtime_errors_to_1() {
+        let cases = [
+            GateError::Score(ScoreError::LengthMismatch {
+                actions: 1,
+                reports: 0,
+            }),
+            GateError::Trend(TrendError::MissingSchemaVersion {
+                path: "p".to_owned(),
+                line: 1,
+            }),
+            // Replay::Store represents tempdir/DB/vault runtime failures
+            // and must NOT be misreported as a config error.
+            GateError::Replay(cairn_test_fixtures::replay::ReplayError::Store(
+                "tempdir died".to_owned(),
+            )),
+        ];
+        for err in cases {
+            assert_eq!(err.exit_code(), 1, "{err:?} should map to 1");
+        }
+    }
+
+    fn good_baseline() -> Baseline {
+        let mut metrics = std::collections::BTreeMap::new();
+        for cat in ALL_CATEGORIES {
+            metrics.insert(
+                as_str(cat).to_owned(),
+                CategoryScore {
+                    passed: 1,
+                    total: 1,
+                    score: 1.0,
+                },
+            );
+        }
+        Baseline {
+            schema_version: 1,
+            captured_at: "2026-05-24T12:00:00Z".to_owned(),
+            cairn_version: "0.0.0".to_owned(),
+            git_sha: "test".to_owned(),
+            metrics,
+        }
+    }
+
+    #[test]
+    fn validate_baseline_accepts_canonical_shape() {
+        assert!(validate_baseline(&good_baseline()).is_ok());
+    }
+
+    #[test]
+    fn validate_baseline_rejects_unsupported_schema_version() {
+        let mut b = good_baseline();
+        b.schema_version = 99;
+        let err = validate_baseline(&b).unwrap_err();
+        assert!(err.contains("schema_version"), "{err}");
+    }
+
+    #[test]
+    fn validate_baseline_rejects_missing_metric() {
+        let mut b = good_baseline();
+        b.metrics.remove("forget_completeness");
+        let err = validate_baseline(&b).unwrap_err();
+        assert!(err.contains("missing") || err.contains("mismatch"), "{err}");
+    }
+
+    #[test]
+    fn validate_baseline_rejects_unknown_metric() {
+        let mut b = good_baseline();
+        b.metrics.insert(
+            "made_up_metric".to_owned(),
+            CategoryScore {
+                passed: 0,
+                total: 0,
+                score: 1.0,
+            },
+        );
+        let err = validate_baseline(&b).unwrap_err();
+        assert!(err.contains("unknown") || err.contains("mismatch"), "{err}");
+    }
+
+    #[test]
+    fn validate_baseline_rejects_score_out_of_range() {
+        let mut b = good_baseline();
+        b.metrics.insert(
+            "recall_precision".to_owned(),
+            CategoryScore {
+                passed: 1,
+                total: 1,
+                score: 1.5,
+            },
+        );
+        let err = validate_baseline(&b).unwrap_err();
+        assert!(err.contains("out of"), "{err}");
+    }
+
+    #[test]
+    fn validate_baseline_rejects_passed_gt_total() {
+        let mut b = good_baseline();
+        b.metrics.insert(
+            "recall_precision".to_owned(),
+            CategoryScore {
+                passed: 5,
+                total: 1,
+                score: 1.0,
+            },
+        );
+        let err = validate_baseline(&b).unwrap_err();
+        assert!(err.contains("passed"), "{err}");
+    }
+
+    #[test]
+    fn validate_baseline_rejects_score_inconsistent_with_counts() {
+        let mut b = good_baseline();
+        // passed=3,total=3 should mean score=1.0; claiming 0.0 would hide
+        // a real regression vs. the prior baseline.
+        b.metrics.insert(
+            "recall_precision".to_owned(),
+            CategoryScore {
+                passed: 3,
+                total: 3,
+                score: 0.0,
+            },
+        );
+        let err = validate_baseline(&b).unwrap_err();
+        assert!(err.contains("disagrees"), "{err}");
+    }
+
+    #[test]
+    fn validate_baseline_rejects_nonempty_with_vacuous_score() {
+        let mut b = good_baseline();
+        // passed=1,total=2 should mean score=0.5; the vacuous 1.0 only
+        // applies to total==0.
+        b.metrics.insert(
+            "recall_precision".to_owned(),
+            CategoryScore {
+                passed: 1,
+                total: 2,
+                score: 1.0,
+            },
+        );
+        let err = validate_baseline(&b).unwrap_err();
+        assert!(err.contains("disagrees"), "{err}");
+    }
+
+    fn good_manifest_for_verify() -> ThresholdManifest {
+        let t = CategoryThreshold {
+            beta_min: 0.9,
+            rc_min: 0.95,
+            max_drop_pct: 2.0,
+        };
+        let forget = CategoryThreshold {
+            beta_min: 1.0,
+            rc_min: 1.0,
+            max_drop_pct: 0.0,
+        };
+        ThresholdManifest {
+            schema_version: 1,
+            recall_precision: t,
+            stale_avoidance: CategoryThreshold {
+                beta_min: 0.95,
+                rc_min: 0.98,
+                max_drop_pct: 2.0,
+            },
+            summary_quality: CategoryThreshold {
+                beta_min: 0.85,
+                rc_min: 0.9,
+                max_drop_pct: 2.0,
+            },
+            search_usefulness: CategoryThreshold {
+                beta_min: 0.85,
+                rc_min: 0.9,
+                max_drop_pct: 2.0,
+            },
+            forget_completeness: forget,
+        }
+    }
+
+    #[test]
+    fn verify_no_weakening_accepts_identical_pair() {
+        let m = good_manifest_for_verify();
+        let b = good_baseline();
+        assert!(verify_no_weakening(&m, &m, &b, &b).is_empty());
+    }
+
+    #[test]
+    fn verify_no_weakening_rejects_lowered_floor() {
+        let base = good_manifest_for_verify();
+        let mut head = base.clone();
+        head.recall_precision.beta_min = 0.5;
+        let issues = verify_no_weakening(&head, &base, &good_baseline(), &good_baseline());
+        assert!(issues.iter().any(|s| s.contains("beta_min")), "{issues:?}");
+    }
+
+    #[test]
+    fn verify_no_weakening_rejects_raised_max_drop() {
+        let base = good_manifest_for_verify();
+        let mut head = base.clone();
+        head.stale_avoidance.max_drop_pct = 50.0;
+        let issues = verify_no_weakening(&head, &base, &good_baseline(), &good_baseline());
+        assert!(
+            issues.iter().any(|s| s.contains("max_drop_pct")),
+            "{issues:?}"
+        );
+    }
+
+    #[test]
+    fn verify_no_weakening_rejects_shrunk_baseline_total() {
+        let m = good_manifest_for_verify();
+        let base = good_baseline();
+        let mut head = good_baseline();
+        head.metrics.insert(
+            "recall_precision".to_owned(),
+            CategoryScore {
+                passed: 0,
+                total: 0,
+                score: 1.0,
+            },
+        );
+        let issues = verify_no_weakening(&m, &m, &head, &base);
+        assert!(
+            issues.iter().any(|s| s.contains("baseline weakened")),
+            "{issues:?}"
+        );
+    }
+
+    #[test]
+    fn verify_no_weakening_rejects_score_downgrade_with_same_total() {
+        // Same denominator but lower score: 1/1=1.0 → would lower
+        // the floor the regression-delta check is anchored to.
+        // verify-drift must catch this even though total is unchanged.
+        let m = good_manifest_for_verify();
+        let mut base = good_baseline();
+        base.metrics.insert(
+            "recall_precision".to_owned(),
+            CategoryScore {
+                passed: 3,
+                total: 3,
+                score: 1.0,
+            },
+        );
+        let mut head = base.clone();
+        head.metrics.insert(
+            "recall_precision".to_owned(),
+            CategoryScore {
+                passed: 2,
+                total: 3,
+                score: 2.0 / 3.0,
+            },
+        );
+        let issues = verify_no_weakening(&m, &m, &head, &base);
+        assert!(
+            issues
+                .iter()
+                .any(|s| s.contains("score") || s.contains("passed")),
+            "{issues:?}"
+        );
+    }
+
+    #[test]
+    fn validate_baseline_accepts_total_zero_with_vacuous_score() {
+        let mut b = good_baseline();
+        b.metrics.insert(
+            "recall_precision".to_owned(),
+            CategoryScore {
+                passed: 0,
+                total: 0,
+                score: 1.0,
+            },
+        );
+        assert!(validate_baseline(&b).is_ok());
+    }
+}

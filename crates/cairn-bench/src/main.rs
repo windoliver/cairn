@@ -25,6 +25,8 @@ enum Cmd {
     Privacy(cairn_bench::privacy::PrivacyArgs),
     /// SRE release gate: writes `sre.json` for `cairn admin sre report` import.
     Sre(cairn_bench::sre::SreArgs),
+    /// Coherence release gate: scores extended cassettes against the threshold manifest.
+    Coherence(cairn_bench::coherence::CoherenceArgs),
     /// Run latency + memory + privacy + SRE and exit non-zero on any failure.
     All {
         /// Skip one or more gates by name (latency, memory, privacy, sre).
@@ -53,6 +55,10 @@ async fn main() -> anyhow::Result<()> {
         Cmd::Sre(args) => {
             let outcome = cairn_bench::sre::run(&args)?;
             std::process::exit(outcome.exit_code().into());
+        }
+        Cmd::Coherence(args) => {
+            let code = cairn_bench::coherence::dispatch(args).await;
+            std::process::exit(code.into());
         }
         Cmd::All { skip } => {
             let outcome = cairn_bench::all::run(&cairn_bench::all::AllArgs { skip })?;
