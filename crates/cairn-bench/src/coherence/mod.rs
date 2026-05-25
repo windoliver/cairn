@@ -104,6 +104,20 @@ pub enum GateError {
         /// Human-readable invariant that was violated.
         reason: String,
     },
+    /// An enforced gate (`beta` or `rc`) ran against cassettes that did
+    /// not exercise every canonical category. Zero-coverage categories
+    /// score 1.0 vacuously, so without this check a candidate could
+    /// remove `metric_category` tags from the checked-out cassettes and
+    /// the floor / delta gate would still pass.
+    #[error(
+        "coherence: category {category} has 0 actions under --gate {mode}; cassettes must exercise every category for enforced gates"
+    )]
+    IncompleteCoverage {
+        /// Wire-string name of the first empty category.
+        category: &'static str,
+        /// Gate mode that triggered the check (`"beta"` or `"rc"`).
+        mode: &'static str,
+    },
 }
 
 impl GateError {
@@ -117,7 +131,8 @@ impl GateError {
             Self::Threshold(_)
             | Self::BaselineIo { .. }
             | Self::BaselineJson { .. }
-            | Self::BaselineInvalid { .. } => 78,
+            | Self::BaselineInvalid { .. }
+            | Self::IncompleteCoverage { .. } => 78,
             // Replay errors split by variant: content-shaped problems are
             // config (78), store/runtime problems are runtime (1).
             Self::Replay(replay) => match replay {
@@ -162,6 +177,20 @@ pub async fn run_coherence_gate(opts: GateOptions) -> Result<GateOutcome, GateEr
     let actions = u32::try_from(all_actions.len()).unwrap_or(u32::MAX);
 
     let scores = aggregate(&all_actions, &all_reports)?;
+    // Enforced gates (beta / rc) require non-zero coverage on every
+    // canonical category. Without this check a candidate could remove
+    // metric_category tags from the checked-out cassettes and the
+    // floor / delta evaluator would happily pass because empty buckets
+    // score the vacuous 1.0. --gate none is the explicit escape hatch
+    // for seeding / first-run / debug.
+    if let Some(mode_label) = enforced_mode_label(opts.mode)
+        && let Some(category) = first_empty_score_category(&scores)
+    {
+        return Err(GateError::IncompleteCoverage {
+            category,
+            mode: mode_label,
+        });
+    }
     let results = evaluate(opts.mode, &scores, &manifest, baseline.as_ref());
     let gate_passed = all_pass(&results);
     let report = build_report(opts.mode, &results, cassettes, actions);
@@ -437,6 +466,29 @@ fn validate_baseline(baseline: &Baseline) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+/// Wire-string label of an enforced gate mode (`beta` / `rc`), or
+/// `None` for `GateMode::None`. Used by the coverage guard to decide
+/// whether to enforce non-zero coverage on every category.
+const fn enforced_mode_label(mode: GateMode) -> Option<&'static str> {
+    match mode {
+        GateMode::Beta => Some("beta"),
+        GateMode::Rc => Some("rc"),
+        GateMode::None => None,
+    }
+}
+
+/// First canonical category whose score has zero `total`. Used by the
+/// enforced-gate coverage guard to fail the gate before a tag-removal
+/// candidate can pass via vacuous 1.0 buckets.
+fn first_empty_score_category(scores: &CategoryScores) -> Option<&'static str> {
+    for category in ALL_CATEGORIES {
+        if scores.get(&category).is_none_or(|s| s.total == 0) {
+            return Some(as_str(category));
+        }
+    }
+    None
 }
 
 /// Return the first canonical category whose recorded `total` is zero,

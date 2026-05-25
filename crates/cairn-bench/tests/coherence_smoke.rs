@@ -158,35 +158,121 @@ fn failing_manifest_toml() -> &'static str {
 [forget_completeness]\nbeta_min = 0.0\nrc_min = 0.0\nmax_drop_pct = 100.0\n"
 }
 
-/// Synthetic cassette with one summarize action that intentionally
-/// asserts a `record_id` that does not match the seeded summary record,
-/// so the cassette's golden check fails and the coherence
-/// `summary_quality` score lands at 0/1 = 0.0.
+/// Synthetic cassette that tags every canonical coherence category
+/// (so the round-4 `IncompleteCoverage` guard passes) but the summary
+/// action intentionally asserts a `record_id` that doesn't match the
+/// seeded summary record. Result: `summary_quality` scores 0/1 = 0.0
+/// while every other category passes — the gate fails on
+/// `summary_quality` alone.
+#[allow(clippy::too_many_lines)]
 fn failing_cassette_json() -> &'static str {
     r#"{
   "id": "force_fail",
-  "description": "synthetic cassette whose summary expectation never matches",
+  "description": "synthetic cassette covering all 5 categories; summary fails",
   "config": { "local_embeddings": false },
   "records": [
     {
-      "id": "01HQZX9F5N00000000000000ZZ",
+      "id": "01HQZX9F5N0000000000FFA001",
+      "kind": "trace",
+      "class": "episodic",
+      "visibility": "private",
+      "body": "force fail session one user turn",
+      "session_id": "force-fail",
+      "turn_id": "1",
+      "sequence": 1,
+      "trace_event": "user_message"
+    },
+    {
+      "id": "01HQZX9F5N0000000000FFA002",
+      "kind": "trace",
+      "class": "episodic",
+      "visibility": "private",
+      "body": "force fail session one agent reply",
+      "session_id": "force-fail",
+      "turn_id": "1",
+      "sequence": 2,
+      "trace_event": "agent_message"
+    },
+    {
+      "id": "01HQZX9F5N0000000000FFA003",
       "kind": "reasoning",
       "class": "semantic",
       "visibility": "private",
-      "body": "fail body",
+      "body": "force fail summary preserves discriminative tag",
       "session_id": "force-fail",
       "turn_id": "summary",
-      "sequence": 1,
+      "sequence": 3,
       "trace_event": "turn_summary"
+    },
+    {
+      "id": "01HQZX9F5N0000000000FFA004",
+      "kind": "fact",
+      "class": "semantic",
+      "visibility": "private",
+      "body": "force fail discriminative target marker fact"
+    },
+    {
+      "id": "01HQZX9F5N0000000000FFA005",
+      "kind": "fact",
+      "class": "semantic",
+      "visibility": "private",
+      "body": "force fail unrelated note distractor"
+    },
+    {
+      "id": "01HQZX9F5N0000000000FFA006",
+      "kind": "fact",
+      "class": "semantic",
+      "visibility": "private",
+      "body": "force fail sensitive secret token"
     }
   ],
   "actions": [
+    {
+      "verb": "retrieve_session",
+      "story": "FORCE_FAIL_RECALL",
+      "session_id": "force-fail",
+      "expected_turn_ids": ["1"],
+      "expected_trace_events": ["user_message", "agent_message", "turn_summary"],
+      "metric_category": "recall_precision"
+    },
     {
       "verb": "summarize",
       "story": "FORCE_FAIL_SUMMARY",
       "session_id": "force-fail",
       "expected_record_ids": ["01HQZX9F5N0000000000000XYZ"],
       "metric_category": "summary_quality"
+    },
+    {
+      "verb": "search",
+      "story": "FORCE_FAIL_SEARCH",
+      "mode": "keyword",
+      "query": "discriminative target marker",
+      "limit": 1,
+      "expected": {
+        "status": "hits",
+        "record_ids": ["01HQZX9F5N0000000000FFA004"]
+      },
+      "metric_category": "search_usefulness"
+    },
+    {
+      "verb": "search",
+      "story": "FORCE_FAIL_STALE",
+      "mode": "keyword",
+      "query": "discriminative target marker",
+      "limit": 5,
+      "expected": {
+        "status": "hits",
+        "record_ids": ["01HQZX9F5N0000000000FFA004"]
+      },
+      "stale_record_ids": ["01HQZX9F5N0000000000FFA005"]
+    },
+    {
+      "verb": "forget_record",
+      "story": "FORCE_FAIL_FORGET",
+      "record_id": "01HQZX9F5N0000000000FFA006",
+      "followup_query": "sensitive secret token",
+      "expected_absent_from_search": true,
+      "metric_category": "forget_completeness"
     }
   ]
 }"#
@@ -220,6 +306,36 @@ async fn gate_outcome_69_on_failing_gate() {
     let outcome = run_coherence_gate(opts).await.expect("gate run");
     assert!(!outcome.gate_passed, "gate should have failed");
     assert!(outcome.report.failures.contains(&"summary_quality"));
+}
+
+#[tokio::test]
+async fn enforced_gate_rejects_zero_coverage_cassettes() {
+    // The new IncompleteCoverage guard makes beta/rc fail closed when
+    // any canonical category has 0 actions. p0_stories carries no
+    // metric_category tags, so every category buckets at 0/0 — the
+    // gate must refuse to run instead of passing vacuously.
+    use cairn_bench::coherence::GateError;
+    let dir = tempdir().unwrap();
+    let opts = GateOptions {
+        mode: GateMode::Beta,
+        cassettes_dir: workspace_root().join("fixtures/v0/replay"),
+        include: vec!["p0_stories".to_owned()],
+        manifest_path: manifest_path(),
+        baseline_path: None,
+        trend_path: dir.path().join("trend.jsonl"),
+        update_baseline: false,
+        write_trend: false,
+        cairn_version: env!("CARGO_PKG_VERSION").to_owned(),
+        git_sha: "smoke".to_owned(),
+        now: "2026-05-24T12:00:00Z".to_owned(),
+        run_id: "01J000000000000000000000RUN".to_owned(),
+    };
+    let err = run_coherence_gate(opts).await.expect_err("must reject");
+    assert!(
+        matches!(err, GateError::IncompleteCoverage { mode: "beta", .. }),
+        "expected IncompleteCoverage(beta), got {err:?}"
+    );
+    assert_eq!(err.exit_code(), 78);
 }
 
 #[tokio::test]

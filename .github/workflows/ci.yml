@@ -189,29 +189,51 @@ jobs:
           cargo build --release --locked -p cairn-bench
       - name: Resolve gate mode + trusted manifest/baseline
         id: gate
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_BASE_REF: ${{ github.base_ref }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          MERGE_BASE_REF: ${{ github.event.merge_group.base_ref }}
+          MERGE_BASE_SHA: ${{ github.event.merge_group.base_sha }}
+          PUSH_REF_NAME: ${{ github.ref_name }}
         run: |
-          # Pick gate mode from the destination branch (PRs) or the
-          # pushed branch (pushes / merge_group). release/* -> rc;
-          # everything else -> beta.
+          # Pick gate mode and the trusted-input source per event.
+          # Both pull_request and merge_group ship an immutable base SHA
+          # in the payload — use that so a base-branch advance during the
+          # run cannot retarget the trusted inputs at a different
+          # baseline. Pushes and workflow_dispatch run on a trusted
+          # branch already, so the in-tree files ARE the trusted tree.
           target_branch=""
-          case "${{ github.event_name }}" in
-            pull_request) target_branch="${{ github.base_ref }}" ;;
-            *)            target_branch="${{ github.ref_name }}" ;;
+          trusted_sha=""
+          trust_from_base=0
+          case "$EVENT_NAME" in
+            pull_request)
+              target_branch="$PR_BASE_REF"
+              trusted_sha="$PR_BASE_SHA"
+              trust_from_base=1
+              ;;
+            merge_group)
+              target_branch="${MERGE_BASE_REF#refs/heads/}"
+              trusted_sha="$MERGE_BASE_SHA"
+              trust_from_base=1
+              ;;
+            *)
+              target_branch="$PUSH_REF_NAME"
+              ;;
           esac
           case "$target_branch" in
             release/*) mode="rc" ;;
             *)         mode="beta" ;;
           esac
           echo "mode=$mode" >> "$GITHUB_OUTPUT"
-          # Fetch the base ref's manifest + baseline so a PR that lowers
-          # floors or rewrites baselines cannot weaken the required check.
-          # On pushes / merge_group the checked-out tree IS the trusted
-          # tree, so we point at the in-tree files.
           mkdir -p .ci-trusted
-          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
-            git fetch --depth=1 origin "$target_branch"
-            git show "origin/$target_branch:crates/cairn-bench/manifests/coherence.toml" > .ci-trusted/coherence.toml
-            git show "origin/$target_branch:crates/cairn-bench/baselines/coherence.json" > .ci-trusted/coherence.json
+          if [[ "$trust_from_base" == "1" ]]; then
+            # Fetch the exact immutable base SHA. Avoids the race where
+            # `origin/$target_branch` advances between checkout and the
+            # git-show below.
+            git fetch --depth=1 origin "$trusted_sha"
+            git show "$trusted_sha:crates/cairn-bench/manifests/coherence.toml" > .ci-trusted/coherence.toml
+            git show "$trusted_sha:crates/cairn-bench/baselines/coherence.json" > .ci-trusted/coherence.json
             echo "manifest=.ci-trusted/coherence.toml" >> "$GITHUB_OUTPUT"
             echo "baseline=.ci-trusted/coherence.json" >> "$GITHUB_OUTPUT"
           else
