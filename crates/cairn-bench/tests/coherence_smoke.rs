@@ -309,6 +309,38 @@ async fn gate_outcome_69_on_failing_gate() {
 }
 
 #[tokio::test]
+async fn enforced_gate_rejects_coverage_regression() {
+    // Even when every category has *some* coverage, dropping the
+    // denominator below the baseline must fail closed. We simulate
+    // this by including only research_domain (1/3 of the trusted
+    // cassette corpus). Baseline records totals from all 3 cassettes,
+    // so research-only run shows a coverage shrink and trips
+    // CoverageRegression.
+    use cairn_bench::coherence::GateError;
+    let dir = tempdir().unwrap();
+    let opts = GateOptions {
+        mode: GateMode::Beta,
+        cassettes_dir: workspace_root().join("fixtures/v0/replay"),
+        include: vec!["research_domain".to_owned()],
+        manifest_path: manifest_path(),
+        baseline_path: Some(baseline_path()),
+        trend_path: dir.path().join("trend.jsonl"),
+        update_baseline: false,
+        write_trend: false,
+        cairn_version: env!("CARGO_PKG_VERSION").to_owned(),
+        git_sha: "smoke".to_owned(),
+        now: "2026-05-24T12:00:00Z".to_owned(),
+        run_id: "01J000000000000000000000RUN".to_owned(),
+    };
+    let err = run_coherence_gate(opts).await.expect_err("must reject");
+    assert!(
+        matches!(err, GateError::CoverageRegression { .. }),
+        "expected CoverageRegression, got {err:?}"
+    );
+    assert_eq!(err.exit_code(), 78);
+}
+
+#[tokio::test]
 async fn enforced_gate_rejects_zero_coverage_cassettes() {
     // The new IncompleteCoverage guard makes beta/rc fail closed when
     // any canonical category has 0 actions. p0_stories carries no
@@ -405,6 +437,27 @@ async fn update_baseline_rejects_zero_coverage_run() {
     assert_eq!(before, after);
 }
 
+/// Synthetic baseline whose totals match `failing_cassette_json` (1
+/// action per category). Lets failure-path tests run against a custom
+/// baseline without tripping the round-7 CoverageRegression guard,
+/// which would otherwise fire because the live baseline records
+/// totals from all three 3-domain cassettes.
+fn force_fail_baseline_json() -> &'static str {
+    r#"{
+  "schema_version": 1,
+  "captured_at": "2026-05-24T00:00:00Z",
+  "cairn_version": "0.0.0",
+  "git_sha": "force-fail-test",
+  "metrics": {
+    "recall_precision":    { "score": 1.0, "passed": 1, "total": 1 },
+    "stale_avoidance":     { "score": 1.0, "passed": 1, "total": 1 },
+    "summary_quality":     { "score": 1.0, "passed": 1, "total": 1 },
+    "search_usefulness":   { "score": 1.0, "passed": 1, "total": 1 },
+    "forget_completeness": { "score": 1.0, "passed": 1, "total": 1 }
+  }
+}"#
+}
+
 #[tokio::test]
 async fn failed_gate_does_not_update_baseline() {
     // A regression that trips --gate beta must not be normalised into the
@@ -420,7 +473,11 @@ async fn failed_gate_does_not_update_baseline() {
     )
     .unwrap();
     let target_baseline = dir.path().join("baseline.json");
-    std::fs::copy(baseline_path(), &target_baseline).unwrap();
+    // Use a synthetic baseline whose totals match force_fail's coverage
+    // (1 action per category). The live committed baseline records the
+    // 3-cassette extended totals, which would trip the CoverageRegression
+    // guard before the failure path runs.
+    std::fs::write(&target_baseline, force_fail_baseline_json()).unwrap();
     let before = std::fs::read_to_string(&target_baseline).unwrap();
 
     let opts = GateOptions {

@@ -118,6 +118,25 @@ pub enum GateError {
         /// Gate mode that triggered the check (`"beta"` or `"rc"`).
         mode: &'static str,
     },
+    /// Enforced gate observed fewer actions in a category than the
+    /// committed baseline records. The score is a ratio, so a smaller
+    /// denominator with all-pass numerator still hits 1.0 even though
+    /// the actual coverage shrank — defeats the gate as a release
+    /// signal. We compare current `total` against baseline `total` and
+    /// fail closed on any drop.
+    #[error(
+        "coherence: category {category} total dropped from {baseline_total} to {current_total} under --gate {mode}; cassettes must not shed actions without an explicit baseline update"
+    )]
+    CoverageRegression {
+        /// Wire-string name of the category whose denominator shrank.
+        category: &'static str,
+        /// Total recorded in the trusted baseline.
+        baseline_total: u32,
+        /// Total observed in the current run.
+        current_total: u32,
+        /// Gate mode that triggered the check (`"beta"` or `"rc"`).
+        mode: &'static str,
+    },
 }
 
 impl GateError {
@@ -132,7 +151,8 @@ impl GateError {
             | Self::BaselineIo { .. }
             | Self::BaselineJson { .. }
             | Self::BaselineInvalid { .. }
-            | Self::IncompleteCoverage { .. } => 78,
+            | Self::IncompleteCoverage { .. }
+            | Self::CoverageRegression { .. } => 78,
             // Replay errors split by variant: content-shaped problems are
             // config (78), store/runtime problems are runtime (1).
             Self::Replay(replay) => match replay {
@@ -183,13 +203,30 @@ pub async fn run_coherence_gate(opts: GateOptions) -> Result<GateOutcome, GateEr
     // floor / delta evaluator would happily pass because empty buckets
     // score the vacuous 1.0. --gate none is the explicit escape hatch
     // for seeding / first-run / debug.
-    if let Some(mode_label) = enforced_mode_label(opts.mode)
-        && let Some(category) = first_empty_score_category(&scores)
-    {
-        return Err(GateError::IncompleteCoverage {
-            category,
-            mode: mode_label,
-        });
+    if let Some(mode_label) = enforced_mode_label(opts.mode) {
+        if let Some(category) = first_empty_score_category(&scores) {
+            return Err(GateError::IncompleteCoverage {
+                category,
+                mode: mode_label,
+            });
+        }
+        // Coverage-regression guard: scores are ratios, so dropping
+        // 6 of 9 recall actions while keeping 3 passing yields 1.0
+        // again. Compare current `total` per category against the
+        // trusted baseline; any shrinkage fails closed. The check is
+        // skipped when no baseline is provided (programmatic seeding
+        // or first-ever run).
+        if let Some(b) = baseline.as_ref()
+            && let Some((category, baseline_total, current_total)) =
+                first_shrunk_category(&scores, b)
+        {
+            return Err(GateError::CoverageRegression {
+                category,
+                baseline_total,
+                current_total,
+                mode: mode_label,
+            });
+        }
     }
     let results = evaluate(opts.mode, &scores, &manifest, baseline.as_ref());
     let gate_passed = all_pass(&results);
@@ -486,6 +523,28 @@ fn first_empty_score_category(scores: &CategoryScores) -> Option<&'static str> {
     for category in ALL_CATEGORIES {
         if scores.get(&category).is_none_or(|s| s.total == 0) {
             return Some(as_str(category));
+        }
+    }
+    None
+}
+
+/// First canonical category whose current total is strictly less than
+/// the baseline's recorded total. Used by the enforced-gate
+/// coverage-regression guard. Returns `(category, baseline_total,
+/// current_total)`.
+fn first_shrunk_category(
+    scores: &CategoryScores,
+    baseline: &Baseline,
+) -> Option<(&'static str, u32, u32)> {
+    for category in ALL_CATEGORIES {
+        let label = as_str(category);
+        let baseline_total = match baseline.score_for(category) {
+            Some(s) => s.total,
+            None => continue,
+        };
+        let current_total = scores.get(&category).map_or(0, |s| s.total);
+        if current_total < baseline_total {
+            return Some((label, baseline_total, current_total));
         }
     }
     None

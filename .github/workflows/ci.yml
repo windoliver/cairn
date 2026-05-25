@@ -226,6 +226,30 @@ jobs:
             *)         mode="beta" ;;
           esac
           echo "mode=$mode" >> "$GITHUB_OUTPUT"
+          # HEAD-tree validation: the candidate (this PR / merge_group)
+          # must still carry every required gate input. Without this
+          # check a PR that *deletes* manifest/baseline/cassettes from
+          # HEAD would silently pass — the job evaluates base copies,
+          # but after merge the base branch loses the inputs and every
+          # subsequent PR sees the bootstrap-fallback path (now also
+          # empty), effectively disabling the gate. Fail closed.
+          required_paths=(
+            "crates/cairn-bench/manifests/coherence.toml"
+            "crates/cairn-bench/baselines/coherence.json"
+            "fixtures/v0/replay/research_domain.json"
+            "fixtures/v0/replay/engineering_domain.json"
+            "fixtures/v0/replay/support_domain.json"
+          )
+          for path in "${required_paths[@]}"; do
+            if [[ ! -f "$path" ]]; then
+              echo "::error::coherence-gate: HEAD is missing required path '$path'; refusing to evaluate (trusted base files cannot mask a candidate that deletes gate inputs)"
+              exit 1
+            fi
+          done
+          if ! grep -q '"metric_category"' fixtures/v0/replay/research_domain.json; then
+            echo "::error::coherence-gate: HEAD cassettes do not carry metric_category tags; candidates cannot strip coherence taxonomy without first updating the gate definition"
+            exit 1
+          fi
           mkdir -p .ci-trusted
           if [[ "$trust_from_base" == "1" ]]; then
             # Fetch the exact immutable base SHA. Avoids the race where
@@ -242,14 +266,9 @@ jobs:
             # merges into main / release/*, future PRs see the trusted
             # path. The warning makes the fallback observable so a
             # future regression that deletes the trusted files from the
-            # base branch would not silently relax the gate.
-            required_paths=(
-              "crates/cairn-bench/manifests/coherence.toml"
-              "crates/cairn-bench/baselines/coherence.json"
-              "fixtures/v0/replay/research_domain.json"
-              "fixtures/v0/replay/engineering_domain.json"
-              "fixtures/v0/replay/support_domain.json"
-            )
+            # base branch would not silently relax the gate (the HEAD
+            # validation above already prevents a candidate from
+            # deleting them while still passing this job).
             base_has_all=1
             for path in "${required_paths[@]}"; do
               if ! git cat-file -e "$trusted_sha:$path" 2>/dev/null; then
