@@ -58,4 +58,4 @@ The gate exits 69 (`EX_UNAVAILABLE`) when any metric falls below its floor or
 regresses more than 2 % from the committed baseline. `forget_completeness` has
 a floor of 1.00 and a zero regression budget — any drop fails immediately.
 
-See the [capability matrix](capability-matrix.md) for what ships in each release.
+See the [capability matrix](../capability-matrix.md) for what ships in each release.

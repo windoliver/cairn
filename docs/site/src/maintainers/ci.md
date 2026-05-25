@@ -28,8 +28,12 @@ The main CI workflow runs on every PR and push to `main`. Key jobs:
   manifest (`cairn-bench coherence run --gate beta` on PRs / main;
   `--gate rc` on `release/*` branches). Fails closed on any metric regression
   or floor breach. See `crates/cairn-bench/manifests/coherence.toml`.
-- `codegen-drift`: IDL codegen (`cairn-codegen --check`) and docs codegen
-  (`cairn-docgen --check`) for committed generated output.
+- `codegen-drift`: IDL codegen drift gate only — runs `cairn-codegen --check`
+  to verify committed generated types match the IDL source.
+- `contract-drift`: wire-compat and capability-matrix gate — runs
+  `cairn-codegen --check`, `cairn-docgen --check`, the wire-compat fixtures,
+  and the capability-matrix v0.1 advertise tests. Fails if any generated
+  output or contract surface drifts from committed state.
 - `bench-full`: manual-trigger BrainBench scorecard run (`bench / world-v1`).
 
 ## Supply-chain CI (`supply-chain.yml`)
