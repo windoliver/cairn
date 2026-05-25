@@ -232,20 +232,59 @@ jobs:
             # `origin/$target_branch` advances between checkout and the
             # git-show below.
             git fetch --depth=1 origin "$trusted_sha"
-            git show "$trusted_sha:crates/cairn-bench/manifests/coherence.toml" > .ci-trusted/coherence.toml
-            git show "$trusted_sha:crates/cairn-bench/baselines/coherence.json" > .ci-trusted/coherence.json
-            # Also pull the trusted cassette corpus. The default cassette
-            # dir lives at fixtures/v0/replay; a PR could otherwise keep
-            # one easy action per category to satisfy the coverage guard
-            # and silently drop hard cases. We materialise the three
-            # extended-domain cassettes at the base SHA.
-            mkdir -p .ci-trusted/replay
-            for cassette in research_domain engineering_domain support_domain; do
-              git show "$trusted_sha:fixtures/v0/replay/${cassette}.json" > ".ci-trusted/replay/${cassette}.json"
+            # Bootstrap guard: the trusted-input model assumes the base
+            # SHA already carries the manifest, baseline, and tagged
+            # cassettes. On the *very first* PR that introduces these
+            # files, the base predates them, so a strict `git show`
+            # would abort the required job and the PR could never land.
+            # If any required path is missing on the base, fall back to
+            # in-tree files and emit a visible warning. Once this PR
+            # merges into main / release/*, future PRs see the trusted
+            # path. The warning makes the fallback observable so a
+            # future regression that deletes the trusted files from the
+            # base branch would not silently relax the gate.
+            required_paths=(
+              "crates/cairn-bench/manifests/coherence.toml"
+              "crates/cairn-bench/baselines/coherence.json"
+              "fixtures/v0/replay/research_domain.json"
+              "fixtures/v0/replay/engineering_domain.json"
+              "fixtures/v0/replay/support_domain.json"
+            )
+            base_has_all=1
+            for path in "${required_paths[@]}"; do
+              if ! git cat-file -e "$trusted_sha:$path" 2>/dev/null; then
+                base_has_all=0
+                break
+              fi
             done
-            echo "manifest=.ci-trusted/coherence.toml" >> "$GITHUB_OUTPUT"
-            echo "baseline=.ci-trusted/coherence.json" >> "$GITHUB_OUTPUT"
-            echo "cassettes=.ci-trusted/replay" >> "$GITHUB_OUTPUT"
+            # Tag check: the cassettes need metric_category /
+            # stale_record_ids tags for the coverage guard to find
+            # actions. If the base has the cassette files but not the
+            # tags (e.g. #136 landed but #137 hasn't yet), the gate
+            # would fail with IncompleteCoverage. Probe one cassette for
+            # the marker string and fall back if absent.
+            if [[ "$base_has_all" == "1" ]]; then
+              probe="$(git show "$trusted_sha:fixtures/v0/replay/research_domain.json" 2>/dev/null || echo '')"
+              if ! grep -q '"metric_category"' <<<"$probe"; then
+                base_has_all=0
+              fi
+            fi
+            if [[ "$base_has_all" == "1" ]]; then
+              git show "$trusted_sha:crates/cairn-bench/manifests/coherence.toml" > .ci-trusted/coherence.toml
+              git show "$trusted_sha:crates/cairn-bench/baselines/coherence.json" > .ci-trusted/coherence.json
+              mkdir -p .ci-trusted/replay
+              for cassette in research_domain engineering_domain support_domain; do
+                git show "$trusted_sha:fixtures/v0/replay/${cassette}.json" > ".ci-trusted/replay/${cassette}.json"
+              done
+              echo "manifest=.ci-trusted/coherence.toml" >> "$GITHUB_OUTPUT"
+              echo "baseline=.ci-trusted/coherence.json" >> "$GITHUB_OUTPUT"
+              echo "cassettes=.ci-trusted/replay" >> "$GITHUB_OUTPUT"
+            else
+              echo "::warning::coherence-gate falling back to in-tree manifest/baseline/cassettes (base $trusted_sha predates #137 — bootstrap path)"
+              echo "manifest=crates/cairn-bench/manifests/coherence.toml" >> "$GITHUB_OUTPUT"
+              echo "baseline=crates/cairn-bench/baselines/coherence.json" >> "$GITHUB_OUTPUT"
+              echo "cassettes=fixtures/v0/replay" >> "$GITHUB_OUTPUT"
+            fi
           else
             echo "manifest=crates/cairn-bench/manifests/coherence.toml" >> "$GITHUB_OUTPUT"
             echo "baseline=crates/cairn-bench/baselines/coherence.json" >> "$GITHUB_OUTPUT"
