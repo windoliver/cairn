@@ -28,7 +28,7 @@ tracing-subscriber = { version = "0.3", default-features = false, features = ["e
 anyhow = "1"
 async-trait = "0.1"
 axum = { version = "0.8", default-features = false, features = ["json", "tokio", "http1", "query"] }
-rmcp = { version = "1.5.0", default-features = false, features = ["server", "transport-io"] }
+rmcp = { version = "1.7.0", default-features = false, features = ["server", "transport-io"] }
 include_dir = { version = "0.7", default-features = false }
 insta = { version = "1.40", features = ["json", "yaml"] }
 jsonschema = { version = "0.46", default-features = false }
@@ -99,8 +99,8 @@ schemars = "1.0"
 memchr = "2"
 smallvec = "1"
 cpal = "0.17.3"
-sherpa-onnx = { version = "1.13.1", default-features = false, features = ["static"] }
-xcap = "0.9.4"
+sherpa-onnx = { version = "1.13.2", default-features = false, features = ["static"] }
+xcap = "0.9.6"
 
 # Path + version on intra-workspace deps so `cargo publish` can rewrite the
 # path to a registry version without losing the constraint. The version
