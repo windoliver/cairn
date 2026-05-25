@@ -823,6 +823,7 @@ dependencies = [
  "base64 0.22.1",
  "bon",
  "cairn-connectors-core",
+ "cairn-core",
  "chrono",
  "hex",
  "insta",

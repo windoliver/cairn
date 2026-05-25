@@ -1,1 +1,201 @@
-//! `GitHubConnector` body added in Task 12.
+//! `GitHubConnector` — `Connector` + `ConnectorPlugin` impl that orchestrates
+//! the three internal `GhResource` implementations.
+
+use std::sync::Arc;
+
+use async_trait::async_trait;
+use cairn_connectors_core::{
+    CONTRACT_VERSION, Connector, ConnectorCapabilities, ConnectorError, ConnectorEvent,
+    ConnectorManifest, ConnectorPlugin, PollContext, PollOutcome, WebhookContext, WebhookRequest,
+};
+use cairn_core::contract::version::{ContractVersion, VersionRange};
+use cairn_core::domain::Identity;
+use url::Url;
+
+use crate::MANIFEST_TOML;
+use crate::auth::GitHubAuth;
+use crate::client::GhClient;
+use crate::cursor::CursorState;
+use crate::resources::{
+    GhResource, Repo, commits::CommitsResource, issues::IssuesResource, prs::PrsResource,
+};
+use crate::webhook::dispatch;
+
+/// Public top-level connector. Created once per `(repo, credentials)` pair.
+pub struct GitHubConnector {
+    manifest: ConnectorManifest,
+    sensor: Identity,
+    repo: Repo,
+    base_url: Url,
+}
+
+impl GitHubConnector {
+    /// Construct a new GitHub connector for `owner/name` against the default
+    /// `https://api.github.com` base URL.
+    pub fn new(owner: impl Into<String>, name: impl Into<String>) -> Result<Self, ConnectorError> {
+        Self::with_base_url(owner, name, "https://api.github.com")
+    }
+
+    /// Construct with a caller-supplied base URL. Used by integration tests
+    /// to redirect to `wiremock`.
+    pub fn with_base_url(
+        owner: impl Into<String>,
+        name: impl Into<String>,
+        base: impl AsRef<str>,
+    ) -> Result<Self, ConnectorError> {
+        let manifest = ConnectorManifest::parse_toml(MANIFEST_TOML)
+            .map_err(|e| ConnectorError::fatal_msg(format!("github manifest: {e}")))?;
+        let sensor = Identity::parse("snr:local:connector:github:v1").map_err(|e| {
+            ConnectorError::fatal_msg(format!("github sensor identity: {e:?}"))
+        })?;
+        let base_url = Url::parse(base.as_ref())
+            .map_err(|e| ConnectorError::fatal_msg(format!("github base url: {e}")))?;
+        Ok(Self {
+            manifest,
+            sensor,
+            repo: Repo {
+                owner: owner.into(),
+                name: name.into(),
+            },
+            base_url,
+        })
+    }
+
+    // `self` is intentionally kept for forward compatibility — resource sets may
+    // become instance-configurable when per-repo feature flags land (Task 18+).
+    #[allow(clippy::unused_self)]
+    fn resources(&self) -> [&dyn GhResource; 3] {
+        [&IssuesResource, &PrsResource, &CommitsResource]
+    }
+}
+
+#[async_trait]
+impl Connector for GitHubConnector {
+    fn name(&self) -> &str {
+        self.manifest.name()
+    }
+
+    fn manifest(&self) -> &ConnectorManifest {
+        &self.manifest
+    }
+
+    fn capabilities(&self) -> &ConnectorCapabilities {
+        static C: ConnectorCapabilities = ConnectorCapabilities {
+            poll: true,
+            webhook: true,
+            backfill: true,
+        };
+        &C
+    }
+
+    fn sensor_identity(&self) -> &Identity {
+        &self.sensor
+    }
+
+    fn supported_contract_versions(&self) -> VersionRange {
+        <Self as ConnectorPlugin>::SUPPORTED_VERSIONS
+    }
+
+    async fn poll(&self, cx: &PollContext) -> Result<PollOutcome, ConnectorError> {
+        let auth = Arc::new(GitHubAuth::from_handle(&cx.credentials)?);
+        let client = GhClient::new(auth, self.base_url.clone());
+
+        let mut state = CursorState::decode(cx.last_cursor.as_deref())?;
+        let resources = self.resources();
+        let n_resources = u32::try_from(resources.len()).unwrap_or(3);
+        let per_resource_budget = cx
+            .budget_remaining_items
+            .checked_div(n_resources)
+            .unwrap_or(0)
+            .max(1);
+
+        let mut all_events: Vec<ConnectorEvent> = Vec::new();
+        let mut max_hint: Option<std::time::Duration> = None;
+
+        for (idx, r) in resources.iter().enumerate() {
+            // Bail on cancel without losing what we already gathered.
+            if cx.cancel.is_cancelled() {
+                break;
+            }
+            let sub = match idx {
+                0 => &state.issues,
+                1 => &state.prs,
+                _ => &state.commits,
+            };
+            match r.poll(&client, &self.repo, sub, per_resource_budget).await {
+                Ok(outcome) => {
+                    all_events.extend(outcome.events);
+                    match idx {
+                        0 => state.issues = outcome.next_cursor,
+                        1 => state.prs = outcome.next_cursor,
+                        _ => state.commits = outcome.next_cursor,
+                    }
+                    if let Some(h) = outcome.rate_limit_hint {
+                        max_hint = Some(max_hint.map_or(h, |m| m.max(h)));
+                    }
+                }
+                Err(e) => return Err(e.into()),
+            }
+        }
+
+        state.v = 1;
+        let next_cursor = state
+            .encode()
+            .map_err(|e| ConnectorError::transient_msg(format!("cursor encode: {e}")))?;
+
+        Ok(PollOutcome {
+            events: all_events,
+            next_cursor: Some(next_cursor),
+            rate_limit_hint: max_hint,
+        })
+    }
+
+    async fn ingest_webhook(
+        &self,
+        req: &WebhookRequest,
+        _cx: &WebhookContext,
+    ) -> Result<Vec<ConnectorEvent>, ConnectorError> {
+        // The substrate computed and verified the signature_id before this
+        // method is called. We use the X-Hub-Signature-256 header value (with
+        // the "sha256=" prefix stripped) as a signature_id surrogate; substrate
+        // dedups on the canonical sig_id internally.
+        let signature_id = req
+            .header("X-Hub-Signature-256")
+            .unwrap_or("unverified")
+            .trim_start_matches("sha256=")
+            .to_owned();
+        Ok(dispatch(req, &signature_id, &self.repo)?)
+    }
+}
+
+impl ConnectorPlugin for GitHubConnector {
+    const NAME: &'static str = "github";
+    const SUPPORTED_VERSIONS: VersionRange =
+        VersionRange::new(CONTRACT_VERSION, ContractVersion::new(0, 2, 0));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn manifest_parses_and_name_matches() {
+        let c = GitHubConnector::new("o", "r").expect("constructs");
+        assert_eq!(c.name(), "github");
+        assert_eq!(c.sensor_identity().as_str(), "snr:local:connector:github:v1");
+    }
+
+    #[test]
+    fn is_arc_dyn_connector() {
+        let c: Arc<dyn Connector> =
+            Arc::new(GitHubConnector::new("o", "r").expect("constructs"));
+        assert_eq!(c.name(), "github");
+    }
+
+    #[test]
+    fn capabilities_advertise_all_three() {
+        let c = GitHubConnector::new("o", "r").unwrap();
+        let caps = c.capabilities();
+        assert!(caps.poll && caps.webhook && caps.backfill);
+    }
+}

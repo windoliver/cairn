@@ -17,8 +17,7 @@ mod webhook;
 
 pub use error::GhError;
 
-// Re-export added in Task 12.
-// pub use connector::GitHubConnector;
+pub use connector::GitHubConnector;
 
 /// Embedded `connector.toml` bytes, parsed at `GitHubConnector::new` time.
 pub(crate) const MANIFEST_TOML: &str = include_str!("../connector.toml");
