@@ -80,7 +80,7 @@ async-openai = { version = "0.36", default-features = false, features = ["rustls
 # direct reqwest because `async-openai` discards HTTP status on
 # `JSONDeserialize` errors (e.g. empty bodies), which blocks accurate
 # 401/429/5xx disambiguation. async-openai is used for typed structs only.
-reqwest = { version = "0.13", default-features = false, features = ["rustls", "json", "stream"] }
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "json", "stream", "gzip"] }
 futures-util = { version = "0.3", default-features = false }
 wiremock = "0.6"
 zeroize = { version = "1.7", default-features = false, features = ["zeroize_derive"] }
