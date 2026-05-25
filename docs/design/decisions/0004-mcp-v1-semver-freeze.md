@@ -50,9 +50,14 @@ requires `cairn.mcp.v2`.
   is frozen string-by-string. The **advertised set returned at runtime** is
   runtime-decided by `cairn-core::status::advertise` and is not frozen
   (see §3 below).
-- **`cairn.admin.v1` extension**: operator verbs `snapshot`, `restore`,
-  `replay_wal` (brief §8.0.a). Frozen alongside core because v1.0 ships
-  with this extension always-registered for operator deployments.
+- **Reserved namespace `cairn.admin.v1`**: the namespace and the verb
+  IDs `snapshot`, `restore`, `replay_wal` (brief §8.0.a) are frozen
+  *identifiers* — they cannot be reassigned to other meanings under
+  `cairn.mcp.v1`. The extension is currently in the deferred-wiring
+  bucket (`capability_matrix_v1.rs::DEFERRED_AT_PHASE`), so the runtime
+  does not advertise `cairn.mcp.v1.extension.admin` today. When the
+  dispatch path lands it becomes advertised under v1 (no version bump),
+  per §3.
 
 ### 2. NOT frozen under `cairn.mcp.v1`
 
@@ -71,9 +76,20 @@ between verb ID and namespace.
 
 The following changes are **additive** and ship under `cairn.mcp.v1`:
 
-- New capability code added to `capabilities/capabilities.json`. Clients
-  fail closed on un-advertised codes (brief §8.0.a invariant 6), so
-  registry growth never breaks an older client.
+- New capability code added to `capabilities/capabilities.json` **as a
+  reserved identifier**. The string is now permanently bound to its
+  meaning under `cairn.mcp.v1` (no aliasing). Whether the code can be
+  *advertised* in `status.capabilities` without breaking older clients
+  depends on the wire-tolerance of the deserializer: today's generated
+  `enum Capabilities` is a closed serde enum (no `#[serde(other)]`),
+  so an older v1 client built against the current schema will fail to
+  parse a `status` response containing a new code. Until the wire model
+  grows tolerance (an open-enum variant or a `Vec<String>` typing),
+  advertising a new code requires a coordinated server + client upgrade
+  — it remains additive at the contract level (no v2 bump) but is
+  release-coordinated rather than free. Tracked as a follow-up
+  (open-enum tolerance is a v1.x compatibility improvement, not a v2
+  trigger).
 - New optional field on existing verb args. The field MUST be `Option<T>`
   in Rust with `#[serde(default)]` so older requests still deserialize.
 - New variant on a `#[non_exhaustive]` enum (error codes, `retrieve`

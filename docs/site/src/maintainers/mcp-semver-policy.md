@@ -20,10 +20,17 @@ Frozen under `cairn.mcp.v1` (any change here mints `cairn.mcp.v2`):
 - The error model (`errors/error.json`, including the
   `CapabilityUnavailable` → exit-code 69 mapping).
 - The capabilities registry (`capabilities/capabilities.json`) — the **set
-  of capability code identifiers** is frozen string-by-string. The
-  **advertised set** at runtime is still decided by
-  `cairn-core::status::advertise` and is not frozen.
-- `cairn.admin.v1` extension (operator verbs).
+  of capability code identifiers** is frozen string-by-string (existing
+  codes can't be renamed or repurposed). The **advertised set** at
+  runtime is still decided by `cairn-core::status::advertise` and is
+  not frozen. Caveat: today's generated `enum Capabilities` is a closed
+  serde enum, so adding a new code to the registry is contract-additive
+  but requires coordinated client upgrades to be wire-additive — see
+  "Adding a capability" below.
+- Reserved namespace `cairn.admin.v1` (verb IDs `snapshot`, `restore`,
+  `replay_wal` are frozen identifiers). Dispatch is currently in the
+  deferred-wiring bucket; the namespace + verb names are reserved for
+  v1 so they can't be reassigned elsewhere.
 
 NOT frozen under `cairn.mcp.v1` — each carries its own
 `<namespace>.v1` semver:
@@ -36,7 +43,16 @@ NOT frozen under `cairn.mcp.v1` — each carries its own
 See [ADR 0004 §1–§2](https://github.com/windoliver/cairn/blob/main/docs/design/decisions/0004-mcp-v1-semver-freeze.md)
 for the exhaustive list.
 
-## Adding a capability (additive, no version bump)
+## Adding a capability (additive, no version bump — see wire caveat)
+
+**Wire caveat.** The generated `enum Capabilities` is a closed serde
+enum: an older v1 client built against the current schema will fail to
+deserialize a `status` response that includes a code it doesn't know.
+Adding a code to the registry is **contract-additive** but
+**release-coordinated** — operators on stale clients won't successfully
+discover capabilities until they upgrade. Plan the rollout with that
+in mind (announce in CHANGELOG; upgrade clients first when possible).
+Open-enum tolerance is a tracked v1.x compatibility improvement.
 
 1. Add the code identifier to
    `crates/cairn-idl/schema/capabilities/capabilities.json`.

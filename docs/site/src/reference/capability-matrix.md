@@ -45,7 +45,7 @@ on any un-advertised code (brief §8.0.a).
 | Session reload | `cairn.mcp.v1.retrieve.session`, `.rehydrate` | frozen v1.0 |
 | `forget` modes | `cairn.mcp.v1.forget.record`, `.session`, `.scope` | frozen v1.0 |
 | Consolidation tiers | `cairn.mcp.v1.summarize.rolling`, `.reflection`, `.rem`, `.deep` | frozen v1.0 |
-| Extension namespaces | `cairn.admin.v1.*` | frozen v1.0 |
+| Extension namespaces | `cairn.admin.v1.*` | reserved v1 (identifiers frozen; dispatch deferred per `capability_matrix_v1::DEFERRED_AT_PHASE`) |
 | Extension namespaces | `cairn.aggregate.v1.*`, `cairn.coord.v1.*`, `cairn.federation.v1.*`, `cairn.sessiontree.v1.*` | independent (per-namespace) |
 | Sensors | `cairn.sensors.v1.<sensor>` (local + remote) | sensors namespace (independent) |
 
