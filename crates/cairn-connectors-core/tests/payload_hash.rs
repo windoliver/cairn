@@ -202,6 +202,16 @@ impl PipelineEmit for Capturer {
     }
 }
 
+/// Emit that panics if called — used in tests where `emit` must NOT be reached.
+struct PanicEmit;
+
+#[async_trait::async_trait]
+impl PipelineEmit for PanicEmit {
+    async fn emit(&self, _: CaptureEvent) -> Result<(), ConnectorError> {
+        panic!("emit must NOT be called — framework gate should have blocked this");
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Finding D — tests
 // ---------------------------------------------------------------------------
@@ -278,23 +288,28 @@ async fn text_payload_emits_real_sha256_hash() {
     );
 }
 
-/// A connector emitting a Binary payload must be accepted end-to-end, with
-/// the adapter-declared `sha256` forwarded as the `payload_hash` on the
-/// emitted `CaptureEvent` (Finding D).
+/// Binary payloads are rejected by the P0 substrate with a clear error
+/// referencing issue #131 (Finding N).
 ///
-/// The framework trusts the adapter-declared hash; the spool verification
-/// layer (#131) will cross-check it against the actual content at `bytes_ref`.
+/// The spool-verification layer that would cross-check the adapter-declared
+/// `sha256` against the actual content at `bytes_ref` is deferred to #131.
+/// Until then, `process_event` must return `MalformedPayload` so that
+/// adapters producing binary content receive a clear signal to wait for the
+/// verified spool API rather than silently spoofing hashes and paths.
+///
+/// This test replaces the former `binary_payload_uses_adapter_declared_sha256`
+/// test, which asserted the opposite (Binary accepted) and is now invalid.
 #[tokio::test]
-async fn binary_payload_uses_adapter_declared_sha256() {
+async fn binary_payload_rejected_with_clear_error() {
     // A known 64-char lowercase hex string (sha256 of b"deadbeef").
     let declared_sha256 = format!("sha256:{}", hex::encode(Sha256::digest(b"deadbeef")));
 
-    let capturer = Arc::new(Capturer::default());
     let tmp = tempfile::tempdir().expect("tempdir");
     let mut registry = ConnectorRegistry::builder()
         .credentials(Arc::new(InMemoryCredentialStore::default()))
         .consent(Arc::new(AcceptAllConsent::default()))
-        .emit(capturer.clone() as Arc<dyn PipelineEmit>)
+        // PanicEmit: emit must NOT be called — Binary is rejected before emit.
+        .emit(Arc::new(PanicEmit))
         .spool_root(tmp.path().to_path_buf())
         .build();
 
@@ -307,37 +322,17 @@ async fn binary_payload_uses_adapter_declared_sha256() {
         .await
         .expect("enable must succeed");
 
-    // poll_now must succeed — Binary payloads use the adapter-declared sha256
-    // as the payload hash and do not require the spool verification layer
-    // (deferred to #131).
-    registry
+    // poll_now must fail — Binary payloads are rejected at the substrate boundary
+    // until issue #131 provides the spool-verified path (Finding N).
+    let err = registry
         .poll_now("binary-fixture")
         .await
-        .expect("poll_now must succeed for Binary payloads with a declared sha256");
+        .expect_err("poll_now must fail for Binary payloads (rejected until #131)");
 
     registry.shutdown().await;
 
-    // Exactly one event must reach the emit pipeline.
-    let events = capturer
-        .0
-        .lock()
-        .expect("invariant: Capturer mutex unpoisoned");
-    assert_eq!(
-        events.len(),
-        1,
-        "Binary payload must produce exactly one CaptureEvent; got {events:?}"
-    );
-
-    // The emitted payload_hash must equal the adapter-declared sha256.
-    let hash = events[0].payload_hash.as_str();
-    assert_eq!(
-        hash, declared_sha256,
-        "payload_hash must equal the adapter-declared sha256 for Binary payloads"
-    );
-
-    // Must not be the all-zero placeholder.
-    assert_ne!(
-        hash, "sha256:0000000000000000000000000000000000000000000000000000000000000000",
-        "payload_hash must not be the all-zero placeholder"
+    assert!(
+        matches!(err, ConnectorError::MalformedPayload(ref msg) if msg.contains("#131")),
+        "expected MalformedPayload mentioning #131, got {err:?}",
     );
 }

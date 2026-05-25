@@ -533,24 +533,18 @@ fn binary_size_hint_returns_bytes_len() {
 }
 
 /// A `Binary` payload whose declared `bytes_len` fits within `payload.max_bytes`
-/// must be accepted (`PanicEmit` is NOT used here — we use a recording emit).
+/// is now rejected by the P0 substrate (Finding N).
+///
+/// Previously this test asserted that a within-limit Binary payload was
+/// accepted. After Finding N, Binary payloads are rejected at the substrate
+/// boundary regardless of size — the spool-verification layer needed to safely
+/// accept them is deferred to issue #131 (see spec §8 "Out of scope").
+///
+/// `PanicEmit` verifies that `emit` is never called.
 #[tokio::test]
-async fn binary_payload_within_limit_accepted() {
-    use cairn_core::domain::capture::CaptureEvent;
-    use std::sync::Mutex as StdMutex;
-
-    struct CountEmit(StdMutex<usize>);
-    #[async_trait::async_trait]
-    impl PipelineEmit for CountEmit {
-        async fn emit(&self, _: CaptureEvent) -> Result<(), ConnectorError> {
-            *self.0.lock().expect("mutex unpoisoned") += 1;
-            Ok(())
-        }
-    }
-
-    let emit = Arc::new(CountEmit(StdMutex::new(0)));
-
-    // max_bytes = "1KiB" = 1024; declare exactly 1024 bytes — must pass.
+async fn binary_payload_within_limit_rejected() {
+    // max_bytes = "1KiB" = 1024; declare exactly 1024 bytes — still rejected
+    // because Binary is blocked at the substrate boundary until #131.
     let event = base_event(
         ConnectorScope::project("p"),
         ConnectorPayload::Binary {
@@ -565,7 +559,7 @@ async fn binary_payload_within_limit_accepted() {
     let mut reg = ConnectorRegistry::builder()
         .credentials(Arc::new(InMemoryCredentialStore::default()))
         .consent(Arc::new(AcceptAllConsent::default()))
-        .emit(emit.clone())
+        .emit(Arc::new(PanicEmit))
         .build();
 
     reg.register(StrictConnector::new(vec![event]))
@@ -574,14 +568,75 @@ async fn binary_payload_within_limit_accepted() {
         .await
         .expect("enable must succeed");
 
-    reg.poll_now("strict")
+    let err = reg
+        .poll_now("strict")
         .await
-        .expect("poll_now must succeed for binary payload within size limit");
+        .expect_err("poll_now must fail — Binary payloads are rejected until #131");
 
-    assert_eq!(
-        *emit.0.lock().expect("mutex unpoisoned"),
-        1,
-        "exactly one event must reach emit"
+    assert!(
+        matches!(err, ConnectorError::MalformedPayload(ref msg) if msg.contains("#131")),
+        "expected MalformedPayload mentioning #131, got {err:?}",
+    );
+
+    reg.shutdown().await;
+}
+
+// ---------------------------------------------------------------------------
+// Finding N — Binary payload is rejected at the substrate boundary
+// ---------------------------------------------------------------------------
+
+/// A `Binary` event submitted through the connector pipeline must be rejected
+/// by `process_event` with `MalformedPayload` containing a message that
+/// references `#131` (Finding N).
+///
+/// This test constructs a `ConnectorPayload::Binary` event and drives it
+/// through `poll_now` (which calls `process_event` internally). It asserts
+/// that the error is a `MalformedPayload` and that the message includes
+/// `"#131"` so adapters receive a clear signal pointing to the future
+/// spool-verified path.
+///
+/// `PanicEmit` verifies that `emit` is never reached — the rejection must
+/// happen before the downstream pipeline is called.
+#[tokio::test]
+async fn binary_payload_rejected_with_clear_error() {
+    // Construct a well-formed Binary payload that passes the manifest's MIME
+    // and size gates (so the Binary rejection in Finding N is the first error).
+    // `STRICT_MANIFEST` allows "application/json" and max_bytes = 1KiB; use a
+    // small declared bytes_len and the allowed MIME so only the substrate-level
+    // Binary check fires.
+    let event = base_event(
+        ConnectorScope::project("p"),
+        ConnectorPayload::Binary {
+            mime: "application/json".into(),
+            sha256: "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+                .into(),
+            bytes_ref: "sources/connector/strict/some-file".into(),
+            bytes_len: 100,
+        },
+    );
+
+    let mut reg = ConnectorRegistry::builder()
+        .credentials(Arc::new(InMemoryCredentialStore::default()))
+        .consent(Arc::new(AcceptAllConsent::default()))
+        // emit must NOT be called — the Binary payload is rejected before emit.
+        .emit(Arc::new(PanicEmit))
+        .build();
+
+    reg.register(StrictConnector::new(vec![event]))
+        .expect("register must succeed");
+    reg.enable("strict", strict_grant())
+        .await
+        .expect("enable must succeed");
+
+    let err = reg
+        .poll_now("strict")
+        .await
+        .expect_err("poll_now must fail — Binary payloads are rejected at the substrate boundary");
+
+    // Must be MalformedPayload with a message that references #131.
+    assert!(
+        matches!(err, ConnectorError::MalformedPayload(ref msg) if msg.contains("#131")),
+        "expected MalformedPayload mentioning #131, got {err:?}",
     );
 
     reg.shutdown().await;

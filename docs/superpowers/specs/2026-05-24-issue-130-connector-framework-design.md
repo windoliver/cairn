@@ -428,6 +428,13 @@ commits the result.
 
 Named so the PR description can cite them:
 
+- **Binary payloads** — `ConnectorPayload::Binary` is rejected at the P0
+  substrate boundary (`process_event` returns `MalformedPayload` with a message
+  referencing `#131`). The spool-verification layer that would cross-check the
+  adapter-declared `sha256` against the content at `bytes_ref` is deferred to
+  issue #131 (first real adapter crate). Accepting Binary without verification
+  would allow a malicious adapter to spoof any path under `sources/` and any
+  hash, violating the trust model described in brief §3 and §14.
 - **`KeychainCredentialStore` (persistent default `CredentialStore` impl)** —
   deferred. The existing `cairn-keychain::Keystore` trait is purpose-built
   for identity-keypairs (`HandleAccount::Identity`) and the per-vault

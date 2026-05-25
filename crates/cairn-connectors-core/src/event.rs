@@ -207,6 +207,12 @@ pub enum ConnectorPayload {
     /// payload referenced by `bytes_ref`. The framework trusts this value for
     /// budget and size-gate enforcement. The spool layer (#131) will verify it
     /// against the on-disk content and reject mismatches before persisting.
+    ///
+    /// **P0 substrate rejects Binary payloads** — see issue #131 for the
+    /// spool-verified path. Passing `ConnectorPayload::Binary` to
+    /// `process_event` returns [`crate::error::ConnectorError::MalformedPayload`]
+    /// with a message referencing `#131`. Adapters that produce binary content
+    /// must wait for the verified spool API (spec §8 "Out of scope").
     Binary {
         /// MIME type of the payload (e.g. `"application/pdf"`).
         mime: String,
