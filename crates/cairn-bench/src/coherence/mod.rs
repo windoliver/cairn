@@ -529,12 +529,32 @@ pub fn verify_no_weakening(
         if let (Some(hs), Some(bs)) = (
             head_baseline.score_for(category),
             base_baseline.score_for(category),
-        ) && hs.total < bs.total
-        {
-            issues.push(format!(
-                "baseline weakened: {label}.total shrank from {} to {}",
-                bs.total, hs.total
-            ));
+        ) {
+            // Total shrink: smaller denominator → future runs may shed
+            // actions and still 1.0.
+            if hs.total < bs.total {
+                issues.push(format!(
+                    "baseline weakened: {label}.total shrank from {} to {}",
+                    bs.total, hs.total
+                ));
+            }
+            // Score / passed-count downgrade with same denominator
+            // would lower the floor the regression-delta check
+            // compares against — future regressions would have more
+            // room before tripping the 2 % budget. Use a small epsilon
+            // to tolerate float rounding from the consistency check.
+            if hs.score + 1e-9 < bs.score {
+                issues.push(format!(
+                    "baseline weakened: {label}.score dropped from {} to {}",
+                    bs.score, hs.score
+                ));
+            }
+            if hs.passed < bs.passed {
+                issues.push(format!(
+                    "baseline weakened: {label}.passed dropped from {} to {}",
+                    bs.passed, hs.passed
+                ));
+            }
         }
     }
     issues
@@ -984,6 +1004,39 @@ mod tests {
         let issues = verify_no_weakening(&m, &m, &head, &base);
         assert!(
             issues.iter().any(|s| s.contains("baseline weakened")),
+            "{issues:?}"
+        );
+    }
+
+    #[test]
+    fn verify_no_weakening_rejects_score_downgrade_with_same_total() {
+        // Same denominator but lower score: 1/1=1.0 → would lower
+        // the floor the regression-delta check is anchored to.
+        // verify-drift must catch this even though total is unchanged.
+        let m = good_manifest_for_verify();
+        let mut base = good_baseline();
+        base.metrics.insert(
+            "recall_precision".to_owned(),
+            CategoryScore {
+                passed: 3,
+                total: 3,
+                score: 1.0,
+            },
+        );
+        let mut head = base.clone();
+        head.metrics.insert(
+            "recall_precision".to_owned(),
+            CategoryScore {
+                passed: 2,
+                total: 3,
+                score: 2.0 / 3.0,
+            },
+        );
+        let issues = verify_no_weakening(&m, &m, &head, &base);
+        assert!(
+            issues
+                .iter()
+                .any(|s| s.contains("score") || s.contains("passed")),
             "{issues:?}"
         );
     }
