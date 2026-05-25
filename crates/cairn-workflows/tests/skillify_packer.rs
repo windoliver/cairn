@@ -271,7 +271,9 @@ fn install_lock_is_held_through_transaction_lifetime() {
 
     // Roll back the first install; the second should now proceed.
     let _ = manifest1;
-    transaction1.rollback();
+    transaction1
+        .rollback()
+        .expect("rollback should restore prior state");
 
     // Second install should complete within a few seconds.
     let start = std::time::Instant::now();
@@ -281,5 +283,51 @@ fn install_lock_is_held_through_transaction_lifetime() {
         "second install took too long"
     );
     let (_, tx2) = result.expect("second install succeeded after rollback released lock");
-    tx2.commit();
+    tx2.commit().expect("commit should succeed");
+}
+
+#[test]
+fn rollback_returns_error_when_unable_to_restore() {
+    // Round-19 finding: rollback must surface errors. The cleanest way
+    // to force a failure on a unit-test platform is to manually delete
+    // the backup directory between unpack and rollback — fs::rename
+    // then fails because the source no longer exists.
+    use cairn_workflows::skillify::packer::unpack_archive_staged;
+
+    let temp = TempDir::new().unwrap();
+    setup_candidate(&temp, "skc_rollback_err", "rollback-err");
+    let archive = SkillPackBuilder::new("err-pack", "0.1.0", ">=0.1.0", "err")
+        .add_candidate("skc_rollback_err")
+        .build(temp.path())
+        .unwrap();
+
+    // Install into a vault with a pre-existing candidate so the swap
+    // produces a Replaced action (rollback needs to restore a backup).
+    let install_temp = TempDir::new().unwrap();
+    setup_candidate(&install_temp, "skc_rollback_err", "rollback-err");
+
+    let (_manifest, tx) =
+        unpack_archive_staged(&archive.archive_path, install_temp.path(), "0.1.0").unwrap();
+
+    // Sabotage rollback: delete every .bak-* directory under the
+    // skillify root. The fs::rename(backup, dst) inside rollback will
+    // then fail with ENOENT.
+    let skillify_root = install_temp.path().join(".cairn/evolution/skillify");
+    for entry in std::fs::read_dir(&skillify_root).unwrap() {
+        let entry = entry.unwrap();
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy();
+        if name_str.starts_with(".bak-") {
+            std::fs::remove_dir_all(entry.path()).unwrap();
+        }
+    }
+
+    let err = tx
+        .rollback()
+        .expect_err("rollback should report missing backup");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("rollback incomplete") || msg.contains("restore"),
+        "expected rollback error message, got: {msg}"
+    );
 }

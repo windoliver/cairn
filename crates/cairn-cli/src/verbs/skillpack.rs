@@ -118,6 +118,7 @@ fn run_pack(args: &ArgMatches, explicit_vault: Option<&str>) -> ExitCode {
 // install
 // ---------------------------------------------------------------------------
 
+#[allow(clippy::too_many_lines, reason = "linear install flow: resolve, stage, re-gate per candidate, commit/rollback; splitting fragments would obscure the transactional sequence")]
 fn run_install(args: &ArgMatches, explicit_vault: Option<&str>) -> ExitCode {
     let archive_path = args
         .get_one::<PathBuf>("path")
@@ -227,12 +228,29 @@ fn run_install(args: &ArgMatches, explicit_vault: Option<&str>) -> ExitCode {
                      (the gate-report from the failed install is gone after\n\
                      rollback; rebuild the pack with fixes if needed)."
                 );
-                transaction.rollback();
+                if let Err(rollback_err) = transaction.rollback() {
+                    eprintln!(
+                        "warning: rollback after failed re-gate did not fully \
+                         restore prior state: {rollback_err}\n\
+                         Manual cleanup of `.bak-*` directories under \
+                         .cairn/evolution/skillify/ may be required.",
+                    );
+                    return ExitCode::from(2);
+                }
                 return ExitCode::from(1);
             }
             // All candidates promotable: commit the transaction so the
             // backups (if any) are removed.
-            transaction.commit();
+            if let Err(commit_err) = transaction.commit() {
+                eprintln!(
+                    "warning: install committed but backup cleanup \
+                     incomplete: {commit_err}\n\
+                     Vault is in a correct state; leftover `.bak-*` \
+                     directories may be removed manually.",
+                );
+                // The install succeeded; cleanup is an operator-visible
+                // warning, not a hard failure. Exit success.
+            }
             ExitCode::SUCCESS
         }
         Err(e) => {

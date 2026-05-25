@@ -169,6 +169,32 @@ impl SkillifyPipeline {
             return Ok(Self::build_result(&state, errors, start));
         }
 
+        // Round-19 hardening: authored.resolver_triggers MUST be exactly
+        // the set the extracted spec carries. Drift here means the spec
+        // and the live skill disagree about which intents route here —
+        // the resolver runner would see different triggers than the spec
+        // documented as the contract source-of-truth.
+        if let Some(actual) = extract_string_array(&authored.resolver_triggers) {
+            let expected: std::collections::BTreeSet<&str> =
+                spec.triggers.iter().map(String::as_str).collect();
+            let actual_set: std::collections::BTreeSet<&str> =
+                actual.iter().map(String::as_str).collect();
+            if actual_set != expected {
+                let msg = format!(
+                    "authored resolver_triggers {:?} do not match extracted spec triggers {:?}",
+                    actual, spec.triggers,
+                );
+                errors.push(msg.clone());
+                let _ = state.fail(msg);
+                return Ok(Self::build_result(&state, errors, start));
+            }
+        } else {
+            let msg = "authored resolver_triggers is not a JSON array of strings".to_owned();
+            errors.push(msg.clone());
+            let _ = state.fail(msg);
+            return Ok(Self::build_result(&state, errors, start));
+        }
+
         let payload_source_refs = payload.source_record_ids.clone();
 
         // Round 7 hardening (with round-13 refinement): purge stale
@@ -433,11 +459,32 @@ impl SkillifyPipeline {
         llm: &Arc<dyn LLMProvider>,
         spec: &SkillSpecDraft,
     ) -> Result<AuthoredSkillBundle, SkillifyPipelineError> {
+        // Round-19 hardening: pipe every spec field into the prompt so the
+        // authoring LLM is constrained by the extracted contract, not just
+        // a lane/slug pair. Without these the second-pass model invents its
+        // own triggers/requires/provides/success-criteria; the downstream
+        // cross-check then fails authoring and wastes the call.
         let req = CompletionRequest::builder()
             .prompt(format!(
-                "Create a section 11.b Skillify bundle for lane {} slug {}. \
-                 Decision tree: {}. Return JSON only.",
-                spec.lane, spec.slug, spec.decision_tree
+                "Create a section 11.b Skillify bundle for lane `{lane}` slug `{slug}`.\n\
+                 \n\
+                 Decision tree (extracted from sources): {decision_tree}\n\
+                 \n\
+                 Triggers (MUST be the exact set returned in resolver_triggers): {triggers}\n\
+                 Requires (this skill expects these capabilities; reference in skill_markdown body): {requires}\n\
+                 Provides (this skill advertises these capabilities; reference in skill_markdown body): {provides}\n\
+                 Success criteria (drive smoke/integration test assertions): {success}\n\
+                 Source record refs (cite in skill_markdown body): {sources}\n\
+                 \n\
+                 Return JSON only.",
+                lane = spec.lane,
+                slug = spec.slug,
+                decision_tree = spec.decision_tree,
+                triggers = serde_json::Value::from(spec.triggers.clone()),
+                requires = serde_json::Value::from(spec.requires.clone()),
+                provides = serde_json::Value::from(spec.provides.clone()),
+                success = serde_json::Value::from(spec.success_criteria.clone()),
+                sources = serde_json::Value::from(spec.source_refs.clone()),
             ))
             .schema(serde_json::json!({
                 "type": "object",
@@ -471,6 +518,16 @@ impl SkillifyPipeline {
             duration_ms: start.elapsed().as_millis().try_into().unwrap_or(u64::MAX),
         }
     }
+}
+
+/// Extract a JSON value as `Vec<String>` iff it is an array of string scalars.
+/// Returns `None` for any other shape (object, mixed types, non-string scalars).
+fn extract_string_array(value: &serde_json::Value) -> Option<Vec<String>> {
+    let array = value.as_array()?;
+    array
+        .iter()
+        .map(|item| item.as_str().map(str::to_owned))
+        .collect()
 }
 
 /// Derive a stable 26-char Crockford-base32 ULID for a brand-new skill

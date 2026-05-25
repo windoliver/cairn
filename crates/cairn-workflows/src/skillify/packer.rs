@@ -33,6 +33,24 @@ pub enum SkillPackBuildError {
         /// Candidate id.
         candidate_id: String,
     },
+    /// Rollback could not fully restore the pre-install vault state.
+    /// The vault is in an inconsistent state — at least one candidate
+    /// directory was neither cleaned up nor restored from its backup.
+    /// Backups (`.bak-*`) may still be present alongside the candidate
+    /// directories and require manual recovery.
+    #[error("install rollback incomplete ({} errors): {}", errors.len(), errors.join("; "))]
+    RollbackIncomplete {
+        /// Per-action error messages.
+        errors: Vec<String>,
+    },
+    /// Commit succeeded (new candidate bytes are in place) but one or
+    /// more backup directories could not be deleted. Vault state is
+    /// correct; leftover `.bak-*` directories can be removed manually.
+    #[error("install committed but backup cleanup failed ({} errors): {}", errors.len(), errors.join("; "))]
+    CommitCleanupFailed {
+        /// Per-action error messages.
+        errors: Vec<String>,
+    },
 }
 
 /// Built archive result.
@@ -760,17 +778,23 @@ pub fn unpack_archive_staged(
         if preexisting {
             // Rename existing → backup first; rename new → dst; delete backup last.
             if let Err(e) = fs::rename(&dst, &backup) {
-                rollback_install(&swap_log);
+                log_rollback_errors(rollback_install(&swap_log), "mid-install dst→backup");
                 return Err(SkillPackBuildError::Io(e));
             }
         }
         if let Err(e) = fs::rename(&src, &dst) {
-            rollback_install(&swap_log);
+            log_rollback_errors(rollback_install(&swap_log), "mid-install src→dst");
             // The dst-to-backup rename above (if it happened) needs to be
             // undone here — restore the backup since the new dst rename
-            // failed. We push the action first so rollback can find it.
-            if preexisting {
-                let _ = fs::rename(&backup, &dst);
+            // failed.
+            if preexisting && let Err(restore_err) = fs::rename(&backup, &dst) {
+                tracing::error!(
+                    target: "cairn_workflows::skillify::packer",
+                    dst = %dst.display(),
+                    backup = %backup.display(),
+                    error = %restore_err,
+                    "failed to restore backup after src→dst rename failure — vault is in inconsistent state",
+                );
             }
             return Err(SkillPackBuildError::Io(e));
         }
@@ -820,33 +844,64 @@ pub struct InstallTransaction {
 /// re-gate before committing.
 ///
 /// # Errors
-/// Propagates errors from [`unpack_archive_staged`].
+/// Propagates errors from [`unpack_archive_staged`] and from
+/// [`InstallTransaction::commit`] (backup cleanup failures).
 pub fn unpack_archive(
     archive_path: &Path,
     vault_root: &Path,
     cairn_version: &str,
 ) -> Result<SkillPackManifest, SkillPackBuildError> {
     let (manifest, tx) = unpack_archive_staged(archive_path, vault_root, cairn_version)?;
-    tx.commit();
+    tx.commit()?;
     Ok(manifest)
 }
 
 impl InstallTransaction {
     /// Commit the install: delete all backups, leaving the new candidate
     /// bytes in place.
-    pub fn commit(self) {
+    ///
+    /// # Errors
+    /// Returns [`SkillPackBuildError::CommitCleanupFailed`] when one or
+    /// more backup directories could not be deleted. The vault state is
+    /// still correct (the new candidate bytes are in place); the error
+    /// surfaces leftover `.bak-*` directories so the operator can clean
+    /// them up.
+    pub fn commit(self) -> Result<(), SkillPackBuildError> {
+        let mut errors = Vec::new();
         for action in &self.swap_log {
-            if let SwapAction::Replaced { backup, .. } = action {
-                let _ = fs::remove_dir_all(backup);
+            if let SwapAction::Replaced { backup, .. } = action
+                && let Err(e) = fs::remove_dir_all(backup)
+                // ENOENT means the backup was never created or was
+                // cleaned up by another process — not an error.
+                && e.kind() != std::io::ErrorKind::NotFound
+            {
+                errors.push(format!("remove backup {}: {e}", backup.display()));
             }
+        }
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(SkillPackBuildError::CommitCleanupFailed { errors })
         }
     }
 
     /// Roll back the install: remove every newly-installed candidate dir
     /// and restore replaced candidates from their backups. After rollback
     /// the vault is in the state it was before [`unpack_archive`] ran.
-    pub fn rollback(self) {
-        rollback_install(&self.swap_log);
+    ///
+    /// # Errors
+    /// Returns [`SkillPackBuildError::RollbackIncomplete`] when one or
+    /// more swap actions could not be undone. The vault is in an
+    /// inconsistent state — at least one candidate directory was neither
+    /// fully cleaned up nor restored from its backup. Manual recovery
+    /// may be required.
+    pub fn rollback(self) -> Result<(), SkillPackBuildError> {
+        let errors = rollback_install(&self.swap_log);
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(SkillPackBuildError::RollbackIncomplete { errors })
+        }
     }
 }
 
@@ -861,21 +916,64 @@ enum SwapAction {
     },
 }
 
+/// Log mid-install rollback errors at `error` level. Mid-install rollback
+/// errors do not preempt the original triggering error (the caller's user
+/// already gets that one), but they MUST be visible in operator logs since
+/// they leave the vault in an inconsistent state requiring manual cleanup.
+fn log_rollback_errors(errors: Vec<String>, context: &str) {
+    for err in errors {
+        tracing::error!(
+            target: "cairn_workflows::skillify::packer",
+            context = context,
+            error = %err,
+            "rollback action failed during install — vault may be in inconsistent state",
+        );
+    }
+}
+
 /// Undo every recorded swap, leaving the vault as it was before install.
 /// Called when a later rename fails mid-install so a partial pack does not
 /// pollute snapshots/gates.
-fn rollback_install(log: &[SwapAction]) {
+///
+/// Returns the set of per-action error messages encountered. An empty
+/// vector means the rollback fully restored the prior state. ENOENT on
+/// the candidate directory is normal (it may have been removed mid-install
+/// before its swap completed) and is not reported.
+fn rollback_install(log: &[SwapAction]) -> Vec<String> {
+    let mut errors = Vec::new();
     for action in log.iter().rev() {
         match action {
             SwapAction::Created { dst } => {
-                let _ = fs::remove_dir_all(dst);
+                if let Err(e) = fs::remove_dir_all(dst)
+                    && e.kind() != std::io::ErrorKind::NotFound
+                {
+                    errors.push(format!("remove created {}: {e}", dst.display()));
+                }
             }
             SwapAction::Replaced { dst, backup } => {
-                let _ = fs::remove_dir_all(dst);
-                let _ = fs::rename(backup, dst);
+                // Remove the new install bytes; ENOENT is benign.
+                if let Err(e) = fs::remove_dir_all(dst)
+                    && e.kind() != std::io::ErrorKind::NotFound
+                {
+                    errors.push(format!("remove replaced {}: {e}", dst.display()));
+                    // Renaming the backup over a still-present dst
+                    // would fail (or worse, succeed and corrupt
+                    // state). Skip the restore for this entry; the
+                    // backup remains on disk under its `.bak-*`
+                    // name so a human can recover.
+                    continue;
+                }
+                if let Err(e) = fs::rename(backup, dst) {
+                    errors.push(format!(
+                        "restore {} from backup {}: {e}",
+                        dst.display(),
+                        backup.display()
+                    ));
+                }
             }
         }
     }
+    errors
 }
 
 /// Resource limits for archive extraction. Without these, a malicious
