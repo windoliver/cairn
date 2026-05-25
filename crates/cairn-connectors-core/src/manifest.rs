@@ -132,8 +132,9 @@ pub struct ScopePattern {
 
 /// Webhook signature requirements.
 ///
-/// The TOML keys use dotted names (`"signature.algorithm"`, `"signature.header"`)
-/// which are preserved verbatim in the TOML file via `#[serde(rename = …)]`.
+/// The TOML keys use dotted names (`"signature.algorithm"`, `"signature.header"`,
+/// `"signature.prefix"`) which are preserved verbatim in the TOML file via
+/// `#[serde(rename = …)]`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WebhookBlock {
@@ -143,6 +144,15 @@ pub struct WebhookBlock {
     /// HTTP header carrying the signature (e.g. `"X-Fixture-Signature"`).
     #[serde(rename = "signature.header")]
     pub signature_header: String,
+    /// Optional literal prefix to strip from the signature header value before
+    /// hex-decoding.
+    ///
+    /// GitHub sends `X-Hub-Signature-256: sha256=<hex>` — setting this field to
+    /// `"sha256="` causes the substrate to strip that prefix before hex-decoding
+    /// so verification succeeds.  Leave `None` (omit from TOML) for connectors
+    /// whose signature header already contains only the raw hex string.
+    #[serde(rename = "signature.prefix", default)]
+    pub signature_prefix: Option<String>,
     /// MIME types accepted by the webhook endpoint.
     pub allowed_mimes: Vec<String>,
     /// Optional HTTP header carrying a provider-assigned delivery identifier.
