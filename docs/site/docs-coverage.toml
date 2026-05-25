@@ -8,6 +8,11 @@ audience = "user"
 page = "usage/cli.md"
 generated_reference = "reference/generated/cli.md"
 
+[packages.cairn-connectors-core]
+audience = "operator"
+page = "usage/plugins.md"
+generated_reference = "reference/generated/plugins.md"
+
 [packages.cairn-embeddings-local]
 audience = "internal"
 page = ""
