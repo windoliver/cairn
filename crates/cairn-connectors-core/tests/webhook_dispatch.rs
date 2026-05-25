@@ -23,9 +23,9 @@ use axum::body::Body;
 use axum::http::{Method, Request, StatusCode};
 use tower::ServiceExt as _;
 
+use cairn_connectors_core::ConnectorError;
 use cairn_connectors_core::fixture::{AcceptAllConsent, FixtureConnector, default_grant};
 use cairn_connectors_core::{ConnectorRegistry, InMemoryCredentialStore, PipelineEmit};
-use cairn_connectors_core::ConnectorError;
 use cairn_core::domain::capture::CaptureEvent;
 
 // ---------------------------------------------------------------------------

@@ -211,10 +211,8 @@ impl ConnectorManifest {
             .map_err(|e| ConnectorError::MalformedPayload(format!("manifest: {e}")))?;
         // Parse max_bytes once at manifest-load time so event processing does
         // not need to re-parse the string on every emitted event.
-        parsed.payload.max_bytes_parsed =
-            parse_byte_size(&parsed.payload.max_bytes).map_err(|e| {
-                ConnectorError::MalformedPayload(format!("payload.max_bytes: {e}"))
-            })?;
+        parsed.payload.max_bytes_parsed = parse_byte_size(&parsed.payload.max_bytes)
+            .map_err(|e| ConnectorError::MalformedPayload(format!("payload.max_bytes: {e}")))?;
         parsed.validate()?;
         Ok(parsed)
     }
@@ -272,9 +270,10 @@ impl ConnectorManifest {
     /// This matches the design spec's "keep it simple" guidance for P0.
     #[must_use]
     pub fn scope_matches(&self, scope_kind: &str, scope_value: &str) -> bool {
-        self.scopes.declared.iter().any(|p| {
-            p.kind == scope_kind && (p.pattern == "*" || p.pattern == scope_value)
-        })
+        self.scopes
+            .declared
+            .iter()
+            .any(|p| p.kind == scope_kind && (p.pattern == "*" || p.pattern == scope_value))
     }
 
     /// Return `true` if `mime` appears in the webhook's `allowed_mimes` list.

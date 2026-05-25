@@ -293,9 +293,11 @@ impl ConnectorRegistry {
         }
         if let Some(handle) = entry.poll_handle.take() {
             // A JoinError here means the task panicked — treat as Fatal.
-            handle.await.map_err(|e| ConnectorError::fatal_msg(format!(
-                "poll task for {name} panicked during disable: {e}"
-            )))?;
+            handle.await.map_err(|e| {
+                ConnectorError::fatal_msg(format!(
+                    "poll task for {name} panicked during disable: {e}"
+                ))
+            })?;
         }
 
         entry.state.store(Arc::new(ConnectorState::Disabled));

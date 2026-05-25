@@ -195,10 +195,7 @@ impl TwoManifestConnector {
     }
 
     fn drift(&self) {
-        *self
-            .drifted
-            .lock()
-            .expect("invariant: mutex unpoisoned") = true;
+        *self.drifted.lock().expect("invariant: mutex unpoisoned") = true;
     }
 }
 
