@@ -458,6 +458,12 @@ Named so the PR description can cite them:
   doesn't need it yet.
 - `evolve` WAL state-machine for connector schema migration — brief §19
   ties this to the v0.3 evolution workflow, not the substrate.
+- **Provider-specific replay dedup for identical-body deliveries** (heartbeats,
+  repeating payloads) — the framework replay key is always
+  `(connector_name, HMAC_body_MAC_hex)`, so two deliveries with identical
+  bodies collide and the second is dropped. Providers that send repeating
+  identical payloads (e.g. GitHub heartbeat pings) must implement per-adapter
+  dedup inside `ingest_webhook` — handled per-adapter in #131.
 
 ## 9. Open questions
 

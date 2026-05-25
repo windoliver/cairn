@@ -147,21 +147,21 @@ pub struct WebhookBlock {
     pub allowed_mimes: Vec<String>,
     /// Optional HTTP header carrying a provider-assigned delivery identifier.
     ///
-    /// # Finding V — delivery-id header for replay deduplication
+    /// # Adapter-facing metadata only — NOT used for replay protection
     ///
-    /// The default replay key is `(connector_name, HMAC_body_MAC_hex)`. Two
-    /// legitimate deliveries with identical bodies (e.g. heartbeat pings) hash
-    /// to the same MAC and the second is silently rejected as a duplicate.
+    /// This field is **not** used by the framework for replay deduplication.
+    /// The replay key is always `(connector_name, HMAC_body_MAC_hex)` — keyed
+    /// on the HMAC-SHA256 of the request body, which is authenticated.
     ///
-    /// When this field is set (e.g. `"X-GitHub-Delivery"`, `"Idempotency-Key"`),
-    /// the framework instead uses `(connector_name, delivery_id_value)` as the
-    /// replay key, where `delivery_id_value` is the value of this header. If
-    /// the header is absent from a request the framework returns 400 Bad Request.
+    /// Using an unauthenticated header for the replay key would allow an
+    /// attacker to replay the same authenticated body+signature with a
+    /// different delivery-id value and bypass the replay guard (the header is
+    /// not covered by the HMAC body signature).
     ///
-    /// HMAC verification is unchanged; this field only controls the replay-map
-    /// key.
-    ///
-    /// When `None` (the default), the existing body-MAC keying is used.
+    /// Adapters that need to read the provider's delivery identifier may look
+    /// up this field via `manifest()` and extract the header themselves inside
+    /// `ingest_webhook`. Identical-body dedup (heartbeat payloads, repeating
+    /// events) is handled per-adapter in issue #131.
     #[serde(default)]
     pub delivery_id_header: Option<String>,
 }
