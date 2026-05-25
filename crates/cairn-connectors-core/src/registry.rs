@@ -1335,37 +1335,37 @@ async fn handle_webhook(
         return resp(StatusCode::UNAUTHORIZED, "signature mismatch");
     };
 
-    // Replay guard (Finding I): reject duplicate deliveries by checking the
-    // `(connector_name, signature_id)` pair against the in-memory replay set.
+    // Replay guard — CHECK phase (Finding I + Finding L):
+    //
+    // Only READ from the replay set here; do NOT insert yet. The insertion is
+    // deferred to after all `process_event` calls succeed (Finding L fix).
+    //
+    // Rationale: if we insert the marker here and `ingest_webhook` or any
+    // `process_event` call subsequently fails, the signature is permanently
+    // locked — the provider's retry receives 409 and the event is lost.
+    // Committing the marker on success only means a retryable failure is
+    // always retryable.
+    //
+    // Gap accepted for P0: a concurrent duplicate delivery that passes the
+    // check before the first delivery commits the marker will be processed
+    // twice. This window is unguarded in the in-memory implementation.
+    // Issue #131 will add a pending-marker with TTL for stricter idempotency.
     //
     // The set is bounded at [`REPLAY_SET_MAX`] entries; when full the oldest
     // entry is evicted (FIFO order). This is a best-effort guard — it is NOT
-    // durable across restarts. Issue #131 will add persistence.
+    // durable across restarts.
+    let replay_key = (connector_name.clone(), sig_id.0.clone());
     {
         // SAFETY: we never hold this lock across an `.await` point.
-        let mut seen = state
+        let seen = state
             .replay_seen
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let mut order = state
-            .replay_order
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
 
-        let key = (connector_name.clone(), sig_id.0.clone());
-        if seen.contains(&key) {
+        if seen.contains(&replay_key) {
             return resp(StatusCode::CONFLICT, "duplicate webhook delivery");
         }
-
-        // Evict the oldest entry when we hit the cap.
-        if seen.len() >= REPLAY_SET_MAX
-            && let Some(oldest) = order.pop_front()
-        {
-            seen.remove(&oldest);
-        }
-        seen.insert(key.clone());
-        order.push_back(key);
-    } // lock released here
+    } // lock released here — do NOT insert yet (Finding L)
 
     // Build WebhookContext and call ingest_webhook (Finding G §5-6).
     let webhook_cx = WebhookContext {
@@ -1421,7 +1421,35 @@ async fn handle_webhook(
         }
     }
 
-    // All events accepted → 204 No Content (Finding G §9).
+    // All events accepted → commit the replay marker (Finding L fix).
+    //
+    // Only insert the `(connector_name, signature_id)` pair into `replay_seen`
+    // after every `process_event` call has returned `Ok`. This ensures that
+    // any retryable failure (from `ingest_webhook` or `process_event`) does
+    // NOT permanently lock the signature — the provider can retry and the next
+    // delivery will pass the duplicate check above.
+    {
+        // SAFETY: we never hold this lock across an `.await` point.
+        let mut seen = state
+            .replay_seen
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut order = state
+            .replay_order
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+
+        // Evict the oldest entry when we hit the cap.
+        if seen.len() >= REPLAY_SET_MAX
+            && let Some(oldest) = order.pop_front()
+        {
+            seen.remove(&oldest);
+        }
+        seen.insert(replay_key.clone());
+        order.push_back(replay_key);
+    } // lock released here
+
+    // 204 No Content (Finding G §9).
     Response::builder()
         .status(StatusCode::NO_CONTENT)
         .body(Body::empty())

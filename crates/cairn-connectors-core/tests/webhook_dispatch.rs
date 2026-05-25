@@ -398,6 +398,139 @@ async fn replay_returns_conflict() {
     reg.shutdown().await;
 }
 
+// ---------------------------------------------------------------------------
+// Finding L — replay marker must not be committed before processing succeeds
+// ---------------------------------------------------------------------------
+
+/// A `PipelineEmit` that always fails (simulates a transient downstream error).
+#[derive(Default)]
+struct FailingEmit;
+
+#[async_trait::async_trait]
+impl PipelineEmit for FailingEmit {
+    async fn emit(
+        &self,
+        _: cairn_core::domain::capture::CaptureEvent,
+    ) -> Result<(), ConnectorError> {
+        Err(ConnectorError::transient_msg("simulated emit failure"))
+    }
+}
+
+/// When `ingest_webhook` or `process_event` fails, the replay guard must NOT
+/// lock the signature — the provider must be able to retry the exact same
+/// webhook request and have it succeed on the next attempt.
+///
+/// Finding L fix: `replay_seen.insert(...)` must happen AFTER all `process_event`
+/// calls return `Ok`, not right after HMAC verification.
+#[tokio::test]
+async fn failed_processing_does_not_lock_signature() {
+    let creds = Arc::new(InMemoryCredentialStore::default());
+    provision_secret(&creds).await;
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+
+    // First registry: FailingEmit causes process_event to fail.
+    // The signature must NOT be locked into replay_seen.
+    let failing_reg = {
+        let mut reg = ConnectorRegistry::builder()
+            .credentials(
+                Arc::clone(&creds) as Arc<dyn cairn_connectors_core::credential::CredentialStore>
+            )
+            .consent(Arc::new(
+                cairn_connectors_core::fixture::AcceptAllConsent::default(),
+            ))
+            .emit(Arc::new(FailingEmit) as Arc<dyn PipelineEmit>)
+            .spool_root(tmp.path().to_path_buf())
+            .build();
+
+        reg.register(FixtureConnector::with_default_manifest())
+            .expect("register must succeed");
+        reg.enable("fixture", default_grant())
+            .await
+            .expect("enable must succeed");
+        reg
+    };
+
+    let body = serde_json::json!({"finding": "L"}).to_string();
+    let sig = hex_hmac_sha256(WEBHOOK_SECRET, body.as_bytes());
+
+    // First request: processing fails (emit error). Must NOT return 204.
+    let req1 = Request::builder()
+        .method(Method::POST)
+        .uri("/webhooks/fixture")
+        .header("content-type", "application/json")
+        .header(SIG_HEADER, &sig)
+        .body(Body::from(body.clone()))
+        .expect("request must build");
+
+    let router1 = failing_reg.webhook_router();
+    let resp1 = router1.oneshot(req1).await.expect("router must respond");
+    assert_ne!(
+        resp1.status(),
+        StatusCode::NO_CONTENT,
+        "first request with failing emit must not return 204",
+    );
+    // Must be non-2xx — 422 or 5xx depending on the error variant.
+    assert!(
+        !resp1.status().is_success(),
+        "first request must fail (non-2xx), got {}",
+        resp1.status(),
+    );
+
+    failing_reg.shutdown().await;
+
+    // Second registry: Capturer succeeds. The same signature is sent again.
+    // Since the first attempt did NOT commit the replay marker, this request
+    // must succeed with 204 and emit exactly one event.
+    let capturer = Arc::new(Capturer::default());
+    let tmp2 = tempfile::tempdir().expect("tempdir2");
+    let mut succeeding_reg = ConnectorRegistry::builder()
+        .credentials(
+            Arc::clone(&creds) as Arc<dyn cairn_connectors_core::credential::CredentialStore>
+        )
+        .consent(Arc::new(
+            cairn_connectors_core::fixture::AcceptAllConsent::default(),
+        ))
+        .emit(capturer.clone() as Arc<dyn PipelineEmit>)
+        .spool_root(tmp2.path().to_path_buf())
+        .build();
+
+    succeeding_reg
+        .register(FixtureConnector::with_default_manifest())
+        .expect("register must succeed");
+    succeeding_reg
+        .enable("fixture", default_grant())
+        .await
+        .expect("enable must succeed");
+
+    let req2 = Request::builder()
+        .method(Method::POST)
+        .uri("/webhooks/fixture")
+        .header("content-type", "application/json")
+        .header(SIG_HEADER, &sig)
+        .body(Body::from(body))
+        .expect("request must build");
+
+    let router2 = succeeding_reg.webhook_router();
+    let resp2 = router2.oneshot(req2).await.expect("router must respond");
+    assert_eq!(
+        resp2.status(),
+        StatusCode::NO_CONTENT,
+        "retry with same signature must succeed (204) when signature was not locked on first failure",
+    );
+
+    {
+        let events = capturer.0.lock().expect("mutex unpoisoned");
+        assert_eq!(
+            events.len(),
+            1,
+            "exactly 1 event must be emitted on the successful retry",
+        );
+    }
+
+    succeeding_reg.shutdown().await;
+}
+
 /// A registered connector that has NOT been enabled must not get a webhook
 /// route. Requests to its path must return 404.
 #[tokio::test]
