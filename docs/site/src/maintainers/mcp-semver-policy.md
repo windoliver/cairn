@@ -43,60 +43,79 @@ NOT frozen under `cairn.mcp.v1` — each carries its own
 See [ADR 0004 §1–§2](https://github.com/windoliver/cairn/blob/main/docs/design/decisions/0004-mcp-v1-semver-freeze.md)
 for the exhaustive list.
 
-## Adding a capability — reserve the identifier (additive); advertise it only when v1 clients can parse it
+## Reserving a capability identifier (the only safe additive path under v1)
 
-**Wire constraint.** The generated `enum Capabilities` is a closed
-serde enum with no `#[serde(other)]` catch-all. An older v1 client
-built against the current schema will fail to deserialize a `status`
-response that contains a code it doesn't know.
+**Wire constraint.** The generated `enum Capabilities` is a closed serde
+enum with no `#[serde(other)]` catch-all. An older v1 client built
+against the current schema will fail to deserialize a `status` response
+that contains a code it doesn't know. Same constraint applies to
+`enum ErrorCode` and `enum ResponseTarget`.
 
-Implication:
+So under v1, only **reservation** is additive. *Advertising* a newly
+reserved code (or returning a new error code, or returning a new
+retrieve target) breaks older v1 clients during deserialization.
 
-- **Reserving** a new code in `capabilities.json` (adding the
-  identifier without ever advertising it to v1 clients) is
-  contract-additive — the wire-compat snapshot is the only test that
-  flips. Recipe below.
-- **Advertising** the new code to v1 clients is **breaking under v1**
-  until the open-enum tolerance work (a tracked v1.x improvement)
-  ships. Either gate the new code behind a future phase + tolerant
-  clients, or route it through v2.
-
-This is the same rule for new `ErrorCode` and `ResponseTarget`
-variants: reserving is fine, emitting to v1 is not.
+**Reserve-only recipe** (safe under v1):
 
 1. Add the code identifier to
-   `crates/cairn-idl/schema/capabilities/capabilities.json`.
-2. Flip the matching `wiring::*_WIRED` constant in `cairn-core` when the
-   dispatch path is ready (per [CLAUDE.md §4 invariant 6](https://github.com/windoliver/cairn/blob/main/CLAUDE.md)).
-3. Update the corresponding row in [Capability Matrix](../reference/capability-matrix.md)
-   and the `REMEDIATION` table in `cairn-core::status::REMEDIATION` if the
-   code can be returned in a `CapabilityUnavailable.data.remediation` hint.
+   `crates/cairn-idl/schema/capabilities/capabilities.json` with the
+   correct `x-cairn-since` phase.
+2. **Do not** flip any `wiring::*_WIRED` constant. **Do not** update
+   `capability_matrix_v1.rs::expected_full_p0()` or any of the
+   phase-test expected sets — the identifier should remain in
+   deferred-wiring.
+3. Update the [Capability Matrix](../reference/capability-matrix.md)
+   "Deferred wiring" bucket (and `REMEDIATION` if the code can appear
+   in a `CapabilityUnavailable.data.remediation` hint).
 4. Re-run codegen: `cargo run -p cairn-idl --bin cairn-codegen`.
-5. Accept the wire-compat snapshot updates. The fingerprint over every
-   contract file (`crates/cairn-idl/tests/snapshots/`) will change
-   because `capabilities.json` changed:
+5. Accept the wire-compat snapshot updates:
    ```bash
    cargo nextest run -p cairn-idl --test wire_compat_v1   # expect FAIL
-   cargo insta review    # review the diff — must show ONLY the new code
-   cargo insta accept    # accept after review
+   cargo insta review                                     # diff must show only the new code
+   cargo insta accept
    cargo nextest run -p cairn-idl --test wire_compat_v1   # expect PASS
    ```
-6. Same for the capability-matrix advertise snapshot:
+6. Run the capability-matrix tests to confirm advertise() still emits
+   the same set (the new code stays out of every test scenario):
    ```bash
    cargo nextest run -p cairn-core --test capability_matrix_v1
    ```
-7. Commit the schema change, regenerated code, and accepted snapshots
-   together. `contract-drift` should now be green.
+7. Commit the schema change, regenerated code, and accepted snapshots.
 
-## Adding an optional field (additive, no version bump)
+The code is now reserved — its string is frozen under v1, can't be
+reassigned, and is not emitted on the wire.
 
-1. Add the field as `Option<T>` in the IDL (`#[serde(default)]` is
-   auto-emitted by codegen for `Optional` fields — see
-   `cairn-idl::codegen::emit_sdk`).
-2. Re-run codegen: `cargo run -p cairn-idl --bin cairn-codegen`.
-3. The wire-compat fingerprint will change because the verb schema file
-   changed. Follow steps 5–7 of "Adding a capability" above to review
-   and accept the snapshot deltas, then commit.
+## Advertising a reserved code (not safe under v1 today)
+
+Going from reserved → advertised requires older v1 clients to be able
+to deserialize the new variant. They cannot, because the generated
+enums are closed for serde. Until open-enum tolerance lands as a v1.x
+compatibility upgrade, an advertise step is **breaking under v1** and
+the change must follow "Proposing a breaking change" below — either
+roll the deployment under `cairn.mcp.v2`, or upgrade every existing v1
+client to a build that includes the new variant before any server
+flips the wiring flag.
+
+The same constraint applies to **emitting new `ErrorCode`** or
+**new `ResponseTarget`** values: reserve freely, never emit to v1.
+
+## Adding an optional field
+
+Splits on direction:
+
+- **Request args** (verb args, signed-intent payload): adding an
+  `Option<T>` is additive. Older clients won't send the field; the
+  server defaults / ignores it. `#[serde(default)]` is auto-emitted by
+  codegen for `Optional` fields (`cairn-idl::codegen::emit_sdk`).
+  Re-run codegen, accept the wire-compat snapshot, commit.
+- **Responses / `StatusResponse` / envelope** (anything the server
+  emits to v1 clients): **NOT additive under v1**. The generated
+  response structs use `#[serde(deny_unknown_fields)]`, so older v1
+  clients reject responses carrying any field they don't know. Treat
+  this case as breaking and follow "Proposing a breaking change" —
+  either route the new field through `experimental["cairn.contracts"]`
+  (per [ADR 0004 §5.4](https://github.com/windoliver/cairn/blob/main/docs/design/decisions/0004-mcp-v1-semver-freeze.md))
+  or roll under `cairn.mcp.v2`.
 
 ## Proposing a breaking change
 

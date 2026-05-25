@@ -126,6 +126,11 @@ The following changes are **breaking** and trigger a v2 cut:
 
 - Remove or rename a verb (including capitalization or underscore changes).
 - Remove a required field from any verb's args or envelope.
+- **Add** a new required field to a verb's args or envelope, or promote
+  an existing optional field to required, or otherwise tighten request
+  validation that older v1 clients won't satisfy. (Older clients can't
+  send a field they don't know exists; the server would reject valid
+  v1 traffic.)
 - Change the type or semantics of an existing field.
 - Change envelope shape (e.g., move `operation_id` out of the response
   root).
@@ -133,6 +138,12 @@ The following changes are **breaking** and trigger a v2 cut:
 - Change the meaning of a `status` field within a single daemon
   incarnation (per brief §8.0.a "byte-identical after canonical JSON
   ordering").
+- **Emit** a new closed-enum variant (capability code, error code,
+  retrieve target) on a v1 connection. Reserving the identifier in
+  the schema is additive (§3); emitting it to v1 clients is not,
+  until open-enum tolerance ships. Same for adding any new property
+  to a response / `StatusResponse` / envelope that the server emits —
+  the generated response structs use `#[serde(deny_unknown_fields)]`.
 
 ### 5. Deprecation lifecycle
 

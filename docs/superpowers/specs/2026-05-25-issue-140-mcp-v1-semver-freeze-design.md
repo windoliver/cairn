@@ -134,22 +134,28 @@ requires `cairn.mcp.v2`.
   authoritative binding between verb ID and namespace.
 
 ### §5. Additive changes — permitted without a version bump
-The following changes are **additive** and ship under `cairn.mcp.v1`:
 
-- New capability code added to `capabilities/capabilities.json`. Clients
-  fail closed on un-advertised codes (brief §8.0.a invariant), so registry
-  growth never breaks an older client.
-- New optional field on existing verb args. The field MUST be `Option<T>` in
-  Rust with `#[serde(default)]` so older requests still deserialize.
-- New variant on a `#[non_exhaustive]` enum (error codes, `retrieve` targets,
-  capability codes).
+> **Note:** The final accepted policy is ADR 0004 §3 in the repo. This
+> spec section is preserved as the original design draft; the wording
+> here is superseded by the ADR's stricter rules around closed-serde
+> enums. For implementation, follow the ADR.
+
+The following are additive and ship under `cairn.mcp.v1`:
+
+- **Reserving** a new identifier in any closed-enum schema
+  (`capabilities/capabilities.json`, `errors/error.json`,
+  `verbs/retrieve.json` target arms). Adding the string locks it to
+  v1; *emitting* it on the wire is governed by ADR 0004 §4 because the
+  generated enums are closed for serde.
+- New optional field on **request args** (verb args / signed-intent
+  payload). `Option<T>` + `#[serde(default)]` so older clients
+  default-omit. NOT additive on response / status / envelope (those
+  use `#[serde(deny_unknown_fields)]`).
 - New extension namespace (`cairn.<name>.v1`).
 - New tool description text, new examples, new docs — non-wire surface.
-- Bug-fixing the runtime decision in `advertise()` so the advertised set
-  more accurately reflects what the runtime can execute. The set returned by
-  `status` is not part of the contract; the **rule** that un-advertised
-  capabilities are rejected with `CapabilityUnavailable` *is* part of the
-  contract.
+- Bug-fixing the runtime decision in `advertise()` so the advertised
+  set more accurately reflects what the runtime can execute, provided
+  the new set is a subset of identifiers older v1 clients already know.
 
 ### §6. Breaking changes — require `cairn.mcp.v2`
 The following changes are **breaking** and trigger a v2 cut:
