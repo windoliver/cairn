@@ -33,6 +33,9 @@ pub enum ContractKind {
     FrontendAdapter,
     /// Implements `AgentProvider` contract.
     AgentProvider,
+    /// Implements `Connector` contract (brief §9.1 source sensors,
+    /// §19 v0.3). See `cairn-connectors-core`.
+    Connector,
 }
 
 impl ContractKind {
@@ -52,6 +55,7 @@ impl ContractKind {
             ContractKind::MCPServer => "MCPServer",
             ContractKind::FrontendAdapter => "FrontendAdapter",
             ContractKind::AgentProvider => "AgentProvider",
+            ContractKind::Connector => "Connector",
         }
     }
 }

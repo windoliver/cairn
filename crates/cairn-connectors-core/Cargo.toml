@@ -1,0 +1,49 @@
+[package]
+name = "cairn-connectors-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "External-connector substrate: trait, OAuth/webhook payload contracts, redaction, registry."
+
+[lints]
+workspace = true
+
+[features]
+default = ["fixture"]
+## Compile FixtureConnector and AcceptAllConsent for downstream test crates.
+## Promoted to a default feature so that integration tests in this crate
+## (and early downstream consumers) can access `cairn_connectors_core::fixture`
+## without `--features fixture` flag gymnastics. Downstream production binaries
+## that wish to strip the fixture code should set `default-features = false`.
+fixture = []
+
+[dev-dependencies]
+async-trait = { workspace = true }
+insta = { workspace = true }
+proptest = { workspace = true }
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+tower = { workspace = true }
+
+[dependencies]
+cairn-core = { workspace = true }
+arc-swap = { workspace = true }
+async-trait = { workspace = true }
+bon = { workspace = true }
+axum = { workspace = true }
+hex = { workspace = true }
+hmac = { workspace = true }
+sha2 = { workspace = true }
+subtle = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["sync", "rt", "rt-multi-thread", "macros", "time", "fs"] }
+tokio-util = { workspace = true }
+toml = { workspace = true }
+tracing = { workspace = true }
+ulid = { workspace = true }

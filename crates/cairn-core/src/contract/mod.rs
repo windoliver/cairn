@@ -22,9 +22,13 @@
 //!   [`CapturingMetricsSink`], [`NoopMetricsSink`].
 //! - Federation transport contract (§12.a, issue #123): [`FederationTransport`] /
 //!   [`SendOutcome`] / [`TransportReason`].
+//! - Connector consent journal (§14 + §19 v0.3, issue #130):
+//!   [`ConnectorConsentJournal`] / [`ConsentGrant`] / [`ConsentGrantId`] /
+//!   [`ConnectorConsentLookup`].
 
 pub mod agent_provider;
 pub mod conformance;
+pub mod connector_consent;
 pub mod consent_journal;
 pub mod consent_lookup;
 pub mod federation_outbox;
@@ -62,6 +66,9 @@ pub use agent_provider::{
     AgentRunMeter, AgentRunStatus, AgentScope, AgentSpawnRequest, AgentToolAllowlist,
     AgentToolAttempt, AgentToolCall, AgentToolPolicyOutcome, AgentWallClockBudget, CairnVerb,
     evaluate_tool_policy, validate_output,
+};
+pub use connector_consent::{
+    ConnectorConsentJournal, ConnectorConsentLookup, ConsentGrant, ConsentGrantId,
 };
 pub use consent_journal::{
     ConsentJournalReader, MalformedSourceForget, MalformedSourceForgetReason, SourceForget,

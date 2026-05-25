@@ -1,0 +1,42 @@
+---
+source: crates/cairn-connectors-core/tests/manifest_validates.rs
+expression: m
+---
+connector:
+  name: fixture
+  contract: Connector
+  contract_version: 0.1.0
+  sensor_identity: "snr:local:connector:fixture:v1"
+capabilities:
+  poll: true
+  webhook: true
+  backfill: false
+oauth:
+  required_scopes:
+    - "read:fixture"
+  token_lifetime: 1h
+  refresh: true
+budget:
+  max_items_per_hour: 600
+  max_bytes_per_day: 50MiB
+labels:
+  allowed:
+    - note
+    - comment
+scopes:
+  declared:
+    - kind: project
+      pattern: "*"
+webhook:
+  signature.algorithm: hmac-sha256
+  signature.header: X-Fixture-Signature
+  allowed_mimes:
+    - application/json
+  delivery_id_header: ~
+poll:
+  cursor_kind: opaque-string
+  min_interval: 30s
+  default_interval: 5m
+payload:
+  max_bytes: 256KiB
+  max_depth: 12

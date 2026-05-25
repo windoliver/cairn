@@ -212,9 +212,10 @@ const fn sensor_default(source: SourceFamily) -> MemoryVisibility {
         | SourceFamily::Voice
         | SourceFamily::Screen
         | SourceFamily::RecordingBatch => MemoryVisibility::Session,
-        SourceFamily::Cli | SourceFamily::Mcp | SourceFamily::Proactive => {
-            MemoryVisibility::Private
-        }
+        SourceFamily::Cli
+        | SourceFamily::Mcp
+        | SourceFamily::Proactive
+        | SourceFamily::External => MemoryVisibility::Private,
     }
 }
 

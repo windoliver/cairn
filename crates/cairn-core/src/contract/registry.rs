@@ -415,6 +415,18 @@ impl PluginRegistry {
         self.manifests.get(name)
     }
 
+    /// Insert a parsed manifest without requiring a matching typed-plugin
+    /// registration. **Test-only.** Use this to exercise conformance arms
+    /// (e.g. `Connector`) whose typed contract lives outside `cairn-core`.
+    #[cfg(test)]
+    pub fn insert_manifest_for_test(
+        &mut self,
+        name: PluginName,
+        manifest: crate::contract::manifest::PluginManifest,
+    ) {
+        self.manifests.insert(name, manifest);
+    }
+
     /// Iterate every parsed manifest in alphabetical order by plugin name.
     /// Used by `cairn plugins list`/`verify` for stable output.
     #[must_use]

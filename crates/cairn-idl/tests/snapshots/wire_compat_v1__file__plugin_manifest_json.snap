@@ -26,7 +26,8 @@ expression: body
         "SensorIngress",
         "MCPServer",
         "FrontendAdapter",
-        "AgentProvider"
+        "AgentProvider",
+        "Connector"
       ]
     },
     "contract_version_range": {

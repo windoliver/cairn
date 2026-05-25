@@ -136,6 +136,17 @@ pub fn run_conformance_for_plugin(
                     .to_string(),
             },
         }],
+        // `Connector` conformance runner lives in `cairn-connectors-core` (brief
+        // §9.1, §19 v0.3). Return a pending sentinel until that crate exposes
+        // a conformance entry-point callable from here.
+        ContractKind::Connector => vec![CaseOutcome {
+            id: "no_conformance_runner",
+            tier: Tier::One,
+            status: CaseStatus::Pending {
+                reason: "conformance runner lives in cairn-connectors-core \
+                         (brief §9.1, §19 v0.3, #130); not yet callable from cairn-core",
+            },
+        }],
     }
 }
 
@@ -298,6 +309,44 @@ mod tests {
         let reg = PluginRegistry::new();
         let name = PluginName::new("does-not-exist").expect("valid");
         assert!(run_conformance_for_plugin(&reg, &name).is_empty());
+    }
+
+    /// Connector conformance arm must return a single Pending outcome, not
+    /// Failed. A legitimate Connector plugin should not hard-fail `cairn
+    /// plugins verify` just because the runner hasn't moved into
+    /// cairn-core yet (brief §9.1, §19 v0.3, #130).
+    #[test]
+    fn connector_conformance_returns_pending_not_failed() {
+        use crate::contract::manifest::PluginManifest;
+
+        let toml = r#"
+name = "acme-connector"
+contract = "Connector"
+
+[contract_version_range.min]
+major = 0
+minor = 1
+patch = 0
+
+[contract_version_range.max_exclusive]
+major = 0
+minor = 2
+patch = 0
+"#;
+        let manifest = PluginManifest::parse_toml(toml).expect("connector manifest is valid");
+        let name = PluginName::new("acme-connector").expect("valid name");
+        let mut reg = PluginRegistry::new();
+        reg.insert_manifest_for_test(name.clone(), manifest);
+
+        let outcomes = run_conformance_for_plugin(&reg, &name);
+        assert_eq!(outcomes.len(), 1, "expected exactly one outcome");
+        let outcome = &outcomes[0];
+        assert_eq!(outcome.id, "no_conformance_runner");
+        assert!(
+            matches!(outcome.status, CaseStatus::Pending { .. }),
+            "Connector arm must return Pending, got {:?}",
+            outcome.status
+        );
     }
 
     #[test]
