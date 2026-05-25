@@ -141,6 +141,22 @@ struct Entry {
     /// `Arc<TokioMutex<_>>` so the poll-task closure and the registry can
     /// both access the cursor without blocking across an `.await`.
     cursor: Arc<TokioMutex<Option<String>>>,
+    /// Per-connector event-id index (Finding Z).
+    ///
+    /// Maps each `event_id` string to the SHA-256 hex of the first payload
+    /// bytes seen for that id. Used to detect event-id reuse with different
+    /// content before the spool write, preventing silent emission of multiple
+    /// `CaptureEvent`s with the same id but inconsistent hashes.
+    ///
+    /// Shared via `Arc` so the poll-task closure and the webhook handler both
+    /// read from the same map without duplication.
+    ///
+    /// Uses `std::sync::Mutex` because the critical section is synchronous
+    /// (no `.await` inside the lock). Bounded to [`EVENT_ID_INDEX_MAX`] with
+    /// FIFO eviction via `event_id_order`.
+    event_id_index: Arc<StdMutex<HashMap<String, String>>>,
+    /// Insertion-order queue for FIFO eviction of `event_id_index` entries.
+    event_id_order: Arc<StdMutex<VecDeque<String>>>,
 }
 
 // ---------------------------------------------------------------------------
@@ -163,6 +179,11 @@ struct WebhookEntryState {
     /// HTTP header name that carries the HMAC-SHA256 signature, from
     /// `manifest.webhook.signature_header`.
     signature_header: String,
+    /// Shared per-connector event-id index (Finding Z). Cloned from the
+    /// corresponding `Entry` fields so poll and webhook paths share state.
+    event_id_index: Arc<StdMutex<HashMap<String, String>>>,
+    /// Insertion-order queue for FIFO eviction of `event_id_index`.
+    event_id_order: Arc<StdMutex<VecDeque<String>>>,
 }
 
 /// Maximum number of `(connector_name, signature_id)` pairs held in the
@@ -178,6 +199,21 @@ struct WebhookEntryState {
 /// In-flight [`ReplayState::Pending`] entries must never be evicted while
 /// a handler is still processing the corresponding delivery.
 const REPLAY_SET_MAX: usize = 10_000;
+
+/// Maximum number of `event_id` entries in the per-connector in-memory index
+/// before the oldest are evicted using FIFO discipline (Finding Z).
+///
+/// At 100 000 entries the index occupies roughly 10–15 MiB per connector
+/// (26-char ULID key + 64-char SHA-256 hex value, plus `HashMap` overhead).
+/// This bound is intentionally generous — it must be large enough to detect
+/// reuse within a typical process lifetime while remaining safely bounded.
+///
+/// **Durability trade-off:** the index is process-local and forgets all seen
+/// event ids on restart. Issue #131 will persist the index in the consent
+/// journal. Within a single process lifetime the FIFO eviction means that the
+/// oldest event ids are eventually forgotten; a reuse after eviction is NOT
+/// detected. This is the documented P0 limitation.
+const EVENT_ID_INDEX_MAX: usize = 100_000;
 
 /// Lifecycle state of one entry in the replay map (Finding O).
 ///
@@ -394,6 +430,8 @@ impl ConnectorRegistry {
                 rate_limit,
                 byte_limit,
                 cursor: Arc::new(TokioMutex::new(None)),
+                event_id_index: Arc::new(StdMutex::new(HashMap::new())),
+                event_id_order: Arc::new(StdMutex::new(VecDeque::new())),
             },
         );
         Ok(())
@@ -461,6 +499,8 @@ impl ConnectorRegistry {
             let rate_limit = Arc::clone(&entry.rate_limit);
             let byte_limit = Arc::clone(&entry.byte_limit);
             let cursor_ref = Arc::clone(&entry.cursor);
+            let event_id_index = Arc::clone(&entry.event_id_index);
+            let event_id_order = Arc::clone(&entry.event_id_order);
             let spool_root = self.spool_root.clone();
             let name_owned = name.to_owned();
             // Clone the credential store into the task closure so each poll
@@ -549,6 +589,7 @@ impl ConnectorRegistry {
                                         if let Err(err) = process_event(
                                             event, &connector, &state, &consent, &emit,
                                             &rate_limit, &byte_limit, &spool_root,
+                                            &event_id_index, &event_id_order,
                                         ).await {
                                             tracing::warn!(
                                                 connector = %name_owned,
@@ -735,6 +776,8 @@ impl ConnectorRegistry {
                     byte_limit: Arc::clone(&entry.byte_limit),
                     max_body_bytes: entry.connector.manifest().payload.max_bytes_parsed,
                     signature_header: entry.connector.manifest().webhook.signature_header.clone(),
+                    event_id_index: Arc::clone(&entry.event_id_index),
+                    event_id_order: Arc::clone(&entry.event_id_order),
                 },
             );
         }
@@ -835,6 +878,8 @@ impl ConnectorRegistry {
                 &entry.rate_limit,
                 &entry.byte_limit,
                 &self.spool_root,
+                &entry.event_id_index,
+                &entry.event_id_order,
             )
             .await?;
         }
@@ -1148,7 +1193,8 @@ fn sanitize_path_component(component: &str) -> Result<&str, ConnectorError> {
 // The validation + redaction + spool + emit pipeline has many sequential
 // steps; splitting it would break the logical narrative without improving
 // readability. The 8th argument (`byte_limit`) was added by Finding R;
-// bundling into a struct would add indirection without clarity gain.
+// `event_id_index` / `event_id_order` added by Finding Z.
+// Bundling into a struct would add indirection without clarity gain.
 #[allow(clippy::too_many_lines)]
 #[allow(clippy::too_many_arguments)]
 async fn process_event(
@@ -1160,6 +1206,8 @@ async fn process_event(
     rate_limit: &Arc<RateLimit>,
     byte_limit: &Arc<ByteRateLimit>,
     spool_root: &std::path::Path,
+    event_id_index: &Arc<StdMutex<HashMap<String, String>>>,
+    event_id_order: &Arc<StdMutex<VecDeque<String>>>,
 ) -> Result<(), ConnectorError> {
     // -1. Path-safety check (Finding J): validate event_id as a ULID before
     //     any side effect. This must be the VERY FIRST check so that a
@@ -1383,6 +1431,62 @@ async fn process_event(
     // retry (leave the existing file, delete the tmp).  Mismatching hash →
     // fatal error so the caller learns immediately rather than silently losing
     // the prior file.
+
+    // Finding Z: per-connector event-id seen-set with bound hash.
+    //
+    // Check the in-memory index BEFORE the spool write so that a rejected
+    // event never produces an orphan file.
+    //
+    // - Absent:                  insert `event_id -> hash_hex`. Proceed.
+    // - Present, hash matches:   idempotent retry (same content). Proceed.
+    // - Present, hash differs:   event_id reused with different content.
+    //                            Return Fatal; do NOT spool, do NOT emit.
+    //
+    // FIFO eviction: when the index reaches EVENT_ID_INDEX_MAX, remove the
+    // oldest entry. The process-local nature and FIFO eviction mean that
+    // reuse after eviction is not detected — documented P0 limitation.
+    // Issue #131 will persist the index in the consent journal.
+    {
+        // SAFETY: we never hold this lock across an `.await` point.
+        let mut idx = event_id_index
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut ord = event_id_order
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+
+        match idx.get(event_id) {
+            None => {
+                // First time we see this event_id for this connector.
+                // Evict the oldest entry when we hit the cap.
+                if idx.len() >= EVENT_ID_INDEX_MAX
+                    && let Some(oldest_id) = ord.pop_front()
+                {
+                    idx.remove(&oldest_id);
+                }
+                idx.insert(event_id.to_owned(), hash_hex.clone());
+                ord.push_back(event_id.to_owned());
+                // Proceed — lock released at end of this block.
+            }
+            Some(prior_hash) if *prior_hash == hash_hex => {
+                // Same content: idempotent retry. Proceed.
+                // Lock released at end of this block.
+            }
+            Some(prior_hash) => {
+                // event_id reused with different payload — fatal.
+                let prior = prior_hash.clone();
+                // Refund the item-rate reservation before returning; byte
+                // budget has not been reserved yet at this point.
+                rate_limit.refund(rate_bucket_key, 1);
+                return Err(ConnectorError::fatal_msg(format!(
+                    "event_id {event_id} reused with different content \
+                     (connector {connector_name}): \
+                     prior hash {prior}, new hash {hash_hex}; \
+                     event rejected to preserve capture-event identity integrity"
+                )));
+            }
+        }
+    } // event_id_index lock released here — no await inside the block
 
     // Relative path inside the spool root; mirrors `payload_ref` without the
     // leading `sources/` so the same relative path works for both the spool
@@ -1826,6 +1930,8 @@ async fn handle_webhook(
             &entry.rate_limit,
             &entry.byte_limit,
             &state.spool_root,
+            &entry.event_id_index,
+            &entry.event_id_order,
         )
         .await
         {
@@ -2239,6 +2345,8 @@ max_depth = 10
         let tmp = tempfile::tempdir().expect("tempdir");
         let rate_limit = Arc::new(RateLimit::empty_per_hour(u32::MAX));
         let byte_limit = Arc::new(ByteRateLimit::new(u64::MAX));
+        let event_id_index = Arc::new(StdMutex::new(HashMap::new()));
+        let event_id_order = Arc::new(StdMutex::new(VecDeque::new()));
         let err = process_event(
             stub_event(),
             &connector,
@@ -2248,6 +2356,8 @@ max_depth = 10
             &rate_limit,
             &byte_limit,
             tmp.path(),
+            &event_id_index,
+            &event_id_order,
         )
         .await
         .expect_err("process_event must fail when state is Disabled");
@@ -2281,6 +2391,8 @@ max_depth = 10
         let tmp = tempfile::tempdir().expect("tempdir");
         let rate_limit = Arc::new(RateLimit::empty_per_hour(u32::MAX));
         let byte_limit = Arc::new(ByteRateLimit::new(u64::MAX));
+        let event_id_index = Arc::new(StdMutex::new(HashMap::new()));
+        let event_id_order = Arc::new(StdMutex::new(VecDeque::new()));
         let err = process_event(
             spoofed,
             &connector,
@@ -2290,6 +2402,8 @@ max_depth = 10
             &rate_limit,
             &byte_limit,
             tmp.path(),
+            &event_id_index,
+            &event_id_order,
         )
         .await
         .expect_err("process_event must fail on connector-name mismatch");
