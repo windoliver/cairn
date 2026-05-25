@@ -5,3 +5,4 @@
 # It is recommended to check this file in to source control so that
 # everyone who runs the test benefits from these saved cases.
 cc 96e9a8939d3b086d6c3ed277575575786f42fe57dcd13c780760466fbde95e2a # shrinks to body = "alice@example.com0"
+cc 6b032264d2bf2d7ebcf55a3bd0512a6dfddc5a7a871b7fb460f7a7609e408f6e # shrinks to body = "0 000 000alice@example.com"
