@@ -4,7 +4,6 @@
 //! `Connector` surface. It is re-exported from `crate` root, replacing the
 //! scaffold placeholder.
 
-
 use std::sync::Arc;
 
 use cairn_core::contract::version::{ContractVersion, VersionRange};
@@ -140,8 +139,11 @@ mod tests {
             unimplemented!()
         }
         fn capabilities(&self) -> &ConnectorCapabilities {
-            static C: ConnectorCapabilities =
-                ConnectorCapabilities { poll: true, webhook: false, backfill: false };
+            static C: ConnectorCapabilities = ConnectorCapabilities {
+                poll: true,
+                webhook: false,
+                backfill: false,
+            };
             &C
         }
         fn sensor_identity(&self) -> &cairn_core::domain::Identity {

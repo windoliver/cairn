@@ -118,8 +118,8 @@ impl PollScheduler {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[tokio::test]
     async fn poll_loop_invokes_callback_and_stops_on_cancel() {

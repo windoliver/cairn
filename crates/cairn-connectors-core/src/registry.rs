@@ -33,7 +33,7 @@ use bon::Builder;
 use tokio_util::sync::CancellationToken;
 
 use cairn_core::contract::connector_consent::{
-    ConsentGrant, ConsentGrantId, ConnectorConsentJournal, ConnectorConsentLookup,
+    ConnectorConsentJournal, ConnectorConsentLookup, ConsentGrant, ConsentGrantId,
 };
 use cairn_core::domain::capture::PayloadHash;
 
@@ -162,11 +162,7 @@ impl ConnectorRegistry {
     ///
     /// Returns [`ConnectorError::Fatal`] if the connector name is not
     /// registered, or if the consent journal fails to write the grant.
-    pub async fn enable(
-        &mut self,
-        name: &str,
-        grant: ConsentGrant,
-    ) -> Result<(), ConnectorError> {
+    pub async fn enable(&mut self, name: &str, grant: ConsentGrant) -> Result<(), ConnectorError> {
         let entry = self
             .entries
             .get(name)
@@ -271,8 +267,14 @@ impl ConnectorRegistry {
         };
         let outcome = entry.connector.poll(&cx).await?;
         for event in outcome.events {
-            process_event(event, &entry.connector, &entry.state, &self.consent, &self.emit)
-                .await?;
+            process_event(
+                event,
+                &entry.connector,
+                &entry.state,
+                &self.consent,
+                &self.emit,
+            )
+            .await?;
         }
         Ok(())
     }
@@ -407,7 +409,7 @@ mod tests {
     use std::sync::Mutex;
 
     use cairn_core::contract::connector_consent::{
-        ConsentGrant, ConsentGrantId, ConnectorConsentJournal, ConnectorConsentLookup,
+        ConnectorConsentJournal, ConnectorConsentLookup, ConsentGrant, ConsentGrantId,
     };
     use cairn_core::domain::Identity;
     use cairn_core::domain::capture::CaptureEvent;
@@ -522,9 +524,7 @@ max_depth = 10
             &self.sensor
         }
 
-        fn supported_contract_versions(
-            &self,
-        ) -> cairn_core::contract::version::VersionRange {
+        fn supported_contract_versions(&self) -> cairn_core::contract::version::VersionRange {
             StubConnector::SUPPORTED_VERSIONS
         }
 
@@ -635,9 +635,7 @@ max_depth = 10
             .await
             .expect("enable must succeed");
 
-        reg.disable("stub")
-            .await
-            .expect("disable must succeed");
+        reg.disable("stub").await.expect("disable must succeed");
     }
 
     /// Registering the same connector name twice must return a Fatal error.

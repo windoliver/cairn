@@ -11,9 +11,11 @@
 use std::sync::Arc;
 
 use cairn_connectors_core::fixture::{FixtureConnector, default_grant};
-use cairn_connectors_core::{ConnectorError, ConnectorRegistry, InMemoryCredentialStore, PipelineEmit};
+use cairn_connectors_core::{
+    ConnectorError, ConnectorRegistry, InMemoryCredentialStore, PipelineEmit,
+};
 use cairn_core::contract::connector_consent::{
-    ConsentGrant, ConsentGrantId, ConnectorConsentJournal, ConnectorConsentLookup,
+    ConnectorConsentJournal, ConnectorConsentLookup, ConsentGrant, ConsentGrantId,
 };
 use cairn_core::domain::capture::CaptureEvent;
 

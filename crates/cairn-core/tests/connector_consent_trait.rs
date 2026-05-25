@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::sync::Mutex;
 
 use cairn_core::contract::connector_consent::{
-    ConnectorConsentJournal, ConsentGrant, ConsentGrantId, ConnectorConsentLookup,
+    ConnectorConsentJournal, ConnectorConsentLookup, ConsentGrant, ConsentGrantId,
 };
 use cairn_core::domain::Identity;
 
@@ -34,13 +34,11 @@ impl ConnectorConsentJournal for StubJournal {
         _scope_key: &str,
     ) -> Result<ConnectorConsentLookup, String> {
         let g = self.grants.lock().unwrap();
-        Ok(
-            if g.values().any(|g| g.connector == connector) {
-                ConnectorConsentLookup::Granted
-            } else {
-                ConnectorConsentLookup::Revoked
-            },
-        )
+        Ok(if g.values().any(|g| g.connector == connector) {
+            ConnectorConsentLookup::Granted
+        } else {
+            ConnectorConsentLookup::Revoked
+        })
     }
 
     async fn revoke(&self, id: &ConsentGrantId) -> Result<(), String> {

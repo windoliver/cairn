@@ -16,7 +16,7 @@ use std::sync::Mutex;
 
 use async_trait::async_trait;
 use cairn_core::contract::connector_consent::{
-    ConsentGrant, ConsentGrantId, ConnectorConsentJournal, ConnectorConsentLookup,
+    ConnectorConsentJournal, ConnectorConsentLookup, ConsentGrant, ConsentGrantId,
 };
 use cairn_core::contract::version::{ContractVersion, VersionRange};
 use cairn_core::domain::Identity;
@@ -111,10 +111,8 @@ impl Connector for FixtureConnector {
 
 impl ConnectorPlugin for FixtureConnector {
     const NAME: &'static str = "fixture";
-    const SUPPORTED_VERSIONS: VersionRange = VersionRange::new(
-        ContractVersion::new(0, 1, 0),
-        ContractVersion::new(0, 2, 0),
-    );
+    const SUPPORTED_VERSIONS: VersionRange =
+        VersionRange::new(ContractVersion::new(0, 1, 0), ContractVersion::new(0, 2, 0));
 }
 
 // ---------------------------------------------------------------------------
@@ -285,8 +283,7 @@ mod tests {
         let m = ConnectorManifest::parse_toml(DEFAULT_MANIFEST).expect("DEFAULT_MANIFEST parses");
         assert_eq!(m.name(), "fixture");
         assert_eq!(
-            m.connector.sensor_identity,
-            "snr:local:connector:fixture:v1",
+            m.connector.sensor_identity, "snr:local:connector:fixture:v1",
             "sensor_identity must use the canonical snr:local:connector wire form"
         );
     }

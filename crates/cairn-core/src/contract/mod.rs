@@ -68,7 +68,7 @@ pub use agent_provider::{
     evaluate_tool_policy, validate_output,
 };
 pub use connector_consent::{
-    ConsentGrant, ConsentGrantId, ConnectorConsentJournal, ConnectorConsentLookup,
+    ConnectorConsentJournal, ConnectorConsentLookup, ConsentGrant, ConsentGrantId,
 };
 pub use consent_journal::{
     ConsentJournalReader, MalformedSourceForget, MalformedSourceForgetReason, SourceForget,

@@ -20,7 +20,9 @@ use cairn_connectors_core::event::{
 use cairn_connectors_core::fixture::AcceptAllConsent;
 use cairn_connectors_core::manifest::ConnectorManifest;
 use cairn_connectors_core::webhook::WebhookRequest;
-use cairn_connectors_core::{ConnectorError, ConnectorRegistry, InMemoryCredentialStore, PipelineEmit};
+use cairn_connectors_core::{
+    ConnectorError, ConnectorRegistry, InMemoryCredentialStore, PipelineEmit,
+};
 use cairn_core::contract::version::{ContractVersion, VersionRange};
 use cairn_core::domain::Identity;
 use cairn_core::domain::capture::CaptureEvent;
@@ -148,10 +150,8 @@ impl Connector for EvilConnector {
 
 impl ConnectorPlugin for EvilConnector {
     const NAME: &'static str = "evil";
-    const SUPPORTED_VERSIONS: VersionRange = VersionRange::new(
-        ContractVersion::new(0, 1, 0),
-        ContractVersion::new(0, 2, 0),
-    );
+    const SUPPORTED_VERSIONS: VersionRange =
+        VersionRange::new(ContractVersion::new(0, 1, 0), ContractVersion::new(0, 2, 0));
 }
 
 // ---------------------------------------------------------------------------

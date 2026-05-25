@@ -59,9 +59,16 @@ impl RateLimit {
         let mut map = HashMap::new();
         map.insert(
             scope,
-            Bucket { remaining: capacity, capacity, last_refill: Instant::now() },
+            Bucket {
+                remaining: capacity,
+                capacity,
+                last_refill: Instant::now(),
+            },
         );
-        Self { inner: Mutex::new(map), refill_interval }
+        Self {
+            inner: Mutex::new(map),
+            refill_interval,
+        }
     }
 
     /// Register an additional scope with its own independent budget.
@@ -77,7 +84,11 @@ impl RateLimit {
         });
         map.insert(
             scope,
-            Bucket { remaining: capacity, capacity, last_refill: Instant::now() },
+            Bucket {
+                remaining: capacity,
+                capacity,
+                last_refill: Instant::now(),
+            },
         );
     }
 
@@ -96,9 +107,11 @@ impl RateLimit {
             poisoned.into_inner()
         });
 
-        let bucket = map.get_mut(scope).ok_or_else(|| ConnectorError::BudgetExceeded {
-            scope: scope.into(),
-        })?;
+        let bucket = map
+            .get_mut(scope)
+            .ok_or_else(|| ConnectorError::BudgetExceeded {
+                scope: scope.into(),
+            })?;
 
         // Refill on wall-clock interval.
         if bucket.last_refill.elapsed() >= self.refill_interval {
@@ -107,7 +120,9 @@ impl RateLimit {
         }
 
         if bucket.remaining < amount {
-            return Err(ConnectorError::BudgetExceeded { scope: scope.into() });
+            return Err(ConnectorError::BudgetExceeded {
+                scope: scope.into(),
+            });
         }
         bucket.remaining -= amount;
         Ok(())
@@ -157,7 +172,8 @@ mod tests {
         std::thread::sleep(Duration::from_millis(80));
 
         // The next charge should succeed because the bucket was refilled.
-        rl.charge("s1", 1).expect("charge after refill should succeed");
+        rl.charge("s1", 1)
+            .expect("charge after refill should succeed");
     }
 
     #[test]

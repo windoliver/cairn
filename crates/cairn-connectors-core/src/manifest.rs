@@ -335,6 +335,9 @@ max_depth = 12
         // Verify the value survives a TOML serialize → deserialize round-trip.
         let serialized = toml::to_string(&m).expect("serialize");
         let reparsed = ConnectorManifest::parse_toml(&serialized).expect("reparse");
-        assert_eq!(reparsed.connector.sensor_identity, m.connector.sensor_identity);
+        assert_eq!(
+            reparsed.connector.sensor_identity,
+            m.connector.sensor_identity
+        );
     }
 }

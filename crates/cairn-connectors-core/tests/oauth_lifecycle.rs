@@ -40,14 +40,15 @@ async fn credential_round_trip_then_delete() {
         .await
         .expect("put must succeed");
     let handle = store.get("s").await.expect("get must succeed after put");
-    assert_eq!(handle.bytes(), b"v", "retrieved bytes must match stored bytes");
+    assert_eq!(
+        handle.bytes(),
+        b"v",
+        "retrieved bytes must match stored bytes"
+    );
 
     // Delete then confirm absence.
     store.delete("s").await.expect("delete must succeed");
-    assert!(
-        store.get("s").await.is_err(),
-        "get must fail after delete",
-    );
+    assert!(store.get("s").await.is_err(), "get must fail after delete");
 }
 
 // ---------------------------------------------------------------------------

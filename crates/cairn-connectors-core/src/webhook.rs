@@ -69,7 +69,9 @@ pub fn verify_hmac_sha256(
     secret: &[u8],
 ) -> Result<SignatureId, ConnectorError> {
     // Rejection path 1: missing header.
-    let sig_hex = req.header(header).ok_or(ConnectorError::SignatureMismatch)?;
+    let sig_hex = req
+        .header(header)
+        .ok_or(ConnectorError::SignatureMismatch)?;
 
     // Rejection path 2: bad hex.
     let provided = hex::decode(sig_hex).map_err(|_| ConnectorError::SignatureMismatch)?;
@@ -106,8 +108,7 @@ pub fn verify_hmac_sha256(
 #[must_use]
 pub fn hex_hmac_sha256(secret: &[u8], body: &[u8]) -> String {
     // invariant: HmacSha256 has no key length restriction
-    let mut mac =
-        HmacSha256::new_from_slice(secret).expect("HMAC accepts any key length");
+    let mut mac = HmacSha256::new_from_slice(secret).expect("HMAC accepts any key length");
     mac.update(body);
     hex::encode(mac.finalize().into_bytes())
 }
