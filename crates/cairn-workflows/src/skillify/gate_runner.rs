@@ -744,21 +744,37 @@ impl GateRunner for ResolverTriggerRunner {
             }
         }
 
+        // Round-12 hardening: use the SAME case-insensitive substring
+        // semantics the live resolver uses. Exact-string equality misses
+        // shadowing (a candidate trigger `deploy` would silently steal an
+        // existing `deploy hotfix`). Reject any normalized substring
+        // overlap in either direction.
         for existing_skill in &ctx.snapshot.skills {
             if existing_skill.lane == ctx.authored.lane {
                 continue;
             }
             for existing_trigger in &existing_skill.resolver_triggers {
+                let existing_norm = existing_trigger.trim().to_lowercase();
+                if existing_norm.is_empty() {
+                    continue;
+                }
                 for candidate_trigger in &triggers {
-                    if existing_trigger
-                        .trim()
-                        .eq_ignore_ascii_case(candidate_trigger.trim())
-                    {
+                    let cand_norm = candidate_trigger.trim().to_lowercase();
+                    if cand_norm.is_empty() {
+                        continue;
+                    }
+                    // Match the resolver's "intent.contains(trigger)"
+                    // semantics in BOTH directions — either order means
+                    // routing will be ambiguous at runtime.
+                    if existing_norm.contains(&cand_norm) || cand_norm.contains(&existing_norm) {
                         return GateRunResult::failed(
                             self.artifact_kind(),
                             format!(
-                                "trigger {:?} collides with skill {} (lane {})",
-                                candidate_trigger, existing_skill.skill_id, existing_skill.lane
+                                "trigger {:?} overlaps existing trigger {:?} of skill {} (lane {}); resolver semantics would route ambiguously",
+                                candidate_trigger,
+                                existing_trigger,
+                                existing_skill.skill_id,
+                                existing_skill.lane
                             ),
                             timer.elapsed_ms(),
                         );

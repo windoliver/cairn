@@ -221,3 +221,94 @@ async fn pipeline_fails_when_script_self_mutates_post_gate() {
         result.errors
     );
 }
+
+#[tokio::test]
+async fn pipeline_fails_when_authored_lane_drifts_from_spec() {
+    // Round-12 regression: STAGE 2 author can drift from STAGE 1 spec.
+    // A different lane in the authored bundle must NOT be materialized,
+    // because gates would pass against the new lane while the spec
+    // records a different one — promotion would be for a skill that
+    // doesn't describe the extracted candidate.
+    use std::sync::atomic::AtomicU32;
+
+    struct DriftLlm {
+        call_count: AtomicU32,
+    }
+    #[async_trait::async_trait]
+    impl LLMProvider for DriftLlm {
+        fn name(&self) -> &'static str {
+            "drift-llm"
+        }
+        fn capabilities(&self) -> &LLMProviderCapabilities {
+            static CAPS: LLMProviderCapabilities = LLMProviderCapabilities {
+                json_mode: true,
+                streaming: false,
+                tool_calls: false,
+            };
+            &CAPS
+        }
+        fn supported_contract_versions(&self) -> VersionRange {
+            VersionRange::new(ContractVersion::new(0, 1, 0), ContractVersion::new(0, 2, 0))
+        }
+        async fn complete(&self, _req: &CompletionRequest) -> Result<CompletionOutput, LlmError> {
+            let n = self
+                .call_count
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if n == 0 {
+                // STAGE 1: spec extracts deploy.original.
+                Ok(CompletionOutput::Json(json!({
+                    "lane": "deploy.original",
+                    "slug": "deploy-original",
+                    "decision_tree": {},
+                    "triggers": ["deploy original"],
+                    "success_criteria": ["passes"],
+                    "source_refs": ["01HQZX9F5N0000000000000001"],
+                    "requires": [],
+                    "provides": ["deploy.original"]
+                })))
+            } else {
+                // STAGE 2: author DRIFTS to deploy.different.
+                Ok(CompletionOutput::Json(json!({
+                    "lane": "deploy.different",
+                    "slug": "deploy-different",
+                    "skill_markdown": "---\nname: x\nlane: deploy.different\ntriggers:\n  - x\nuses: scripts/x.sh\nfiles_to: wiki/x/\n---\nBody.",
+                    "script": "#!/usr/bin/env bash\necho x\n",
+                    "unit_tests": {"cases":[]},
+                    "integration_tests": {"cases":[]},
+                    "llm_evals": {"rubric":[]},
+                    "resolver_triggers": ["x"],
+                    "resolver_eval": {"intents":[]},
+                    "smoke": {"cases":[]},
+                    "filing_rules": {"files_to": "wiki/x/"}
+                })))
+            }
+        }
+    }
+
+    let temp = TempDir::new().unwrap();
+    let pipeline = SkillifyPipeline::new(
+        temp.path().to_path_buf(),
+        Some(Arc::new(DriftLlm {
+            call_count: AtomicU32::new(0),
+        })),
+    );
+    let payload = SkillifyPayload {
+        trigger: SkillifyTrigger::Explicit,
+        key: "drift-test".to_owned(),
+        candidate_id: Some("skc_drift_test".to_owned()),
+        bound_scope: None,
+        source_record_ids: vec!["01HQZX9F5N0000000000000001".to_owned()],
+    };
+
+    let result = pipeline.run(payload).await.unwrap();
+    assert_ne!(
+        result.final_stage,
+        SkillifyStage::Promote,
+        "drift between spec and authored lane must not promote"
+    );
+    assert!(
+        result.errors.iter().any(|e| e.contains("lane")),
+        "expected lane-drift error, got: {:?}",
+        result.errors
+    );
+}

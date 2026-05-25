@@ -144,6 +144,31 @@ impl SkillifyPipeline {
             }
         };
 
+        // Round-12 hardening: the authoring LLM is a SECOND model call and
+        // can drift away from the extracted spec — emitting a different
+        // lane/slug, narrower triggers, or entirely different requires/
+        // provides. Without this cross-check the pipeline would create a
+        // promotion plan for a skill that no longer describes the
+        // candidate. Fail closed on any drift.
+        if authored.lane != spec.lane {
+            let msg = format!(
+                "authored lane `{}` does not match extracted spec lane `{}`",
+                authored.lane, spec.lane
+            );
+            errors.push(msg.clone());
+            let _ = state.fail(msg);
+            return Ok(Self::build_result(&state, errors, start));
+        }
+        if authored.slug != spec.slug {
+            let msg = format!(
+                "authored slug `{}` does not match extracted spec slug `{}`",
+                authored.slug, spec.slug
+            );
+            errors.push(msg.clone());
+            let _ = state.fail(msg);
+            return Ok(Self::build_result(&state, errors, start));
+        }
+
         let payload_source_refs = payload.source_record_ids.clone();
 
         // Round 7 hardening: if a previous run left a candidate directory

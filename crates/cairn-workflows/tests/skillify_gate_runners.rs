@@ -1139,3 +1139,42 @@ async fn unit_test_runner_rejects_oversized_authored_timeout() {
         "expected timeout-exceeded error"
     );
 }
+
+#[tokio::test]
+async fn resolver_trigger_rejects_substring_shadowing() {
+    // Round-12 regression: a candidate trigger `deploy` would shadow an
+    // existing trigger `deploy hotfix` at runtime (resolver uses
+    // substring match). The gate must reject this.
+    let temp = TempDir::new().unwrap();
+    let mut a = authored("deploy-hotfix");
+    a.resolver_triggers = json!(["deploy"]);
+    let b = bundle("deploy-hotfix");
+    let snapshot = SkillLintSnapshot {
+        skills: vec![SkillLintSkill {
+            skill_id: "existing-deploy-hotfix".to_owned(),
+            lane: "other.deploy".to_owned(),
+            path: "skills/skill_existing.md".to_owned(),
+            uses: None,
+            resolver_triggers: vec!["deploy hotfix".to_owned()],
+            files_to: Some("wiki/".to_owned()),
+            gate_report_passed: true,
+            rollback_version_count: 1,
+            existing_paths: vec![],
+        }],
+    };
+    let ctx = GateRunContext {
+        vault_root: temp.path(),
+        candidate_id: "skc_test",
+        candidate_dir: temp.path().to_path_buf(),
+        bundle: &b,
+        authored: &a,
+        llm: None,
+        snapshot: &snapshot,
+    };
+    let result = ResolverTriggerRunner.run(&ctx).await;
+    assert_eq!(result.status, SkillifyGateStatus::Failed);
+    assert!(
+        result.message.unwrap_or_default().contains("overlaps"),
+        "expected overlap rejection"
+    );
+}
