@@ -190,7 +190,7 @@ green too. If the change is breaking, **stop**: file a v2 design
 issue and follow the procedure in
 [MCP Semver Policy](mcp-semver-policy.md).
 
-See [ADR 0004](https://github.com/windoliver/cairn/blob/main/docs/design/decisions/0004-mcp-v1-semver-freeze.md)
+See [ADR 0004](../../../design/decisions/0004-mcp-v1-semver-freeze.md)
 for the authoritative freeze rules.
 
 ### 11. Migration guide review (manual)

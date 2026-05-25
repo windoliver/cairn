@@ -146,7 +146,7 @@ sensors namespace itself is independent.
 | `cairn.sensor.v1.screen.ocr.winrt` | Windows |
 
 Stability tiers and the freeze rules are governed by
-[ADR 0004 — `cairn.mcp.v1` semver freeze](https://github.com/windoliver/cairn/blob/main/docs/design/decisions/0004-mcp-v1-semver-freeze.md).
+[ADR 0004 — `cairn.mcp.v1` semver freeze](../../../design/decisions/0004-mcp-v1-semver-freeze.md).
 See [MCP Semver Policy](../maintainers/mcp-semver-policy.md) for the
 operator-facing summary.
 

@@ -43,7 +43,7 @@ The main CI workflow runs on every PR and push to `main`. Key jobs:
   state. The MCP envelope conformance suite
   (`crates/cairn-mcp/tests/mcp_conformance.rs`) ships as part of the
   regular `test` jobs — separate gate, also branch-protection required.
-  See [ADR 0004](https://github.com/windoliver/cairn/blob/main/docs/design/decisions/0004-mcp-v1-semver-freeze.md)
+  See [ADR 0004](../../../design/decisions/0004-mcp-v1-semver-freeze.md)
   and [MCP Semver Policy](mcp-semver-policy.md) for the freeze rules
   this gate enforces.
 - `bench-full`: manual-trigger BrainBench scorecard run (`bench / world-v1`).

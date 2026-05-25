@@ -1,6 +1,6 @@
 # MCP Semver Policy
 
-> **Operator summary.** [ADR 0004](https://github.com/windoliver/cairn/blob/main/docs/design/decisions/0004-mcp-v1-semver-freeze.md)
+> **Operator summary.** [ADR 0004](../../../design/decisions/0004-mcp-v1-semver-freeze.md)
 > is authoritative; this page is the day-to-day reference for release
 > operators and contributors touching the contract surface.
 
@@ -40,7 +40,7 @@ NOT frozen under `cairn.mcp.v1` — each carries its own
 - `cairn.federation.v1` (ships v0.3)
 - `cairn.sessiontree.v1` (ships v0.3)
 
-See [ADR 0004 §1–§2](https://github.com/windoliver/cairn/blob/main/docs/design/decisions/0004-mcp-v1-semver-freeze.md)
+See [ADR 0004 §1–§2](../../../design/decisions/0004-mcp-v1-semver-freeze.md)
 for the exhaustive list.
 
 ## Reserving a capability identifier (the only safe additive path under v1)
@@ -124,7 +124,7 @@ Splits on direction:
   Treat all of these as breaking and follow "Proposing a breaking
   change" below — either route the new field through
   `experimental["cairn.contracts"]` (per
-  [ADR 0004 §5.4](https://github.com/windoliver/cairn/blob/main/docs/design/decisions/0004-mcp-v1-semver-freeze.md))
+  [ADR 0004 §5.4](../../../design/decisions/0004-mcp-v1-semver-freeze.md))
   or roll under `cairn.mcp.v2`.
 
 ## Proposing a breaking change
@@ -132,7 +132,7 @@ Splits on direction:
 Breaking changes (rename, type change, required-field removal, envelope
 reshape) do **not** edit `crates/cairn-idl/schema/`. Instead:
 
-1. Open a v2 design issue citing [ADR 0004 §4](https://github.com/windoliver/cairn/blob/main/docs/design/decisions/0004-mcp-v1-semver-freeze.md).
+1. Open a v2 design issue citing [ADR 0004 §4](../../../design/decisions/0004-mcp-v1-semver-freeze.md).
 2. Land a `DEPRECATION` CHANGELOG entry and an ADR amendment.
 3. Wait for the deprecation window (≥ two minor releases) before opening
    the v2-cutover PR.
@@ -171,7 +171,7 @@ step). If it is breaking, follow "Proposing a breaking change" instead.
 
 ## Cross-references
 
-- [ADR 0004](https://github.com/windoliver/cairn/blob/main/docs/design/decisions/0004-mcp-v1-semver-freeze.md) — authoritative policy.
+- [ADR 0004](../../../design/decisions/0004-mcp-v1-semver-freeze.md) — authoritative policy.
 - Brief: [§8](https://github.com/windoliver/cairn/blob/main/docs/design/design-brief.md), [§8.0.a](https://github.com/windoliver/cairn/blob/main/docs/design/design-brief.md), [§8.0.a-bis](https://github.com/windoliver/cairn/blob/main/docs/design/design-brief.md).
 - [Capability Matrix](../reference/capability-matrix.md).
 - [Beta Readiness](beta-readiness.md).
