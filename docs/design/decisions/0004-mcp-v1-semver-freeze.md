@@ -93,7 +93,15 @@ The following changes are **additive** and ship under `cairn.mcp.v1`:
 - New optional field on existing verb args. The field MUST be `Option<T>`
   in Rust with `#[serde(default)]` so older requests still deserialize.
 - New variant on a `#[non_exhaustive]` enum (error codes, `retrieve`
-  targets, capability codes).
+  targets, capability codes). **Wire caveat**: Rust `#[non_exhaustive]`
+  protects API consumers from breakage on exhaustive matches but has
+  no effect on serde — the generated `enum ErrorCode`,
+  `enum ResponseTarget`, and `enum Capabilities` are all closed for
+  deserialization. Adding a variant is contract-additive (no v2 bump)
+  but advertising / emitting that variant to an older v1 client will
+  fail their deserializer until open-enum tolerance ships. Treat such
+  additions as release-coordinated rather than free; the same caveat
+  as the capability registry above applies.
 - New extension namespace (`cairn.<name>.v1`).
 - New tool description text, new examples, new docs — non-wire surface.
 - Bug-fixing the runtime decision in `cairn-core::status::advertise` so

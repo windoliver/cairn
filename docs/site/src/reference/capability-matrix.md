@@ -38,16 +38,47 @@ advertised in `cairn status`. Clients MUST inspect `status.capabilities`
 before issuing a mode; the runtime fails closed with `CapabilityUnavailable`
 on any un-advertised code (brief §8.0.a).
 
-| Row | Representative capability codes | Stability |
-|-----|----------------------------------|-----------|
-| Core verbs | `cairn.mcp.v1.<verb>` for each of the eight verbs | frozen v1.0 |
-| `search` modes | `cairn.mcp.v1.search.keyword`, `.semantic`, `.hybrid`, `.federation` | frozen v1.0 |
-| Session reload | `cairn.mcp.v1.retrieve.session`, `.rehydrate` | frozen v1.0 |
-| `forget` modes | `cairn.mcp.v1.forget.record`, `.session`, `.scope` | frozen v1.0 |
-| Consolidation tiers | `cairn.mcp.v1.summarize.rolling`, `.reflection`, `.rem`, `.deep` | frozen v1.0 |
-| Extension namespaces | `cairn.admin.v1.*` | reserved v1 (identifiers frozen; dispatch deferred per `capability_matrix_v1::DEFERRED_AT_PHASE`) |
-| Extension namespaces | `cairn.aggregate.v1.*`, `cairn.coord.v1.*`, `cairn.federation.v1.*`, `cairn.sessiontree.v1.*` | independent (per-namespace) |
-| Sensors | `cairn.sensors.v1.<sensor>` (local + remote) | sensors namespace (independent) |
+> **Source of truth.** The actual capability registry is
+> `crates/cairn-idl/schema/capabilities/capabilities.json`. The table
+> below mirrors it row-for-row. If a code appears here, it exists in
+> the registry; if it doesn't appear in the registry, it doesn't
+> exist yet — pin against this table only for codes the registry
+> already names.
+
+| Capability code | Stability |
+|-----------------|-----------|
+| `cairn.mcp.v1.search.keyword` | frozen v1.0 |
+| `cairn.mcp.v1.search.semantic` | frozen v1.0 |
+| `cairn.mcp.v1.search.hybrid` | frozen v1.0 |
+| `cairn.mcp.v1.retrieve.record` | frozen v1.0 |
+| `cairn.mcp.v1.retrieve.session` | frozen v1.0 |
+| `cairn.mcp.v1.retrieve.turn` | frozen v1.0 |
+| `cairn.mcp.v1.retrieve.tool_call` | frozen v1.0 |
+| `cairn.mcp.v1.retrieve.folder` | frozen v1.0 |
+| `cairn.mcp.v1.retrieve.scope` | frozen v1.0 |
+| `cairn.mcp.v1.retrieve.profile` | frozen v1.0 |
+| `cairn.mcp.v1.forget.record` | frozen v1.0 |
+| `cairn.mcp.v1.forget.session` | frozen v1.0 |
+| `cairn.mcp.v1.forget.scope` | frozen v1.0 |
+| `cairn.mcp.v1.summarize.narrative` | frozen v1.0 |
+| `cairn.mcp.v1.policy_trace` | frozen v1.0 |
+| `cairn.mcp.v1.replay.challenge` | frozen v1.0 |
+| `cairn.mcp.v1.replay.sequence` | frozen v1.0 |
+| `cairn.mcp.v1.sensors.pre_compact` | frozen v1.0 |
+| `cairn.mcp.v1.extension.admin` | reserved v1 (dispatch deferred per `capability_matrix_v1::DEFERRED_AT_PHASE`) |
+| `cairn.mcp.v1.extension.aggregate` | independent (`cairn.aggregate.v1`) |
+| `cairn.mcp.v1.extension.coord` | independent (`cairn.coord.v1`) |
+| `cairn.mcp.v1.extension.federation` | independent (`cairn.federation.v1`) |
+| `cairn.mcp.v1.extension.sessiontree` | independent (`cairn.sessiontree.v1`) |
+| `cairn.workflows.v1.consolidation` | workflows namespace (independent) |
+| `cairn.workflows.v1.dream` | workflows namespace (independent) |
+| `cairn.workflows.v1.expiration` | workflows namespace (independent) |
+| `cairn.workflows.v1.evaluation` | workflows namespace (independent) |
+| `cairn.sensor.v1.screen.xcap` | sensors namespace (independent) |
+| `cairn.sensor.v1.screen.screenpipe` | sensors namespace (independent) |
+| `cairn.sensor.v1.screen.ocr.tesseract` | sensors namespace (independent) |
+| `cairn.sensor.v1.screen.ocr.vision` | sensors namespace (independent) |
+| `cairn.sensor.v1.screen.ocr.winrt` | sensors namespace (independent) |
 
 Stability tiers and the freeze rules are governed by
 [ADR 0004 — `cairn.mcp.v1` semver freeze](https://github.com/windoliver/cairn/blob/main/docs/design/decisions/0004-mcp-v1-semver-freeze.md).
