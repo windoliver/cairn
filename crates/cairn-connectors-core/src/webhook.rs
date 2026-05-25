@@ -43,9 +43,18 @@ impl WebhookRequest {
     }
 }
 
-/// Opaque identifier for a verified signature, containing the hex-encoded
-/// MAC that was confirmed correct. Stored in `DeliveryMode::Webhook` so
-/// replay detection can reference it.
+/// Opaque identifier for a verified signature.
+///
+/// Always the lowercase hex encoding of the **computed** HMAC-SHA256 bytes;
+/// never the raw header value. Two requests with the same body and secret
+/// produce the same `SignatureId` regardless of hex case in their signature
+/// header.
+///
+/// Stored in `DeliveryMode::Webhook` so replay detection can reference it.
+/// Using the computed bytes (rather than the attacker-controlled header
+/// string) means an attacker cannot bypass the replay guard by re-casing the
+/// hex digits — `DEADBEEF` and `deadbeef` both map to the same `SignatureId`
+/// and are correctly identified as duplicates.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SignatureId(pub String);
 
@@ -95,7 +104,20 @@ pub fn verify_hmac_sha256(
     // Rejection path 4: MAC mismatch. MUST use constant-time comparison;
     // never use `==` on byte slices here.
     if computed.ct_eq(&provided).into() {
-        Ok(SignatureId(sig_hex.to_string()))
+        // Finding Y fix: canonicalize the SignatureId to the lowercase hex of
+        // the *computed* HMAC bytes, not the raw header string the caller sent.
+        //
+        // Without this, an attacker can replay a previously-accepted delivery
+        // by resending the same body with the hex signature in a different case
+        // (e.g. "DEADBEEF…" after "deadbeef…" was committed).  The replay
+        // guard uses the `SignatureId` string as the lookup key, so two
+        // differently-cased hex strings produce different keys and the second
+        // delivery is not recognised as a duplicate.
+        //
+        // Using `hex::encode(&computed)` — which always outputs lowercase — as
+        // the canonical form closes that window: every case variant of the same
+        // valid signature maps to the identical `SignatureId`.
+        Ok(SignatureId(hex::encode(computed)))
     } else {
         Err(ConnectorError::SignatureMismatch)
     }
@@ -216,7 +238,9 @@ mod tests {
             headers: vec![("X-Hmac".into(), expected_hex.clone())],
         };
         let SignatureId(id) = verify_hmac_sha256(&req, "X-Hmac", secret).expect("should verify");
-        // The SignatureId must carry exactly the hex string that was provided.
+        // The SignatureId must be the lowercase hex of the *computed* HMAC bytes.
+        // Since `hex_hmac_sha256` already returns lowercase hex, `expected_hex`
+        // equals the canonical form — so the assertion holds after the Finding Y fix.
         assert_eq!(id, expected_hex);
     }
 }

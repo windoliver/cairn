@@ -754,6 +754,114 @@ async fn registry_webhook_route_absent_for_disabled_connector() {
 //  - `missing_delivery_id_header_returns_400` — the framework no longer
 //    enforces presence of the delivery-id header (it ignores it entirely).
 
+// ---------------------------------------------------------------------------
+// Finding Y — replay key must be case-insensitive (canonical lowercase MAC)
+// ---------------------------------------------------------------------------
+
+/// Replay with the signature header re-cased to uppercase must still be blocked.
+///
+/// Before Finding Y the `SignatureId` was constructed from the raw header value
+/// supplied by the sender.  An attacker who had the lowercase hex of a
+/// previously-accepted delivery could replay the identical body by sending the
+/// same hex digits in uppercase, producing a different `SignatureId` string and
+/// bypassing the replay guard with a 204 instead of the expected 409.
+///
+/// The fix: `verify_hmac_sha256` now constructs `SignatureId` from
+/// `hex::encode(&computed)` — always lowercase — so the HMAC case in the
+/// header is discarded and both case variants map to the same replay key.
+#[tokio::test]
+async fn replay_with_uppercase_hex_signature_blocked() {
+    let capturer = Arc::new(Capturer::default());
+    let creds = Arc::new(InMemoryCredentialStore::default());
+    provision_secret(&creds).await;
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let mut reg = ConnectorRegistry::builder()
+        .credentials(
+            Arc::clone(&creds) as Arc<dyn cairn_connectors_core::credential::CredentialStore>
+        )
+        .consent(Arc::new(AcceptAllConsent::default()))
+        .emit(capturer.clone() as Arc<dyn PipelineEmit>)
+        .spool_root(tmp.path().to_path_buf())
+        .build();
+
+    reg.register(FixtureConnector::with_default_manifest())
+        .expect("register must succeed");
+    reg.enable("fixture", default_grant())
+        .await
+        .expect("enable must succeed");
+
+    let router = reg.webhook_router();
+
+    let body = serde_json::json!({"x": 1}).to_string();
+    // Compute the canonical (lowercase) HMAC-SHA256 signature.
+    let sig_lower = hex_hmac_sha256(WEBHOOK_SECRET, body.as_bytes());
+    // Construct the same signature with every hex digit in uppercase.
+    let sig_upper = sig_lower.to_uppercase();
+    // Sanity: they must differ at the string level for the test to be meaningful.
+    assert_ne!(
+        sig_lower, sig_upper,
+        "precondition: lowercase and uppercase signatures must differ as strings"
+    );
+
+    // First delivery with lowercase sig — must succeed with 204.
+    let req1 = Request::builder()
+        .method(Method::POST)
+        .uri("/webhooks/fixture")
+        .header("content-type", "application/json")
+        .header(SIG_HEADER, &sig_lower)
+        .header(DELIVERY_ID_HEADER, unique_delivery_id())
+        .body(Body::from(body.clone()))
+        .expect("request 1 must build");
+
+    let resp1 = router
+        .clone()
+        .oneshot(req1)
+        .await
+        .expect("router must respond to first request");
+    assert_eq!(
+        resp1.status(),
+        StatusCode::NO_CONTENT,
+        "first delivery with lowercase sig must return 204 No Content",
+    );
+
+    // Replay the SAME body with the sig re-cased to uppercase — must return 409.
+    // Finding Y: the `SignatureId` is now the canonical lowercase hex of the
+    // computed HMAC bytes, so both case variants map to the same replay key.
+    let req2 = Request::builder()
+        .method(Method::POST)
+        .uri("/webhooks/fixture")
+        .header("content-type", "application/json")
+        .header(SIG_HEADER, &sig_upper)
+        .header(DELIVERY_ID_HEADER, unique_delivery_id())
+        .body(Body::from(body.clone()))
+        .expect("request 2 must build");
+
+    let resp2 = router
+        .clone()
+        .oneshot(req2)
+        .await
+        .expect("router must respond to second request");
+    assert_eq!(
+        resp2.status(),
+        StatusCode::CONFLICT,
+        "replay with uppercase hex sig (same body, same MAC) must return 409 Conflict \
+         (Finding Y: SignatureId is always lowercase canonical MAC, not the raw header)",
+    );
+
+    // Only one event must have been emitted (the first delivery).
+    {
+        let events = capturer.0.lock().expect("mutex unpoisoned");
+        assert_eq!(
+            events.len(),
+            1,
+            "exactly 1 event must be emitted; the uppercase-sig replay must not produce a second event",
+        );
+    }
+
+    reg.shutdown().await;
+}
+
 /// An attacker replaying the same authenticated body+sig with a new
 /// `X-Fixture-Delivery` header value must still receive 409 Conflict.
 ///
