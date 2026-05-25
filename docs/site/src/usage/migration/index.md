@@ -36,7 +36,7 @@ The following surfaces never change shape across releases:
 | Capability codes (`cairn.mcp.v1.*`) | Added across phases. Existing codes never change meaning. Removals require one release of deprecation. |
 | Config schema (`.cairn/config.yaml`) | Additive. New keys ship with safe defaults. Removals deprecated one release first. |
 | CLI flags | Additive same way. |
-| WAL state machines | New states append; existing transitions never change semantics (CLAUDE.md §6.11). |
+| WAL state machines | New states append; existing transitions never change semantics ([CLAUDE.md §6.11](https://github.com/windoliver/cairn/blob/main/CLAUDE.md)). |
 | SQLite migrations | Append-only, never mutated. Each migration is a new file under `crates/cairn-store-sqlite/migrations/`. |
 | MCP wire protocol | Frozen at v1.0; v0.x carries the `cairn.mcp.v1` namespace and may add capability codes without breaking incarnation contracts. |
 
