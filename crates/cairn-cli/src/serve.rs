@@ -58,9 +58,15 @@ pub fn run(matches: &ArgMatches) -> ExitCode {
         .get_one::<u16>("port")
         .expect("invariant: --port has a default_value");
     // `--vault` is a global arg declared in command.rs as String; pick it
-    // up here so the alpha can log/print the requested vault path even
-    // though it's currently informational (fixture data is served).
-    let _vault: Option<String> = matches.get_one::<String>("vault").cloned();
+    // up here so the alpha can warn the user that fixture data is served
+    // regardless of the vault path (real-vault binding is a follow-up).
+    let vault: Option<String> = matches.get_one::<String>("vault").cloned();
+    if let Some(ref v) = vault {
+        eprintln!(
+            "cairn serve: --vault {v} accepted but ignored (alpha serves \
+             fixture data; vault binding lands in a follow-up issue)"
+        );
+    }
 
     let runtime = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -97,8 +103,18 @@ async fn serve(host: String, port: u16) -> anyhow::Result<()> {
     let fixture = DesktopFixture::load_default().context("loading desktop alpha fixture")?;
     let app = router(DesktopRepository::from_fixture(fixture));
     let addr: SocketAddr = format!("{host}:{port}").parse().context("bind addr")?;
-    let listener = TcpListener::bind(addr).await.context("bind listener")?;
+    let listener = TcpListener::bind(addr).await.map_err(|err| {
+        anyhow::anyhow!(
+            "bind {host}:{port} failed: {err}. \
+             Is another Cairn instance already running, or another process \
+             using this port? Try `lsof -iTCP:{port} -sTCP:LISTEN` to find it."
+        )
+    })?;
     let actual = listener.local_addr().context("local_addr")?;
+
+    // Emit one tracing line so the log file is non-empty on a healthy boot
+    // (operator-visible proof that the sidecar reached the serve loop).
+    tracing::info!(addr = %actual, "cairn-desktop ready (alpha fixture)");
 
     // First line of stdout: the bound address. Electron sidecar parses
     // this. Match the existing dev-server output verbatim:

@@ -72,17 +72,17 @@ jobs:
           APPLE_ID: ${{ secrets.APPLE_ID }}
         working-directory: frontend/desktop-electron
         run: |
-          APP=$(find dist/mac* -name "*.app" -maxdepth 2 | head -1)
+          APP=$(find release/mac* -name "*.app" -maxdepth 2 | head -1)
           codesign --verify --deep --strict --verbose=2 "$APP"
           spctl --assess --type execute --verbose=2 "$APP"
-          DMG=$(ls dist/*.dmg | head -1)
+          DMG=$(ls release/*.dmg | head -1)
           xcrun stapler validate "$DMG"
 
       - name: Upload artifact for downstream jobs
         uses: actions/upload-artifact@v4
         with:
           name: cairn-macos-dmg
-          path: frontend/desktop-electron/dist/*.dmg
+          path: frontend/desktop-electron/release/*.dmg
           retention-days: 7
 
   smoke:

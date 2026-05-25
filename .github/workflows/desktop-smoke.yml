@@ -36,22 +36,22 @@ jobs:
             exit 1
           fi
 
-      - name: Assert backend started
+      - name: Dump backend log (diagnostic only)
+        if: always()
         run: |
           LOG="$HOME/Library/Application Support/cairn/logs/desktop.log"
-          test -f "$LOG" || { echo "no log file"; exit 1; }
-          # The sidecar tees the child's STDERR to this file.
-          # tracing-subscriber writes axum startup messages there.
-          # The literal "listening on http://" goes to STDOUT and is
-          # consumed by sidecar.mjs for port-parsing — not in the log.
-          # Instead, assert that the log file exists and is non-empty
-          # (proves the sidecar process started and tracing came up).
-          if [ ! -s "$LOG" ]; then
-            echo "log file is empty — sidecar did not start"
-            exit 1
+          if [ -f "$LOG" ]; then
+            echo "--- desktop.log head ---"
+            head -40 "$LOG"
+          else
+            echo "(no desktop.log — sidecar did not write stderr)"
           fi
-          echo "--- desktop.log head ---"
-          head -20 "$LOG"
+          # Liveness is proven by the previous step's exit code: --smoke-test
+          # only exits 0 after main.mjs polls /health and receives 200 from
+          # the spawned sidecar. The log may be empty on a healthy boot
+          # because tracing-subscriber writes nothing for a 200 /health
+          # request and the discovery line goes to stdout (parsed by
+          # sidecar.mjs, not tee'd to the log).
 
       - name: Cleanup
         if: always()

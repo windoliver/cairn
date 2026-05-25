@@ -74,30 +74,37 @@ async function main() {
   if (smoke.enabled) {
     vaultPath = smoke.vault ?? join(APP_SUPPORT, "smoke-vault");
     await fs.mkdir(vaultPath, { recursive: true });
-  } else if (registry?.active) {
-    vaultPath =
-      registry.vaults.find((v) => v.id === registry.active)?.path ?? null;
+  } else if (registry) {
+    // Registry exists — resolve active vault path.
+    if (registry.active) {
+      vaultPath =
+        registry.vaults.find((v) => v.id === registry.active)?.path ?? null;
+    }
+    // If active points at a vanished id but the vaults list is non-empty,
+    // do NOT overwrite the registry (that would erase the user's index).
+    // Fall back to the first listed vault and persist the corrected active.
+    if (!vaultPath && registry.vaults.length > 0) {
+      vaultPath = registry.vaults[0].path;
+      registry.active = registry.vaults[0].id;
+      await writeRegistry(REGISTRY_PATH, registry);
+    }
   }
 
   if (!vaultPath) {
-    // First launch (non-smoke). Minimal blocking dialog for v1 of this
-    // packaging slice — a richer React onboarding lands in a sibling
-    // issue. Default to ~/Documents/cairn.
+    // First launch (non-smoke) OR registry exists but has zero vaults.
+    // Minimal blocking flow for v1 of this packaging slice — a richer
+    // React onboarding lands in a sibling issue. Default ~/Documents/cairn.
     vaultPath = join(homedir(), "Documents", "cairn");
     await fs.mkdir(vaultPath, { recursive: true });
-    registry = {
-      version: CURRENT_VERSION,
-      vaults: [
-        {
-          id: crypto.randomUUID(),
-          path: vaultPath,
-          label: "Default",
-          last_opened: Date.now(),
-        },
-      ],
-      active: null,
+    const entry = {
+      id: crypto.randomUUID(),
+      path: vaultPath,
+      label: "Default",
+      last_opened: Date.now(),
     };
-    registry.active = registry.vaults[0].id;
+    registry = registry ?? { version: CURRENT_VERSION, vaults: [], active: null };
+    registry.vaults.push(entry);
+    registry.active = entry.id;
     await writeRegistry(REGISTRY_PATH, registry);
   }
 
