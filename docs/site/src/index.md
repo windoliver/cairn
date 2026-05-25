@@ -13,9 +13,11 @@ Current user-facing commands that work today:
 - `cairn plugins list`
 - `cairn plugins verify`
 
-The eight memory verbs are already in the CLI and generated references:
-`ingest`, `search`, `retrieve`, `summarize`, `assemble_hot`, `capture_trace`,
-`lint`, and `forget`. They fail closed until storage and dispatch are wired.
+The eight memory verbs are wired end to end across the CLI and generated
+references: `ingest`, `search`, `retrieve`, `summarize`, `assemble_hot`,
+`capture_trace`, `lint`, and `forget`. Anything not yet shipped fails closed
+at the capability layer (see the [capability matrix](reference/capability-matrix.md)
+for per-phase scope).
 
 ## Phase scope
 
