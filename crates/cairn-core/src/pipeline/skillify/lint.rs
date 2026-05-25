@@ -223,7 +223,7 @@ fn sort_issues(out: &mut [SkillLintIssue]) {
     });
 }
 
-fn valid_relative_dir(value: &str) -> bool {
+pub(crate) fn valid_relative_dir(value: &str) -> bool {
     let path = std::path::Path::new(value);
     !path.is_absolute()
         && value.ends_with('/')

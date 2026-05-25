@@ -35,6 +35,7 @@ Commands:
                  cairn verbs, writes responses to stdout. Blocks until stdin closes.
   vault          Manage the vault registry (brief §3.3)
   skill          Manage the Cairn skill bundle
+  skillpack      Manage `.cairnpack` skill archives (issue #128)
   admin          Administrative operations (model management, reindex, reporting, backup substrate)
   backup         Audit and manage registered vault backups
   llm            LLM provider diagnostics (ADR 0001)
@@ -82,6 +83,7 @@ Options:
 - [`cairn mcp`](commands/mcp.md) - Start an MCP stdio server. Reads MCP frames from stdin, dispatches to the eight cairn verbs, writes responses to stdout. Blocks until stdin closes.
 - [`cairn vault`](commands/vault.md) - Manage the vault registry (brief §3.3)
 - [`cairn skill`](commands/skill.md) - Manage the Cairn skill bundle
+- [`cairn skillpack`](commands/skillpack.md) - Manage `.cairnpack` skill archives (issue #128)
 - [`cairn admin`](commands/admin.md) - Administrative operations (model management, reindex, reporting, backup substrate)
 - [`cairn backup`](commands/backup.md) - Audit and manage registered vault backups
 - [`cairn llm`](commands/llm.md) - LLM provider diagnostics (ADR 0001)

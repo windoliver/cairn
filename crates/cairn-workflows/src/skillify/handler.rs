@@ -4,16 +4,13 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use cairn_core::contract::job_store::{JobKind, JobPayload};
-use cairn_core::contract::llm_provider::{
-    CompletionOutput, CompletionRequest, LLMProvider, LlmError,
-};
+use cairn_core::contract::llm_provider::{LLMProvider, LlmError};
+use cairn_core::pipeline::skillify::SkillifyStage;
 
 use crate::scheduler::{HandlerOutcome, JobHandler};
 
-use super::materialize::{
-    AuthoredSkillBundle, SkillifyMaterializeError, candidate_materialized,
-    materialize_blocked_candidate, materialize_bundle,
-};
+use super::materialize::{SkillifyMaterializeError, candidate_ready};
+use super::pipeline::{SkillifyPipeline, SkillifyPipelineError};
 
 /// The `JobKind` discriminator stored in `workflow_jobs.kind`.
 pub const SKILLIFY_KIND: &str = "skillify.emit";
@@ -66,52 +63,63 @@ impl SkillifyHandler {
     /// not valid skill bundle JSON, or bundle materialization fails.
     pub async fn run_once(&self, payload: super::SkillifyPayload) -> Result<(), SkillifyRunError> {
         let candidate_id = payload.candidate_id_or_derive();
-        if candidate_materialized(&self.vault_root, &candidate_id)? {
+
+        // Replay guard: only short-circuit when the candidate's gates already
+        // passed. `candidate_ready` checks the on-disk gate report, so a
+        // previously-failed candidate is re-evaluated on the next run instead
+        // of being silently re-marked Done.
+        if candidate_ready(&self.vault_root, &candidate_id)? {
             return Ok(());
         }
 
-        let Some(llm) = &self.llm else {
-            materialize_blocked_candidate(
-                &self.vault_root,
-                &candidate_id,
-                "llm provider not configured",
-            )?;
-            return Err(SkillifyRunError::NoLlm);
-        };
+        let pipeline = SkillifyPipeline::new(self.vault_root.clone(), self.llm.clone());
+        let result = pipeline.run(payload).await.map_err(|e| match e {
+            SkillifyPipelineError::NoLlm => SkillifyRunError::NoLlm,
+            SkillifyPipelineError::Llm(e) => SkillifyRunError::Llm(e),
+            SkillifyPipelineError::Materialize(e) => SkillifyRunError::Materialize(e),
+            SkillifyPipelineError::Io(e) => {
+                SkillifyRunError::Materialize(SkillifyMaterializeError::Io(e))
+            }
+            SkillifyPipelineError::Json(e) => {
+                SkillifyRunError::Materialize(SkillifyMaterializeError::Json(e))
+            }
+        })?;
 
-        let request = CompletionRequest::builder()
-            .prompt(format!(
-                "Create a section 11.b Skillify bundle for key {} with sources {:?}. Return JSON only.",
-                payload.key, payload.source_record_ids
-            ))
-            .schema(serde_json::json!({
-                "type": "object",
-                "required": [
-                    "lane",
-                    "slug",
-                    "skill_markdown",
-                    "script",
-                    "unit_tests",
-                    "integration_tests",
-                    "llm_evals",
-                    "resolver_triggers",
-                    "resolver_eval",
-                    "smoke",
-                    "filing_rules"
-                ]
-            }))
-            .build();
-        let CompletionOutput::Json(value) = llm.complete(&request).await? else {
-            return Err(SkillifyRunError::NonJsonOutput);
-        };
-        let authored = AuthoredSkillBundle::try_from(value)?;
-        materialize_bundle(
-            &self.vault_root,
-            &candidate_id,
-            &authored,
-            &payload.source_record_ids,
-        )?;
-        Ok(())
+        match result.final_stage {
+            // Promote (or HealthCheck after promote) is the only success path:
+            // the candidate's gates all passed and it is durable.
+            SkillifyStage::Promote | SkillifyStage::HealthCheck => Ok(()),
+            // No LLM configured — fail closed with a permanent NoLlm error so
+            // the scheduler does not retry, and the blocked marker remains on
+            // disk for visibility.
+            SkillifyStage::Blocked => Err(SkillifyRunError::NoLlm),
+            // Failed: gate failure, extract/author error, or other terminal
+            // failure. The bundle and gate-report remain on disk for human
+            // inspection, but we MUST surface the failure as a permanent
+            // error so the scheduler records it (and downstream workflows
+            // can see that promotion did not happen).
+            SkillifyStage::Failed => {
+                let msg = if result.errors.is_empty() {
+                    "skillify pipeline failed".to_owned()
+                } else {
+                    result.errors.join("; ")
+                };
+                Err(SkillifyRunError::Materialize(
+                    SkillifyMaterializeError::InvalidPathToken {
+                        label: "pipeline-failed",
+                        value: msg,
+                    },
+                ))
+            }
+            // Reaching here means the pipeline returned without advancing to a
+            // terminal stage — a logic bug. Treat as permanent failure.
+            other => Err(SkillifyRunError::Materialize(
+                SkillifyMaterializeError::InvalidPathToken {
+                    label: "pipeline-unexpected-stage",
+                    value: format!("{other:?}"),
+                },
+            )),
+        }
     }
 }
 
