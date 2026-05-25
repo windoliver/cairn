@@ -142,19 +142,64 @@ fn run_install(args: &ArgMatches, explicit_vault: Option<&str>) -> ExitCode {
                 );
             }
             println!("vault:           {}", vault_root.display());
-            // The unpacker deliberately writes an "all gates Blocked"
-            // gate-report so the installed candidate is forced to re-gate
-            // locally rather than trust the archive's claimed status
-            // (round-3 integrity hardening). Surface this clearly so the
-            // operator knows the skill is NOT yet promotable.
+
+            // Round-14: re-gate every installed candidate synchronously
+            // using the HealthCheckRunner. This converts the all-Blocked
+            // gate-report the unpacker wrote (round-3 integrity hardening)
+            // into a real gate report against the installed bytes — so
+            // operators can actually use installed packs without first
+            // running a separate re-gate workflow.
+            //
+            // No LLM is passed: the LlmEvalRunner will return Blocked,
+            // which is the right behavior for an unauthenticated CLI
+            // install. Operators who want LLM eval should run a separate
+            // workflow with LLM credentials.
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build();
+            let runtime = match runtime {
+                Ok(rt) => rt,
+                Err(e) => {
+                    eprintln!("cairn skillpack install: tokio runtime: {e}");
+                    return ExitCode::from(1);
+                }
+            };
+            let health =
+                cairn_workflows::skillify::health::HealthCheckRunner::new(vault_root.clone(), None);
+
             println!();
-            println!("status:          installed but NOT promotable");
-            println!(
-                "                 each installed candidate's gate-report.json is reset\n\
-                 \x20                to all-Blocked; re-gate locally before any candidate\n\
-                 \x20                can be promoted. Skillify can re-author and re-run\n\
-                 \x20                gates by enqueueing the candidate's source records."
-            );
+            println!("status:          re-gating installed candidates...");
+            let mut any_unhealthy = false;
+            for entry in &manifest.skills {
+                let res = runtime.block_on(health.check(&entry.candidate_id));
+                match res {
+                    Ok(report) if report.healthy => {
+                        println!("  - {} : HEALTHY", entry.candidate_id);
+                    }
+                    Ok(report) => {
+                        any_unhealthy = true;
+                        println!(
+                            "  - {} : NOT promotable ({} gate(s) not passing: {})",
+                            entry.candidate_id,
+                            report.regressions.len(),
+                            report.regressions.join(", "),
+                        );
+                    }
+                    Err(e) => {
+                        any_unhealthy = true;
+                        println!("  - {} : re-gate failed: {e}", entry.candidate_id);
+                    }
+                }
+            }
+            if any_unhealthy {
+                println!();
+                println!(
+                    "note: at least one candidate is not promotable. Inspect each \
+                     candidate's gate-report.json for details; some gates (LLM eval) \
+                     are intentionally Blocked when running install without an LLM \
+                     provider configured."
+                );
+            }
             ExitCode::SUCCESS
         }
         Err(e) => {

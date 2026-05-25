@@ -160,6 +160,10 @@ impl GateRunner for SkillContractRunner {
         SkillArtifactKind::SkillContract
     }
 
+    #[allow(
+        clippy::too_many_lines,
+        reason = "linear frontmatter validation: parse, required-fields, then 4 cross-checks. Splitting helpers obscures the invariants."
+    )]
     async fn run(&self, ctx: &GateRunContext<'_>) -> GateRunResult {
         let timer = GateTimer::start();
         let md = &ctx.authored.skill_markdown;
@@ -262,30 +266,47 @@ impl GateRunner for SkillContractRunner {
             );
         }
 
-        // 4. triggers — frontmatter list must be a subset of (or equal to)
-        //    the authored resolver_triggers. Use case-insensitive trim
-        //    semantics matching the resolver. If lengths or members
-        //    differ, the contract advertises capabilities the gates
-        //    didn't exercise.
+        // 4. triggers — must be SET-EQUAL (case-insensitive, normalized)
+        //    to the authored resolver_triggers. Round-14 hardening: the
+        //    previous check was a one-way subset test, so a bundle could
+        //    advertise `["deploy hotfix"]` in the contract while shipping
+        //    resolver_triggers `["deploy hotfix", "deploy"]` — the
+        //    contract gate passed but runtime routing could fire on the
+        //    hidden broad trigger. Both directions must agree.
         if let Some(md_triggers) = top_level_list(frontmatter, "triggers") {
-            let authored_triggers: Vec<String> = ctx
+            let normalize = |s: &str| s.trim().to_lowercase();
+            let md_set: std::collections::BTreeSet<String> =
+                md_triggers.iter().map(|s| normalize(s)).collect();
+            let authored_set: std::collections::BTreeSet<String> = ctx
                 .authored
                 .resolver_triggers
                 .as_array()
                 .map(|arr| {
                     arr.iter()
                         .filter_map(serde_json::Value::as_str)
-                        .map(|s| s.trim().to_lowercase())
+                        .map(normalize)
                         .collect()
                 })
                 .unwrap_or_default();
-            for t in &md_triggers {
-                let t_norm = t.trim().to_lowercase();
-                if !authored_triggers.contains(&t_norm) {
+            // Contract advertises a trigger that's not in resolver_triggers.
+            for t in &md_set {
+                if !authored_set.contains(t) {
                     return GateRunResult::failed(
                         self.artifact_kind(),
                         format!(
                             "skill contract trigger `{t}` is not in authored resolver_triggers"
+                        ),
+                        timer.elapsed_ms(),
+                    );
+                }
+            }
+            // Resolver triggers a phrase the contract doesn't advertise.
+            for t in &authored_set {
+                if !md_set.contains(t) {
+                    return GateRunResult::failed(
+                        self.artifact_kind(),
+                        format!(
+                            "authored resolver trigger `{t}` is not declared in the skill contract frontmatter"
                         ),
                         timer.elapsed_ms(),
                     );

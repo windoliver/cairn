@@ -140,6 +140,30 @@ impl SkillPackBuilder {
 
             let bundle: SkillArtifactBundle = serde_json::from_slice(&fs::read(&manifest_path)?)?;
 
+            // Round-14 hardening: validate every artifact path in the
+            // candidate manifest stays UNDER bundle/. Without this an
+            // absolute path like `/etc/passwd` or a `..` escape could
+            // make the archive loop below read a host file via
+            // `cand_dir.join(allowed_rel)` and embed it under
+            // `skills/<id>/...`. The symlink scan only walks cand_dir;
+            // join with an absolute path would silently escape it.
+            bundle.validate().map_err(|e| {
+                SkillPackBuildError::Pack(SkillPackError::IntegrityFailure {
+                    expected: format!("valid bundle paths for {cid}"),
+                    actual: format!("validation failed: {e}"),
+                })
+            })?;
+            // Defence in depth: also assert bundle.candidate_id matches the
+            // requested cid (catches stale/swapped manifest.json).
+            if bundle.candidate_id != *cid {
+                return Err(SkillPackBuildError::Pack(
+                    SkillPackError::IntegrityFailure {
+                        expected: format!("candidate_id={cid}"),
+                        actual: format!("candidate_id={}", bundle.candidate_id),
+                    },
+                ));
+            }
+
             let report_path = cand_dir.join("gate-report.json");
             let report: SkillifyGateReport = serde_json::from_slice(&fs::read(&report_path)?)?;
 
@@ -342,7 +366,25 @@ impl SkillPackBuilder {
 
             // Append only allowlisted files. Use rel-path lookups so the
             // archive tree mirrors the candidate dir under skills/<cid>/.
+            // Round-14 hardening: reject any allowlist entry whose path
+            // is absolute or contains parent components. `bundle.validate()`
+            // above already enforces this on declared artifacts, but the
+            // hardcoded `manifest.json`/`gate-report.json` entries plus
+            // future additions to the allowlist deserve the same check
+            // applied at the call site.
             for allowed_rel in &allowed {
+                if allowed_rel.is_absolute()
+                    || allowed_rel
+                        .components()
+                        .any(|c| matches!(c, std::path::Component::ParentDir))
+                {
+                    return Err(SkillPackBuildError::Pack(
+                        SkillPackError::IntegrityFailure {
+                            expected: "relative path with no parent components".to_owned(),
+                            actual: format!("unsafe allowlist entry: {}", allowed_rel.display()),
+                        },
+                    ));
+                }
                 let src_path = cand_dir.join(allowed_rel);
 
                 // Round 10 hardening: re-check symlink_metadata right
