@@ -115,17 +115,27 @@ for the target phase.
 
 ### 10. Contract freeze verified (manual)
 
-Verify the `contract-drift` CI job is green on the release SHA. From the
-PR or the release branch:
+Verify the `contract-drift` CI job is green on the **release SHA**
+specifically — not on whatever the branch's latest run happened to
+cover. From the PR or the release branch, pin to the exact commit:
 
 ```bash
-RUN_ID=$(gh run list --branch "$(git rev-parse --abbrev-ref HEAD)" \
-  --workflow ci.yml --limit 1 --json databaseId --jq '.[0].databaseId')
+SHA=$(git rev-parse HEAD)
+RUN_ID=$(gh run list --commit "$SHA" --workflow ci.yml \
+  --limit 1 --json databaseId --jq '.[0].databaseId // ""')
+if [ -z "$RUN_ID" ]; then
+  echo "fail: no ci.yml run found for $SHA — push the commit and wait for CI"
+  exit 1
+fi
 gh run view "$RUN_ID" --json jobs \
   --jq '.jobs[] | select(.name | startswith("contract-drift")) | .conclusion'
 ```
 
 Expected: `"success"`. The matrix-shaped job name (`contract-drift / wire-compat …`) is matched via `startswith` because `gh` appends the matrix suffix to the configured job name.
+
+If no run exists for the release SHA, the gate **fails closed** —
+never validate against an older run, because the commit you're
+releasing has not been CI-verified yet.
 
 **Pass:** `contract-drift` succeeded on the release SHA, **and** no
 schema file under `crates/cairn-idl/schema/` was changed without an
