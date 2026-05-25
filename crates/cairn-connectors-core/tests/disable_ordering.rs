@@ -46,7 +46,7 @@ use cairn_connectors_core::fixture::AcceptAllConsent;
 use cairn_connectors_core::manifest::ConnectorManifest;
 use cairn_connectors_core::webhook::WebhookRequest;
 use cairn_connectors_core::{
-    ConnectorError, ConnectorRegistry, InMemoryCredentialStore, PipelineEmit,
+    ConnectorError, ConnectorRegistry, CredentialStore, InMemoryCredentialStore, PipelineEmit,
 };
 use cairn_core::contract::connector_consent::{
     ConnectorConsentJournal, ConnectorConsentLookup, ConsentGrant, ConsentGrantId,
@@ -516,6 +516,260 @@ async fn disable_cancels_in_flight_poll() {
     // No events must have been emitted (the slow poll was cancelled).
     let count = capturer.0.load(Ordering::SeqCst);
     assert_eq!(count, 0, "no events must be emitted when poll is cancelled");
+}
+
+// ---------------------------------------------------------------------------
+// Finding P — disable during webhook processing aborts before emit
+// ---------------------------------------------------------------------------
+
+/// The `SWConnector` (Slow Webhook Connector) is a webhook-capable connector
+/// whose `ingest_webhook` sleeps for 300 ms before returning events. This
+/// gives the test enough time to call `disable()` concurrently and observe
+/// that the second state check in `process_event` catches the disabled state
+/// before `emit` is called.
+///
+/// Manifest is a copy of `DPOLL_MANIFEST` with `webhook = true` and a
+/// different name to avoid test isolation issues.
+const SW_MANIFEST: &str = r#"
+[connector]
+name = "slow-webhook"
+contract = "Connector"
+contract_version = "0.1.0"
+sensor_identity = "snr:local:connector:slow-webhook:v1"
+
+[capabilities]
+poll = false
+webhook = true
+backfill = false
+
+[oauth]
+required_scopes = []
+token_lifetime = "1h"
+refresh = false
+
+[budget]
+max_items_per_hour = 1000
+max_bytes_per_day = "1GiB"
+
+[labels]
+allowed = ["note"]
+
+[[scopes.declared]]
+kind = "project"
+pattern = "*"
+
+[webhook]
+"signature.algorithm" = "hmac-sha256"
+"signature.header" = "X-SW-Sig"
+allowed_mimes = ["application/json"]
+
+[poll]
+cursor_kind = "opaque-string"
+min_interval = "30s"
+default_interval = "5m"
+
+[payload]
+max_bytes = "256KiB"
+max_depth = 4
+"#;
+
+fn sw_manifest() -> ConnectorManifest {
+    ConnectorManifest::parse_toml(SW_MANIFEST).expect("SW_MANIFEST must parse")
+}
+
+fn sw_grant() -> ConsentGrant {
+    ConsentGrant::new(
+        "slow-webhook",
+        sw_manifest().hash(),
+        BTreeSet::from(["note".to_string()]),
+        vec!["project:*".to_string()],
+        1_700_000_000,
+        Identity::parse("hmn:alice").expect("hmn:alice is valid"),
+    )
+}
+
+/// A webhook-capable connector whose `ingest_webhook` sleeps 300 ms before
+/// returning one event. This allows a concurrent `disable()` to flip the
+/// connector state to `Disabled` before `process_event` calls `emit`.
+struct SlowWebhookConnector {
+    manifest: ConnectorManifest,
+    sensor: Identity,
+}
+
+impl SlowWebhookConnector {
+    fn new() -> Self {
+        Self {
+            manifest: sw_manifest(),
+            sensor: Identity::parse("snr:local:connector:slow-webhook:v1")
+                .expect("slow-webhook sensor identity must parse"),
+        }
+    }
+}
+
+#[async_trait]
+impl Connector for SlowWebhookConnector {
+    fn name(&self) -> &'static str {
+        "slow-webhook"
+    }
+
+    fn manifest(&self) -> &ConnectorManifest {
+        &self.manifest
+    }
+
+    fn capabilities(&self) -> &ConnectorCapabilities {
+        static C: ConnectorCapabilities = ConnectorCapabilities {
+            poll: false,
+            webhook: true,
+            backfill: false,
+        };
+        &C
+    }
+
+    fn sensor_identity(&self) -> &Identity {
+        &self.sensor
+    }
+
+    fn supported_contract_versions(&self) -> VersionRange {
+        Self::SUPPORTED_VERSIONS
+    }
+
+    async fn poll(&self, _cx: &PollContext) -> Result<PollOutcome, ConnectorError> {
+        Ok(PollOutcome::default())
+    }
+
+    /// Sleep 300 ms to give the test a window to call `disable()`, then return
+    /// one sample event. The sleep simulates a slow upstream HTTP request that
+    /// keeps the handler in-flight while `disable()` is racing.
+    async fn ingest_webhook(
+        &self,
+        _req: &WebhookRequest,
+        _cx: &WebhookContext,
+    ) -> Result<Vec<ConnectorEvent>, ConnectorError> {
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        Ok(vec![ConnectorEvent::new(
+            ConnectorEventId::new("01ARZ3NDEKTSV4RRFFQ69G5FDD"),
+            "slow-webhook",
+            SourceRef::new("issue", "x", None),
+            0,
+            BTreeSet::from(["note".to_string()]),
+            ConnectorScope::project("owner/repo"),
+            ConnectorPayload::Json {
+                mime: "application/json".into(),
+                body: serde_json::json!({"body": "slow-webhook-event"}),
+            },
+            DeliveryMode::Webhook {
+                signature_id: "test-sig".into(),
+            },
+        )])
+    }
+}
+
+impl ConnectorPlugin for SlowWebhookConnector {
+    const NAME: &'static str = "slow-webhook";
+    const SUPPORTED_VERSIONS: VersionRange =
+        VersionRange::new(ContractVersion::new(0, 1, 0), ContractVersion::new(0, 2, 0));
+}
+
+/// `disable` during an in-flight webhook processing must abort before `emit`
+/// (Finding P).
+///
+/// Setup:
+/// 1. Register and enable `SlowWebhookConnector` (webhook-capable, no poll).
+/// 2. Post a signed webhook request asynchronously (the handler sleeps 300 ms
+///    inside `ingest_webhook` before returning events).
+/// 3. While the handler is sleeping, call `disable()` on the registry.
+/// 4. The handler wakes, calls `process_event`, which re-checks the state
+///    (Finding P fix) and finds `Disabled` → returns `Fatal`.
+/// 5. The webhook handler returns a non-2xx status; `Capturer` has 0 events.
+///
+/// This test documents the "fast-fail mid-processing" semantics for P0.
+/// Strict drain-to-completion (waiting for all in-flight handlers before
+/// `disable` returns) is deferred to issue #131.
+#[tokio::test(flavor = "multi_thread")]
+async fn disable_during_webhook_processing_aborts_before_emit() {
+    use axum::body::Body;
+    use axum::http::{Method, Request, StatusCode};
+    use cairn_connectors_core::webhook::hex_hmac_sha256;
+    use tower::ServiceExt as _;
+
+    const SW_SECRET: &[u8] = b"sw-secret";
+    const SW_SIG_HEADER: &str = "X-SW-Sig";
+
+    let capturer = Arc::new(CountingEmit::default());
+    let creds = Arc::new(cairn_connectors_core::InMemoryCredentialStore::default());
+    // Provision the webhook secret for slow-webhook.
+    creds
+        .put("connector/slow-webhook/webhook_secret", SW_SECRET.to_vec())
+        .await
+        .expect("put must succeed");
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let mut reg = ConnectorRegistry::builder()
+        .credentials(
+            Arc::clone(&creds) as Arc<dyn cairn_connectors_core::credential::CredentialStore>
+        )
+        .consent(Arc::new(AcceptAllConsent::default()))
+        .emit(capturer.clone() as Arc<dyn PipelineEmit>)
+        .spool_root(tmp.path().to_path_buf())
+        .build();
+
+    reg.register(SlowWebhookConnector::new())
+        .expect("register must succeed");
+    reg.enable("slow-webhook", sw_grant())
+        .await
+        .expect("enable must succeed");
+
+    let router = reg.webhook_router();
+
+    let body = serde_json::json!({"disable": "race"}).to_string();
+    let sig = hex_hmac_sha256(SW_SECRET, body.as_bytes());
+
+    let req = Request::builder()
+        .method(Method::POST)
+        .uri("/webhooks/slow-webhook")
+        .header("content-type", "application/json")
+        .header(SW_SIG_HEADER, &sig)
+        .body(Body::from(body))
+        .expect("request must build");
+
+    // Spawn the webhook handler — it will sleep 300 ms inside ingest_webhook.
+    let handler_task = tokio::spawn(async move {
+        router
+            .oneshot(req)
+            .await
+            .expect("router must respond")
+            .status()
+    });
+
+    // Sleep 100 ms to let the handler enter ingest_webhook's sleep.
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    // Disable the connector while the handler is in-flight.
+    reg.disable("slow-webhook")
+        .await
+        .expect("disable must succeed");
+
+    // Wait for the handler to complete.
+    let status = handler_task.await.expect("handler task must complete");
+
+    // The handler must have returned a non-2xx status — the state re-check in
+    // `process_event` (Finding P fix) must have caught the disabled state.
+    assert_ne!(
+        status,
+        StatusCode::NO_CONTENT,
+        "webhook handler must not return 204 after connector was disabled mid-processing; \
+         got {status}",
+    );
+
+    // No events must have been emitted (the Fatal error from the state re-check
+    // prevents emit from being called).
+    let count = capturer.0.load(std::sync::atomic::Ordering::SeqCst);
+    assert_eq!(
+        count, 0,
+        "no events must be emitted when the connector is disabled mid-processing",
+    );
+
+    reg.shutdown().await;
 }
 
 /// `disable` succeeds when the consent journal is healthy, and the connector
