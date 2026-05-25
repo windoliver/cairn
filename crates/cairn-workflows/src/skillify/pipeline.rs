@@ -188,7 +188,11 @@ impl SkillifyPipeline {
                 && !candidate_dir.join("skill-spec.draft.json").exists();
             if was_install_only {
                 let msg = format!(
-                    "candidate `{candidate_id}` was installed via skillpack and needs explicit re-gating; refusing to overwrite with re-authored bundle"
+                    "candidate `{candidate_id}` was installed via skillpack and is preserved by this pipeline. \
+                     To re-gate it against the current vault, use `cairn skillpack install <archive>` again \
+                     (the install path runs gates synchronously via HealthCheckRunner). \
+                     To replace it with freshly-authored content, delete the candidate directory first \
+                     (`rm -r .cairn/evolution/skillify/{candidate_id}`) then re-enqueue."
                 );
                 errors.push(msg.clone());
                 let _ = state.fail(msg);

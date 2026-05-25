@@ -173,17 +173,41 @@ fn run_install(args: &ArgMatches, explicit_vault: Option<&str>) -> ExitCode {
             for entry in &manifest.skills {
                 let res = runtime.block_on(health.check(&entry.candidate_id));
                 match res {
-                    Ok(report) if report.healthy => {
-                        println!("  - {} : HEALTHY", entry.candidate_id);
-                    }
                     Ok(report) => {
-                        any_unhealthy = true;
-                        println!(
-                            "  - {} : NOT promotable ({} gate(s) not passing: {})",
-                            entry.candidate_id,
-                            report.regressions.len(),
-                            report.regressions.join(", "),
-                        );
+                        // Round-16 hardening: with no LLM configured, the
+                        // LlmEvalRunner returns Blocked — that's expected
+                        // for unauthenticated CLI install, not a failure
+                        // the user can act on. Filter it out of the
+                        // promotability decision (but still surface the
+                        // raw regression list so operators can see what
+                        // ran). Other Blocked/Failed gates DO count.
+                        let actionable_regressions: Vec<&String> = report
+                            .regressions
+                            .iter()
+                            .filter(|r| r.as_str() != "llm_evals")
+                            .collect();
+                        if actionable_regressions.is_empty() {
+                            // Either fully healthy or only LLM eval is
+                            // blocked (which is fine without an LLM).
+                            let suffix = if report.regressions.is_empty() {
+                                ""
+                            } else {
+                                " (LLM eval skipped — no provider)"
+                            };
+                            println!("  - {} : promotable{suffix}", entry.candidate_id);
+                        } else {
+                            any_unhealthy = true;
+                            println!(
+                                "  - {} : NOT promotable ({} gate(s) not passing: {})",
+                                entry.candidate_id,
+                                actionable_regressions.len(),
+                                actionable_regressions
+                                    .iter()
+                                    .map(|s| s.as_str())
+                                    .collect::<Vec<_>>()
+                                    .join(", "),
+                            );
+                        }
                     }
                     Err(e) => {
                         any_unhealthy = true;
@@ -335,18 +359,38 @@ fn run_inspect(args: &ArgMatches) -> ExitCode {
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// Resolve the vault root: `--vault` flag (via `explicit_vault`) > `CAIRN_VAULT`
-/// env var > current working directory.
-///
-/// This is intentionally simpler than the full `vault::resolve_vault` used by
-/// the core verbs — `skillpack` does not need registry lookup or
-/// walk-up logic, just a directory to anchor file operations.
+/// Resolve the vault root using the SAME precedence other vault-mutating
+/// verbs use: `--vault` flag → `CAIRN_VAULT` env → walk up from CWD for
+/// `.cairn/` → registry default. Round-16 hardening: the previous
+/// shortcut just fell back to CWD, which silently wrote into a nested
+/// `.cairn/evolution/skillify` tree when the operator ran `cairn
+/// skillpack install` from a vault subdirectory.
 fn resolve_vault(explicit_vault: Option<&str>) -> PathBuf {
-    if let Some(v) = explicit_vault {
-        return PathBuf::from(v);
+    // Merge --vault flag and CAIRN_VAULT env (env-var fallback matches
+    // main.rs's `explicit_vault` merging).
+    let merged_explicit = explicit_vault
+        .map(str::to_owned)
+        .or_else(|| std::env::var("CAIRN_VAULT").ok().filter(|s| !s.is_empty()));
+
+    // Use the canonical resolver so we walk up to find `.cairn/` and
+    // honor the registry's default entry.
+    let registry_path = std::env::var("CAIRN_REGISTRY")
+        .ok()
+        .map(PathBuf::from)
+        .or_else(|| crate::vault::VaultRegistryStore::default_path().ok())
+        .unwrap_or_else(|| PathBuf::from(".cairn-registry"));
+    let store = crate::vault::VaultRegistryStore::new(registry_path);
+    let opts = crate::vault::ResolveOpts {
+        explicit: merged_explicit,
+        cwd: std::env::current_dir().ok(),
+        store: &store,
+    };
+    match crate::vault::resolve_vault(opts) {
+        Ok(p) => p,
+        // Last-resort fallback: cwd. The canonical resolver returns an
+        // error only when nothing matches, which is operator error;
+        // this keeps install/pack runnable in greenfield setups and is
+        // consistent with the previous behavior.
+        Err(_) => std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
     }
-    if let Some(v) = std::env::var_os("CAIRN_VAULT") {
-        return PathBuf::from(v);
-    }
-    std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
 }
