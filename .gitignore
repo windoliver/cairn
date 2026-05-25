@@ -30,3 +30,7 @@ frontend/**/dist/
 crates/**/index.md
 crates/**/log.md
 crates/**/purpose.md
+
+# Electron desktop build outputs
+frontend/desktop-electron/dist/
+frontend/desktop-electron/resources/bin/

@@ -1,0 +1,38 @@
+appId: com.cairn.desktop
+productName: Cairn
+copyright: Copyright © 2026 Cairn Contributors
+directories:
+  buildResources: scripts
+  output: dist
+files:
+  - "dist/**/*"
+  - "electron/**/*"
+  - "package.json"
+extraResources:
+  - from: "resources/bin/cairn"
+    to: "bin/cairn"
+  - from: "../../scripts/uninstall.sh"
+    to: "scripts/uninstall.sh"
+afterSign: "scripts/notarize.mjs"
+mac:
+  category: public.app-category.developer-tools
+  target:
+    - target: dmg
+      arch:
+        - universal
+  hardenedRuntime: true
+  gatekeeperAssess: false
+  entitlements: scripts/entitlements.mac.plist
+  entitlementsInherit: scripts/entitlements.mac.plist
+dmg:
+  title: "Cairn ${version}"
+  contents:
+    - x: 130
+      y: 220
+    - x: 410
+      y: 220
+      type: link
+      path: /Applications
+  extraResources:
+    - from: "scripts/dmg-readme.txt"
+      to: "README.txt"

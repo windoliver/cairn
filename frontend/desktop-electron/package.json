@@ -30,7 +30,14 @@
     "@types/node": "^22.0.0",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
+    "electron-builder": "^25.1.8",
     "jsdom": "^25.0.0",
     "vitest": "^2.1.0"
+  },
+  "build": {
+    "extends": null,
+    "directories": {
+      "buildResources": "scripts"
+    }
   }
 }
