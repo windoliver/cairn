@@ -82,9 +82,9 @@ The release-blocking gate is the **`contract-drift` CI job**
 | `crates/cairn-mcp/tests/mcp_conformance.rs` | Envelope-shape drift; missing happy-path coverage. |
 
 A red `contract-drift` means **stop and reconcile**. Re-running
-`cargo run -p cairn-idl --bin cairn-codegen --` is the right move only
-if the change is intended and additive. If it is breaking, follow the
-"Proposing a breaking change" section instead.
+`cargo run -p cairn-idl --bin cairn-codegen` to regenerate snapshots
+is the right move only if the change is intended and additive. If it
+is breaking, follow the "Proposing a breaking change" section instead.
 
 ## Cross-references
 

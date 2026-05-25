@@ -119,12 +119,13 @@ Verify the `contract-drift` CI job is green on the release SHA. From the
 PR or the release branch:
 
 ```bash
-gh run list --branch "$(git rev-parse --abbrev-ref HEAD)" \
-  --workflow ci.yml --limit 1 --json conclusion,jobs \
-  | jq '.[0].jobs[] | select(.name == "contract-drift") | .conclusion'
+RUN_ID=$(gh run list --branch "$(git rev-parse --abbrev-ref HEAD)" \
+  --workflow ci.yml --limit 1 --json databaseId --jq '.[0].databaseId')
+gh run view "$RUN_ID" --json jobs \
+  --jq '.jobs[] | select(.name | startswith("contract-drift")) | .conclusion'
 ```
 
-Expected: `"success"`.
+Expected: `"success"`. The matrix-shaped job name (`contract-drift / wire-compat …`) is matched via `startswith` because `gh` appends the matrix suffix to the configured job name.
 
 **Pass:** `contract-drift` succeeded on the release SHA, **and** no
 schema file under `crates/cairn-idl/schema/` was changed without an
