@@ -32,6 +32,7 @@ use std::time::Duration;
 
 use arc_swap::ArcSwap;
 use bon::Builder;
+use sha2::{Digest, Sha256};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
@@ -44,6 +45,8 @@ use crate::connector::{Connector, ConnectorPlugin, PollContext};
 use crate::credential::{CredentialHandle, CredentialStore};
 use crate::emit::{PipelineEmit, build_capture_event};
 use crate::error::ConnectorError;
+use crate::event::ConnectorPayload;
+use crate::rate_limit::RateLimit;
 use crate::redact::RedactionPipeline;
 
 // ---------------------------------------------------------------------------
@@ -84,6 +87,15 @@ struct Entry {
     /// [`ConnectorRegistry::disable`] so the registry can `.await` the
     /// task's exit before marking the entry `Disabled`.
     poll_handle: Option<JoinHandle<()>>,
+    /// Per-connector item-rate budget, initialized from
+    /// `manifest.budget.max_items_per_hour` when the connector is enabled.
+    ///
+    /// `Arc` so the poll-task closure can hold a clone. Scopes are added
+    /// lazily the first time an event is seen for that scope.
+    ///
+    /// TODO(#130-followup): wire `max_bytes_per_day` budget once the
+    /// byte-budget tracker is implemented.
+    rate_limit: Arc<RateLimit>,
 }
 
 // ---------------------------------------------------------------------------
@@ -141,10 +153,28 @@ impl ConnectorRegistry {
     /// The connector starts in the [`Disabled`][ConnectorState::Disabled]
     /// state. Call [`enable`][Self::enable] to make it active.
     ///
+    /// # Sensor-identity binding (Finding C)
+    ///
+    /// Three invariants are enforced before the plugin is stored:
+    ///
+    /// 1. The runtime `plugin.sensor_identity().as_str()` must equal
+    ///    `plugin.manifest().connector.sensor_identity` (the value declared in
+    ///    the TOML). A mismatch indicates a buggy or malicious adapter that
+    ///    returns a different identity at runtime than it declares.
+    /// 2. The identity wire form must begin with `"snr:local:connector:"` —
+    ///    connectors must occupy the `local:connector:` root family (brief §4.2,
+    ///    §19 v0.3).
+    /// 3. The name segment immediately following `"snr:local:connector:"` must
+    ///    equal `plugin.name()`. This prevents an adapter from borrowing another
+    ///    connector's identity by declaring the right prefix but the wrong name
+    ///    segment.
+    ///
     /// # Errors
     ///
-    /// Returns [`ConnectorError::Fatal`] if a connector with the same name has
-    /// already been registered (duplicate names are not allowed).
+    /// Returns [`ConnectorError::Fatal`] if:
+    /// - A connector with the same name has already been registered (duplicate
+    ///   names are not allowed).
+    /// - Any of the three sensor-identity invariants above is violated.
     pub fn register<P: ConnectorPlugin + 'static>(
         &mut self,
         plugin: P,
@@ -155,6 +185,60 @@ impl ConnectorRegistry {
                 "duplicate connector {name}"
             )));
         }
+
+        // --- Sensor-identity binding (Finding C) ----------------------------
+        // Invariant 1: runtime identity must equal the manifest declaration.
+        let runtime_id = plugin.sensor_identity().as_str();
+        let declared_id = &plugin.manifest().connector.sensor_identity;
+        if runtime_id != declared_id.as_str() {
+            return Err(ConnectorError::fatal_msg(format!(
+                "connector {name}: runtime sensor_identity \"{runtime_id}\" \
+                 does not match manifest declaration \"{declared_id}\""
+            )));
+        }
+
+        // Invariant 2 + 3: wire form must start with "snr:local:connector:<name>:v".
+        //
+        // Expected format: "snr:local:connector:<name>:v<n>"
+        // We check that the prefix "snr:local:connector:" is present, that the
+        // next colon-delimited segment equals `plugin.name()`, and that the
+        // following segment starts with 'v'.
+        let prefix = "snr:local:connector:";
+        let rest = runtime_id.strip_prefix(prefix).ok_or_else(|| {
+            ConnectorError::fatal_msg(format!(
+                "connector {name}: sensor_identity \"{runtime_id}\" \
+                 must begin with \"{prefix}\""
+            ))
+        })?;
+
+        // Split off the name segment (everything before the next ':').
+        let (id_name_seg, rest_after_name) = rest.split_once(':').ok_or_else(|| {
+            ConnectorError::fatal_msg(format!(
+                "connector {name}: sensor_identity \"{runtime_id}\" \
+                 is missing the version segment after the connector-name segment"
+            ))
+        })?;
+
+        if id_name_seg != name {
+            return Err(ConnectorError::fatal_msg(format!(
+                "connector {name}: sensor_identity \"{runtime_id}\" \
+                 has name segment \"{id_name_seg}\" but plugin.name() is \"{name}\""
+            )));
+        }
+
+        // The version segment must start with 'v'.
+        if !rest_after_name.starts_with('v') {
+            return Err(ConnectorError::fatal_msg(format!(
+                "connector {name}: sensor_identity \"{runtime_id}\" \
+                 version segment \"{rest_after_name}\" must start with 'v'"
+            )));
+        }
+        // --- End sensor-identity binding ------------------------------------
+
+        // Initialize the per-connector rate limit from the manifest budget.
+        // Scopes are added lazily on first event via `RateLimit::ensure_scope`.
+        let budget_capacity = plugin.manifest().budget.max_items_per_hour;
+        let rate_limit = Arc::new(RateLimit::empty_per_hour(budget_capacity));
         self.entries.insert(
             name,
             Entry {
@@ -162,6 +246,7 @@ impl ConnectorRegistry {
                 state: Arc::new(ArcSwap::from_pointee(ConnectorState::Disabled)),
                 poll_token: None,
                 poll_handle: None,
+                rate_limit,
             },
         );
         Ok(())
@@ -212,6 +297,7 @@ impl ConnectorRegistry {
             let emit = self.emit.clone();
             let consent = self.consent.clone();
             let state = Arc::clone(&entry.state);
+            let rate_limit = Arc::clone(&entry.rate_limit);
             let name_owned = name.to_owned();
             let interval = Duration::from_mins(5);
             // Clone the token for the task; store the original for cancel.
@@ -234,7 +320,7 @@ impl ConnectorRegistry {
                                     cursor = outcome.next_cursor.clone();
                                     for event in outcome.events {
                                         if let Err(err) = process_event(
-                                            event, &connector, &state, &consent, &emit,
+                                            event, &connector, &state, &consent, &emit, &rate_limit,
                                         ).await {
                                             tracing::warn!(
                                                 connector = %name_owned,
@@ -384,6 +470,7 @@ impl ConnectorRegistry {
                 &entry.state,
                 &self.consent,
                 &self.emit,
+                &entry.rate_limit,
             )
             .await?;
         }
@@ -414,6 +501,69 @@ impl ConnectorRegistry {
                     "poll task panicked during registry shutdown",
                 );
             }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Payload-hash helper (Finding D)
+// ---------------------------------------------------------------------------
+
+/// Compute a real SHA-256 [`PayloadHash`] over the post-redaction wire bytes
+/// of a connector payload.
+///
+/// # Per-variant behaviour
+///
+/// - [`ConnectorPayload::Text`] — hashes `body.as_bytes()`. The text is the
+///   post-redaction form (PII replaced with `[REDACTED:<tag>]` placeholders).
+/// - [`ConnectorPayload::Json`] — hashes the canonical
+///   `serde_json::to_vec(body)` serialisation of the post-redaction JSON value.
+///   The serialisation is deterministic for the same value because `serde_json`
+///   emits keys in insertion order (the redactor preserves object key order).
+/// - [`ConnectorPayload::Binary`] — the adapter already declared the SHA-256 at
+///   ingest time; the framework trusts it verbatim. The spool layer in #131
+///   will verify the declared hash against the actual spooled bytes on write.
+///
+/// # Hash semantics
+///
+/// The hash covers the **post-redaction** wire bytes so downstream replay sees
+/// the same bytes that landed in the spool. Hashing pre-redaction bytes would
+/// make the hash useless for replay because the spool only retains the
+/// redacted form.
+///
+/// # Errors
+///
+/// Returns [`ConnectorError::Fatal`] if:
+/// - `ConnectorPayload::Json` cannot be serialised to bytes (unreachable in
+///   practice for a value already parsed from JSON, but propagated for
+///   correctness).
+/// - `ConnectorPayload::Binary`: the adapter-declared `sha256` field fails
+///   [`PayloadHash::parse`] (malformed hex or wrong prefix).
+fn payload_hash_for(payload: &ConnectorPayload) -> Result<PayloadHash, ConnectorError> {
+    match payload {
+        ConnectorPayload::Text { body, .. } => {
+            let digest = Sha256::digest(body.as_bytes());
+            let hash_str = format!("sha256:{}", hex::encode(digest));
+            PayloadHash::parse(hash_str)
+                .map_err(|e| ConnectorError::fatal_msg(format!("payload hash parse error: {e}")))
+        }
+        ConnectorPayload::Json { body, .. } => {
+            let bytes = serde_json::to_vec(body).map_err(|e| {
+                ConnectorError::fatal_msg(format!(
+                    "JSON serialisation failed during hash computation: {e}"
+                ))
+            })?;
+            let digest = Sha256::digest(&bytes);
+            let hash_str = format!("sha256:{}", hex::encode(digest));
+            PayloadHash::parse(hash_str)
+                .map_err(|e| ConnectorError::fatal_msg(format!("payload hash parse error: {e}")))
+        }
+        ConnectorPayload::Binary { sha256, .. } => {
+            // Trust the adapter-declared hash; the spool layer (#131) verifies
+            // it against the actual bytes on write.
+            PayloadHash::parse(sha256.clone()).map_err(|e| {
+                ConnectorError::fatal_msg(format!("Binary payload has malformed sha256 field: {e}"))
+            })
         }
     }
 }
@@ -456,6 +606,7 @@ async fn process_event(
     state: &Arc<ArcSwap<ConnectorState>>,
     consent: &Arc<dyn ConnectorConsentJournal>,
     emit: &Arc<dyn PipelineEmit>,
+    rate_limit: &Arc<RateLimit>,
 ) -> Result<(), ConnectorError> {
     // 0. Connector-name integrity: a misbehaving connector must not be able
     //    to forge another connector's name and bypass the consent gate.
@@ -530,29 +681,35 @@ async fn process_event(
     // 3b. Payload validation — scope, MIME, size (brief §130 Fix 4).
     event.validate_against_manifest(connector.manifest())?;
 
+    // 3c. Rate-limit charge — deduct one item token from the per-scope bucket
+    //     (Finding A). Scopes are registered lazily on first event so the
+    //     registry does not need to enumerate them up front.
+    rate_limit.ensure_scope(&scope_key);
+    rate_limit.charge(&scope_key, 1)?;
+
     // 4. Redact PII before the event crosses any boundary (brief §5.2 + §14).
     //    Use the manifest's max_depth limit for the JSON walker.
     let redacted = RedactionPipeline::new()
         .with_max_depth(connector.manifest().payload.max_depth)
         .redact(event)?;
 
-    // 5. Build a CaptureEvent with placeholder spool references.
-    //    Real spool path + hash are written by the spool layer in #131.
-    let placeholder_ref = format!(
+    // 5. Build a CaptureEvent with a real content hash and a placeholder spool
+    //    ref. The spool path is finalised by the spool layer in #131; the hash
+    //    is computed here from the post-redaction payload bytes so downstream
+    //    deduplication, audit, and replay work correctly even before the spool
+    //    layer lands (Finding D).
+    let payload_ref = format!(
         "sources/connector/{}/{}",
         redacted.event.connector, redacted.event.event_id
     );
-    let placeholder_hash = PayloadHash::parse(
-        "sha256:0000000000000000000000000000000000000000000000000000000000000000",
-    )
-    .expect("invariant: zero-hash literal must parse");
+    let payload_hash = payload_hash_for(&redacted.event.payload)?;
 
     let captured = build_capture_event(
         &redacted.event,
         connector.sensor_identity(),
         redacted.spans,
-        &placeholder_ref,
-        placeholder_hash,
+        &payload_ref,
+        payload_hash,
     )?;
 
     // 6. Hand the event to the downstream pipeline.
@@ -898,9 +1055,17 @@ max_depth = 10
         let state: Arc<ArcSwap<ConnectorState>> =
             Arc::new(ArcSwap::from_pointee(ConnectorState::Disabled));
 
-        let err = process_event(stub_event(), &connector, &state, &consent, &emit)
-            .await
-            .expect_err("process_event must fail when state is Disabled");
+        let rate_limit = Arc::new(RateLimit::empty_per_hour(u32::MAX));
+        let err = process_event(
+            stub_event(),
+            &connector,
+            &state,
+            &consent,
+            &emit,
+            &rate_limit,
+        )
+        .await
+        .expect_err("process_event must fail when state is Disabled");
 
         assert!(
             matches!(err, ConnectorError::Fatal(_)),
@@ -928,7 +1093,8 @@ max_depth = 10
         let mut spoofed = stub_event();
         spoofed.connector = "connector_b".to_owned();
 
-        let err = process_event(spoofed, &connector, &state, &consent, &emit)
+        let rate_limit = Arc::new(RateLimit::empty_per_hour(u32::MAX));
+        let err = process_event(spoofed, &connector, &state, &consent, &emit, &rate_limit)
             .await
             .expect_err("process_event must fail on connector-name mismatch");
 

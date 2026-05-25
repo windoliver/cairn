@@ -265,6 +265,7 @@ mod tests {
             mime: "application/pdf".into(),
             sha256: "deadbeef".into(),
             bytes_ref: "/tmp/spool/abc".into(),
+            bytes_len: 0, // ephemeral test value; spool layer (#131) verifies real length
         });
         let original_event = event.clone();
         let out = pipeline.redact(event).unwrap();

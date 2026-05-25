@@ -452,3 +452,122 @@ fn parse_byte_size_rejects_unknown_suffix() {
     assert!(parse_byte_size("not_a_number").is_err());
     assert!(parse_byte_size("5TiB").is_err());
 }
+
+// ---------------------------------------------------------------------------
+// Finding B — Binary payload must carry bytes_len for size-gate enforcement
+// ---------------------------------------------------------------------------
+
+/// A `Binary` payload whose declared `bytes_len` exceeds `payload.max_bytes`
+/// (1 KiB in `STRICT_MANIFEST`) must be rejected with `MalformedPayload`.
+///
+/// Verifies that `validate_against_manifest` no longer waves Binary payloads
+/// through the size gate with a hard-coded `0`.
+#[tokio::test]
+async fn binary_payload_over_max_bytes_rejected() {
+    // manifest max_bytes = "1KiB" = 1024 bytes; emit 2 KiB declared length.
+    let event = base_event(
+        ConnectorScope::project("p"),
+        ConnectorPayload::Binary {
+            mime: "application/json".into(),
+            sha256: "0000000000000000000000000000000000000000000000000000000000000000".into(),
+            bytes_ref: "spool/x".into(),
+            bytes_len: 2 * 1024, // 2 KiB > 1 KiB limit
+        },
+    );
+
+    let mut reg = ConnectorRegistry::builder()
+        .credentials(Arc::new(InMemoryCredentialStore::default()))
+        .consent(Arc::new(AcceptAllConsent::default()))
+        .emit(Arc::new(PanicEmit))
+        .build();
+
+    reg.register(StrictConnector::new(vec![event]))
+        .expect("register must succeed");
+    reg.enable("strict", strict_grant())
+        .await
+        .expect("enable must succeed");
+
+    let err = reg
+        .poll_now("strict")
+        .await
+        .expect_err("poll_now must fail for oversized binary payload");
+
+    assert!(
+        matches!(err, ConnectorError::MalformedPayload(ref msg) if msg.contains("size")),
+        "expected MalformedPayload about size, got {err:?}",
+    );
+
+    reg.shutdown().await;
+}
+
+/// `ConnectorPayload::Binary::size_hint()` must return the declared
+/// `bytes_len` value, not `0`.
+#[test]
+fn binary_size_hint_returns_bytes_len() {
+    let hint = ConnectorPayload::Binary {
+        mime: "application/octet-stream".into(),
+        sha256: "abc".into(),
+        bytes_ref: "/tmp/x".into(),
+        bytes_len: 4096,
+    }
+    .size_hint();
+    assert_eq!(
+        hint, 4096,
+        "size_hint() must equal bytes_len for Binary variant"
+    );
+}
+
+/// A `Binary` payload whose declared `bytes_len` fits within `payload.max_bytes`
+/// must be accepted (`PanicEmit` is NOT used here — we use a recording emit).
+#[tokio::test]
+async fn binary_payload_within_limit_accepted() {
+    use cairn_core::domain::capture::CaptureEvent;
+    use std::sync::Mutex as StdMutex;
+
+    struct CountEmit(StdMutex<usize>);
+    #[async_trait::async_trait]
+    impl PipelineEmit for CountEmit {
+        async fn emit(&self, _: CaptureEvent) -> Result<(), ConnectorError> {
+            *self.0.lock().expect("mutex unpoisoned") += 1;
+            Ok(())
+        }
+    }
+
+    let emit = Arc::new(CountEmit(StdMutex::new(0)));
+
+    // max_bytes = "1KiB" = 1024; declare exactly 1024 bytes — must pass.
+    let event = base_event(
+        ConnectorScope::project("p"),
+        ConnectorPayload::Binary {
+            mime: "application/json".into(),
+            sha256: "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+                .into(),
+            bytes_ref: "spool/x".into(),
+            bytes_len: 1024,
+        },
+    );
+
+    let mut reg = ConnectorRegistry::builder()
+        .credentials(Arc::new(InMemoryCredentialStore::default()))
+        .consent(Arc::new(AcceptAllConsent::default()))
+        .emit(emit.clone())
+        .build();
+
+    reg.register(StrictConnector::new(vec![event]))
+        .expect("register must succeed");
+    reg.enable("strict", strict_grant())
+        .await
+        .expect("enable must succeed");
+
+    reg.poll_now("strict")
+        .await
+        .expect("poll_now must succeed for binary payload within size limit");
+
+    assert_eq!(
+        *emit.0.lock().expect("mutex unpoisoned"),
+        1,
+        "exactly one event must reach emit"
+    );
+
+    reg.shutdown().await;
+}

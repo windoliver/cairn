@@ -156,6 +156,11 @@ pub enum ConnectorPayload {
     },
     /// Binary / opaque payload. The bytes are spooled to a temporary path;
     /// `bytes_ref` holds the spool path or a content-addressed key.
+    ///
+    /// `bytes_len` is the adapter's declaration of the byte length of the
+    /// payload referenced by `bytes_ref`. The framework trusts this value for
+    /// budget and size-gate enforcement. The spool layer (#131) will verify it
+    /// against the on-disk content and reject mismatches before persisting.
     Binary {
         /// MIME type of the payload (e.g. `"application/pdf"`).
         mime: String,
@@ -163,6 +168,15 @@ pub enum ConnectorPayload {
         sha256: String,
         /// Spool path or content-addressed storage key for the bytes.
         bytes_ref: String,
+        /// Declared byte length of the content at `bytes_ref`.
+        ///
+        /// Used by the framework for `payload.max_bytes` enforcement and
+        /// per-scope byte-budget gating. The spool layer (#131) will
+        /// cross-check this value against the actual spooled file size.
+        ///
+        /// TODO(#130-followup): wire `max_bytes_per_day` manifest budget
+        /// using this field once the byte-budget tracker is implemented.
+        bytes_len: u64,
     },
 }
 
@@ -177,14 +191,18 @@ impl ConnectorPayload {
 
     /// Return an approximate size in bytes. For `Json`, this is the length of
     /// the serialized JSON string; for `Text`, the UTF-8 byte length; for
-    /// `Binary`, `0` because the framework measures the spooled bytes via
-    /// filesystem `stat`.
+    /// `Binary`, the adapter-declared `bytes_len` (trusted by the framework;
+    /// verified by the spool layer in #131).
     #[must_use]
     pub fn size_hint(&self) -> usize {
         match self {
             Self::Json { body, .. } => body.to_string().len(),
             Self::Text { body, .. } => body.len(),
-            Self::Binary { .. } => 0, // spool path; framework measures via stat
+            Self::Binary { bytes_len, .. } => {
+                // Saturate at usize::MAX on 32-bit targets rather than
+                // wrapping. Practical payloads are always well within usize.
+                usize::try_from(*bytes_len).unwrap_or(usize::MAX)
+            }
         }
     }
 }
@@ -360,23 +378,38 @@ mod tests {
             ConnectorPayload::Binary {
                 mime: "application/pdf".into(),
                 sha256: "abc".into(),
-                bytes_ref: "/tmp/x".into()
+                bytes_ref: "/tmp/x".into(),
+                bytes_len: 0,
             }
             .mime(),
             "application/pdf"
         );
     }
 
+    /// `size_hint` for `Binary` must return the adapter-declared `bytes_len`,
+    /// not `0`. This is the fix for Finding B (Round-2 review).
     #[test]
-    fn size_hint_binary_is_zero() {
+    fn size_hint_binary_returns_bytes_len() {
         assert_eq!(
             ConnectorPayload::Binary {
                 mime: "application/octet-stream".into(),
                 sha256: "abc".into(),
-                bytes_ref: "/tmp/x".into()
+                bytes_ref: "/tmp/x".into(),
+                bytes_len: 8192,
             }
             .size_hint(),
-            0
+            8192,
+        );
+        // Zero declared length still works.
+        assert_eq!(
+            ConnectorPayload::Binary {
+                mime: "application/octet-stream".into(),
+                sha256: "abc".into(),
+                bytes_ref: "/tmp/x".into(),
+                bytes_len: 0,
+            }
+            .size_hint(),
+            0,
         );
     }
 

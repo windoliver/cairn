@@ -28,6 +28,8 @@ pub struct RateLimit {
     inner: Mutex<HashMap<String, Bucket>>,
     /// How long before an exhausted bucket is refilled to capacity.
     refill_interval: Duration,
+    /// Per-scope capacity used when registering a new scope lazily.
+    capacity: u32,
 }
 
 #[derive(Debug)]
@@ -45,6 +47,23 @@ impl RateLimit {
     #[must_use]
     pub fn per_hour(scope: String, capacity: u32) -> Self {
         Self::with_interval(scope, capacity, Duration::from_hours(1))
+    }
+
+    /// Create a new `RateLimit` with no initial scopes, the given per-scope
+    /// `capacity`, and an hourly refill interval.
+    ///
+    /// Scopes are registered lazily via [`RateLimit::add_scope`] when the
+    /// first event for that scope arrives. This constructor is used by the
+    /// registry to initialise a connector's budget before any events are
+    /// processed — the registry does not know which scopes will be used until
+    /// events arrive.
+    #[must_use]
+    pub fn empty_per_hour(capacity: u32) -> Self {
+        Self {
+            inner: Mutex::new(HashMap::new()),
+            refill_interval: Duration::from_hours(1),
+            capacity,
+        }
     }
 
     /// Create a new `RateLimit` with a single scope and a custom
@@ -68,6 +87,7 @@ impl RateLimit {
         Self {
             inner: Mutex::new(map),
             refill_interval,
+            capacity,
         }
     }
 
@@ -90,6 +110,26 @@ impl RateLimit {
                 last_refill: Instant::now(),
             },
         );
+    }
+
+    /// Lazily register a scope using the stored per-connector capacity.
+    ///
+    /// If the scope is already registered this is a no-op (the existing bucket
+    /// is not reset). This is used by `process_event` to register a scope on
+    /// the first event it sees for that scope, without requiring the registry
+    /// to enumerate scopes up front.
+    pub fn ensure_scope(&self, scope: &str) {
+        let mut map = self.inner.lock().unwrap_or_else(|poisoned| {
+            // Safety: the bucket state is fully derived from `self.capacity`;
+            // discarding partial mutations from a panicking thread is safe here.
+            poisoned.into_inner()
+        });
+        let capacity = self.capacity;
+        map.entry(scope.to_owned()).or_insert_with(|| Bucket {
+            remaining: capacity,
+            capacity,
+            last_refill: Instant::now(),
+        });
     }
 
     /// Attempt to deduct `amount` tokens from the named `scope`'s bucket.
