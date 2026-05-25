@@ -15,9 +15,10 @@ mod error;
 mod resources;
 mod webhook;
 
-// Re-exports added in Tasks 2/12.
+pub use error::GhError;
+
+// Re-export added in Task 12.
 // pub use connector::GitHubConnector;
-// pub use error::GhError;
 
 /// Embedded `connector.toml` bytes, parsed at `GitHubConnector::new` time.
 pub(crate) const MANIFEST_TOML: &str = include_str!("../connector.toml");
