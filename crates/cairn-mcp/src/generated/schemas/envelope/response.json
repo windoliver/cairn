@@ -572,6 +572,63 @@
     {
       "if": {
         "properties": {
+          "verb": {
+            "const": "propose_share"
+          }
+        },
+        "required": [
+          "verb"
+        ]
+      },
+      "then": {
+        "properties": {
+          "data": {
+            "$ref": "../verbs/propose_share.json#/$defs/Data"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "verb": {
+            "const": "accept_share"
+          }
+        },
+        "required": [
+          "verb"
+        ]
+      },
+      "then": {
+        "properties": {
+          "data": {
+            "$ref": "../verbs/accept_share.json#/$defs/Data"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "verb": {
+            "const": "revoke_share"
+          }
+        },
+        "required": [
+          "verb"
+        ]
+      },
+      "then": {
+        "properties": {
+          "data": {
+            "$ref": "../verbs/revoke_share.json#/$defs/Data"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
           "status": {
             "const": "committed"
           }
@@ -760,6 +817,9 @@
         "capture_trace",
         "lint",
         "forget",
+        "propose_share",
+        "accept_share",
+        "revoke_share",
         "unknown"
       ],
       "type": "string"

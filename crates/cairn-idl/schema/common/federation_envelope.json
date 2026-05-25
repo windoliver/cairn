@@ -1,0 +1,47 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cairn.dev/schema/cairn.mcp.v1/common/federation_envelope.json",
+  "title": "Cairn federation envelope types",
+  "x-cairn-contract": "cairn.mcp.v1",
+  "description": "Canonical definitions for the FederationEnvelope transport type and the MemoryRecordStub manifest entry used in inbound federation operations (brief §12.a).",
+  "$defs": {
+    "MemoryRecordStub": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Minimal wire representation of a memory record included in a federation envelope manifest (brief §12.a). body_hash enables cheap content-integrity verification independent of the canonical target_hash.",
+      "required": ["record_id", "kind", "scope", "visibility", "body_hash"],
+      "properties": {
+        "record_id":  { "$ref": "./primitives.json#/$defs/Ulid" },
+        "kind":       { "type": "string", "minLength": 1 },
+        "scope":      { "$ref": "./sharing.json#/$defs/ScopeTuple" },
+        "visibility": { "type": "string", "enum": ["private", "session", "project", "team", "org", "public"] },
+        "body_hash":  { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$", "description": "SHA-256 hex digest of the record body only (no metadata), prefixed 'sha256:'. Lets the receiver verify body integrity independently of the full canonical target_hash." },
+        "body":       { "type": "string" },
+        "tags":       { "type": "array", "items": { "type": "string", "minLength": 1 } }
+      }
+    },
+    "FederationEnvelope": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Transport envelope for federation operations. Carries either a share proposal or a revocation (brief §12.a). The kind discriminator is enforced: 'propose' requires 'link'; 'revoke' requires 'revocation'.",
+      "required": ["kind", "issuer_key_id"],
+      "properties": {
+        "kind":          { "type": "string", "enum": ["propose", "revoke"] },
+        "issuer_key_id": { "$ref": "./primitives.json#/$defs/Identity" },
+        "link":          { "$ref": "./sharing.json#/$defs/SignedShareLink" },
+        "revocation":    { "$ref": "./sharing.json#/$defs/SignedRevocation" },
+        "manifest":      { "type": "array", "items": { "$ref": "#/$defs/MemoryRecordStub" } }
+      },
+      "allOf": [
+        {
+          "if":   { "properties": { "kind": { "const": "propose" } }, "required": ["kind"] },
+          "then": { "required": ["link"] }
+        },
+        {
+          "if":   { "properties": { "kind": { "const": "revoke" } }, "required": ["kind"] },
+          "then": { "required": ["revocation"] }
+        }
+      ]
+    }
+  }
+}

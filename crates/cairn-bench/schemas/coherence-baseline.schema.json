@@ -1,0 +1,43 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Cairn coherence baseline",
+  "type": "object",
+  "required": ["schema_version", "captured_at", "cairn_version", "git_sha", "metrics"],
+  "properties": {
+    "schema_version": { "type": "integer", "const": 1 },
+    "captured_at":    { "type": "string", "format": "date-time" },
+    "cairn_version":  { "type": "string" },
+    "git_sha":        { "type": "string" },
+    "metrics": {
+      "type": "object",
+      "required": [
+        "recall_precision",
+        "stale_avoidance",
+        "summary_quality",
+        "search_usefulness",
+        "forget_completeness"
+      ],
+      "properties": {
+        "recall_precision":    { "$ref": "#/$defs/score" },
+        "stale_avoidance":     { "$ref": "#/$defs/score" },
+        "summary_quality":     { "$ref": "#/$defs/score" },
+        "search_usefulness":   { "$ref": "#/$defs/score" },
+        "forget_completeness": { "$ref": "#/$defs/score" }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "score": {
+      "type": "object",
+      "required": ["score", "passed", "total"],
+      "properties": {
+        "score":  { "type": "number", "minimum": 0, "maximum": 1 },
+        "passed": { "type": "integer", "minimum": 0 },
+        "total":  { "type": "integer", "minimum": 0 }
+      },
+      "additionalProperties": false
+    }
+  }
+}

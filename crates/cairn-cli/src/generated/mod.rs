@@ -19,6 +19,9 @@ pub const SUBCOMMANDS: &[&str] = &[
     "capture_trace",
     "lint",
     "forget",
+    "propose_share",
+    "accept_share",
+    "revoke_share",
     "handshake",
     "status",
 ];
@@ -38,6 +41,9 @@ pub fn command() -> clap::Command {
         .subcommand(verbs::capture_trace_subcommand())
         .subcommand(verbs::lint_subcommand())
         .subcommand(verbs::forget_subcommand())
+        .subcommand(verbs::propose_share_subcommand())
+        .subcommand(verbs::accept_share_subcommand())
+        .subcommand(verbs::revoke_share_subcommand())
         .subcommand(prelude::handshake_subcommand())
         .subcommand(prelude::status_subcommand())
 }

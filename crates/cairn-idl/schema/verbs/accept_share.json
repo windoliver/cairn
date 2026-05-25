@@ -1,0 +1,47 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cairn.dev/schema/cairn.mcp.v1/verbs/accept_share.json",
+  "title": "Cairn verb: accept_share",
+  "x-cairn-contract": "cairn.mcp.v1",
+  "x-cairn-verb-id": "accept_share",
+  "x-cairn-capability": "cairn.mcp.v1.extension.federation",
+  "x-cairn-auth": "signed_chain",
+  "x-cairn-extension": "cairn.federation.v1",
+  "x-cairn-cli": {
+    "command": "accept-share",
+    "flags": [
+      { "name": "envelope", "long": "envelope", "value_source": "json", "cli_exemplar": "{\"kind\":\"revoke\",\"issuer_key_id\":\"hmn:alice\",\"revocation\":{\"link_id\":\"link-abc\",\"revoked_at\":\"2026-05-22T00:00:00Z\",\"issuer\":\"hmn:alice\",\"key_version\":1,\"signature\":\"ed25519:aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899\"}}" }
+    ]
+  },
+  "x-cairn-skill-triggers": {
+    "positive_triggers": [
+      "use when the user receives an inbound federation envelope and wants to apply it locally",
+      "use when the user says 'accept this share', 'apply this federation envelope', or 'import shared memories'"
+    ],
+    "negative_triggers": [
+      "do NOT use to propose a new share — that belongs to propose_share",
+      "do NOT use to revoke a share — that belongs to revoke_share"
+    ],
+    "exclusivity_hints": "this is the sole inbound share-acceptance surface; there is no other import path"
+  },
+  "type": "object",
+  "$defs": {
+    "Args": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["envelope"],
+      "properties": {
+        "envelope": { "$ref": "../common/federation_envelope.json#/$defs/FederationEnvelope" }
+      }
+    },
+    "Data": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["outcome", "applied_records"],
+      "properties": {
+        "outcome":          { "type": "string", "enum": ["accepted", "duplicate"] },
+        "applied_records":  { "type": "array", "items": { "$ref": "../common/primitives.json#/$defs/Ulid" } }
+      }
+    }
+  }
+}

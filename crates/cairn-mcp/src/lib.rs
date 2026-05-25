@@ -12,6 +12,8 @@
 
 pub mod coord_tools;
 pub mod error;
+pub mod federation_conv;
+pub mod federation_tools;
 pub mod generated;
 pub mod graph_tools;
 pub mod handler;
@@ -20,7 +22,7 @@ pub mod relay;
 pub mod verb_envelope;
 
 pub use error::TransportError;
-pub use handler::CairnMcpHandler;
+pub use handler::{CairnMcpHandler, FederationState};
 
 use std::{path::PathBuf, sync::Arc};
 
@@ -107,8 +109,7 @@ register_plugin!(MCPServer, CairnMcpServer, "cairn-mcp", MANIFEST_TOML);
 pub async fn serve_stdio() -> Result<(), TransportError> {
     let handler = CairnMcpHandler::new();
     let transport = rmcp::transport::io::stdio();
-    let service = handler
-        .serve(transport)
+    let service = Box::pin(handler.serve(transport))
         .await
         .map_err(|e| TransportError::Service(e.to_string()))?;
     service

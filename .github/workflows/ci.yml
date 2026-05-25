@@ -15,9 +15,9 @@ name: ci
 
 on:
   pull_request:
-    branches: [main]
+    branches: [main, "release/**"]
   push:
-    branches: [main]
+    branches: [main, "release/**"]
   merge_group:
   workflow_dispatch:
 
@@ -162,6 +162,178 @@ jobs:
         with:
           name: bench-reports-${{ matrix.runner }}
           path: target/cairn-bench/*.json
+          retention-days: 14
+
+  coherence-gate:
+    name: gates / coherence (§15, §18 #5, #137)
+    needs: gates
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          # Need history so we can `git show` the base ref's trusted
+          # baseline + manifest below.
+          fetch-depth: 0
+      - name: Install toolchain (rust-toolchain.toml)
+        run: rustup show active-toolchain || rustup toolchain install
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          shared-key: coherence-gate
+          cache-bin: "false"
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Build cairn + cairn-bench binaries
+        run: |
+          cargo build --release --locked -p cairn-cli --bin cairn
+          cargo build --release --locked -p cairn-bench
+      - name: Resolve gate mode + trusted manifest/baseline
+        id: gate
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_BASE_REF: ${{ github.base_ref }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          MERGE_BASE_REF: ${{ github.event.merge_group.base_ref }}
+          MERGE_BASE_SHA: ${{ github.event.merge_group.base_sha }}
+          PUSH_REF_NAME: ${{ github.ref_name }}
+        run: |
+          # Pick gate mode and the trusted-input source per event.
+          # Both pull_request and merge_group ship an immutable base SHA
+          # in the payload — use that so a base-branch advance during the
+          # run cannot retarget the trusted inputs at a different
+          # baseline. Pushes and workflow_dispatch run on a trusted
+          # branch already, so the in-tree files ARE the trusted tree.
+          target_branch=""
+          trusted_sha=""
+          trust_from_base=0
+          case "$EVENT_NAME" in
+            pull_request)
+              target_branch="$PR_BASE_REF"
+              trusted_sha="$PR_BASE_SHA"
+              trust_from_base=1
+              ;;
+            merge_group)
+              target_branch="${MERGE_BASE_REF#refs/heads/}"
+              trusted_sha="$MERGE_BASE_SHA"
+              trust_from_base=1
+              ;;
+            *)
+              target_branch="$PUSH_REF_NAME"
+              ;;
+          esac
+          case "$target_branch" in
+            release/*) mode="rc" ;;
+            *)         mode="beta" ;;
+          esac
+          echo "mode=$mode" >> "$GITHUB_OUTPUT"
+          # HEAD-tree validation. Trust model:
+          #   - manifest + baseline come from the trusted base SHA so a
+          #     PR cannot lower floors or rewrite baselines.
+          #   - cassettes come from HEAD so the gate evaluates this
+          #     candidate's code+fixtures, but the coverage-regression
+          #     guard in cairn-bench (CoverageRegression) compares HEAD
+          #     totals against the trusted base baseline totals. A PR
+          #     that strips actions or tags from any cassette will trip
+          #     that guard before scoring.
+          # The shell-side validation here only ensures the gate
+          # invocation can actually run: files exist, are regular
+          # (not symlinks), non-empty, and the cassettes carry the
+          # metric_category tag.
+          required_paths=(
+            "crates/cairn-bench/manifests/coherence.toml"
+            "crates/cairn-bench/baselines/coherence.json"
+            "fixtures/v0/replay/research_domain.json"
+            "fixtures/v0/replay/engineering_domain.json"
+            "fixtures/v0/replay/support_domain.json"
+          )
+          for path in "${required_paths[@]}"; do
+            if [[ ! -e "$path" ]]; then
+              echo "::error::coherence-gate: HEAD is missing required path '$path'"
+              exit 1
+            fi
+            if [[ -L "$path" ]]; then
+              echo "::error::coherence-gate: HEAD path '$path' is a symlink; refuse to follow (trust pinned to regular files)"
+              exit 1
+            fi
+            if [[ ! -s "$path" ]]; then
+              echo "::error::coherence-gate: HEAD path '$path' is empty"
+              exit 1
+            fi
+          done
+          for cassette in research_domain engineering_domain support_domain; do
+            cassette_path="fixtures/v0/replay/${cassette}.json"
+            if ! grep -q '"metric_category"' "$cassette_path"; then
+              echo "::error::coherence-gate: HEAD cassette $cassette_path has no metric_category tags; coverage taxonomy stripped"
+              exit 1
+            fi
+          done
+          mkdir -p .ci-trusted
+          if [[ "$trust_from_base" == "1" ]]; then
+            # Fetch the exact immutable base SHA. Avoids the race where
+            # `origin/$target_branch` advances between checkout and the
+            # git-show below.
+            git fetch --depth=1 origin "$trusted_sha"
+            # Bootstrap guard: the trusted-input model assumes the base
+            # SHA already carries the manifest, baseline, and tagged
+            # cassettes. On the *very first* PR that introduces these
+            # files, the base predates them; the strict `git show`
+            # would abort and the PR could never land. Fall back to
+            # in-tree manifest+baseline when missing on base, with a
+            # visible warning. Once this PR merges, future PRs see the
+            # trusted path. The HEAD validation above already prevents
+            # a candidate from deleting the files while still passing.
+            base_has_inputs=1
+            base_manifest_path="crates/cairn-bench/manifests/coherence.toml"
+            base_baseline_path="crates/cairn-bench/baselines/coherence.json"
+            for path in "$base_manifest_path" "$base_baseline_path"; do
+              if ! git cat-file -e "$trusted_sha:$path" 2>/dev/null; then
+                base_has_inputs=0
+                break
+              fi
+            done
+            if [[ "$base_has_inputs" == "1" ]]; then
+              git show "$trusted_sha:$base_manifest_path" > .ci-trusted/coherence.toml
+              git show "$trusted_sha:$base_baseline_path" > .ci-trusted/coherence.json
+              echo "manifest=.ci-trusted/coherence.toml" >> "$GITHUB_OUTPUT"
+              echo "baseline=.ci-trusted/coherence.json" >> "$GITHUB_OUTPUT"
+            else
+              echo "::warning::coherence-gate falling back to in-tree manifest/baseline (base $trusted_sha predates #137 — bootstrap path)"
+              echo "manifest=$base_manifest_path" >> "$GITHUB_OUTPUT"
+              echo "baseline=$base_baseline_path" >> "$GITHUB_OUTPUT"
+            fi
+          else
+            echo "manifest=crates/cairn-bench/manifests/coherence.toml" >> "$GITHUB_OUTPUT"
+            echo "baseline=crates/cairn-bench/baselines/coherence.json" >> "$GITHUB_OUTPUT"
+          fi
+          echo "cassettes=fixtures/v0/replay" >> "$GITHUB_OUTPUT"
+      - name: Verify HEAD manifest/baseline does not weaken trusted base
+        # Only meaningful when we actually have trusted base inputs
+        # (skipped during bootstrap fallback or push events to a
+        # trusted branch where in-tree IS the trusted source).
+        if: steps.gate.outputs.manifest == '.ci-trusted/coherence.toml'
+        run: |
+          ./target/release/cairn-bench coherence verify-drift \
+            --head-manifest crates/cairn-bench/manifests/coherence.toml \
+            --base-manifest .ci-trusted/coherence.toml \
+            --head-baseline crates/cairn-bench/baselines/coherence.json \
+            --base-baseline .ci-trusted/coherence.json
+      - name: Run coherence gate
+        run: |
+          ./target/release/cairn-bench coherence run \
+            --gate ${{ steps.gate.outputs.mode }} \
+            --manifest ${{ steps.gate.outputs.manifest }} \
+            --baseline ${{ steps.gate.outputs.baseline }} \
+            --cassettes ${{ steps.gate.outputs.cassettes }}
+        env:
+          CAIRN_MOCK_EMBEDDER: "1"
+          CAIRN_KEYSTORE: "file"
+          GIT_SHA: ${{ github.sha }}
+      - name: Upload coherence report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: coherence-report
+          path: crates/cairn-bench/baselines/coherence-trend.jsonl
           retention-days: 14
 
   lint-readonly-sources:

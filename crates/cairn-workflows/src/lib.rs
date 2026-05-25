@@ -16,6 +16,7 @@ pub mod evaluation;
 pub mod evolution;
 pub mod expiration;
 pub mod planners;
+pub mod propagation;
 pub mod salience_decay;
 pub mod scheduler;
 pub mod skillify;

@@ -31,6 +31,7 @@ pub mod consent;
 pub mod consent_timeline;
 pub mod error;
 pub mod evidence;
+pub mod federation;
 pub mod filter;
 pub mod flush_plan;
 pub mod folder;

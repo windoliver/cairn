@@ -126,3 +126,57 @@ pub const EXPIRATION_WORKFLOW_WIRED: bool = true;
 /// still requires `evaluation.enabled = true` in config plus a
 /// single-tenant `cairn mcp serve` host.
 pub const EVALUATION_WORKFLOW_WIRED: bool = true;
+
+/// `cairn.federation.v1` extension capability registration (issue #123).
+///
+/// Flipped `true`: every dispatch path is wired end-to-end.
+/// `CairnMcpHandler` carries an `Option<FederationState>` that holds
+/// the signing key, outbox, and transport deps. When `None`, the
+/// dispatch path returns `CapabilityUnavailable` — the wiring
+/// constant means "the code path exists", not "every deployment has
+/// federation configured". Runtime advertisement is further gated by
+/// `Phase::V0_3` in `advertise()`.
+pub const FEDERATION_EXTENSION_WIRED: bool = true;
+
+/// `propose_share` + `revoke_share` verb dispatch wired through CLI/SDK/MCP.
+///
+/// Flipped `true`: verb-layer implementations (T7, T9) are in place
+/// and the MCP / CLI surfaces inject the keystore + outbox + transport
+/// deps through `FederationState`.
+pub const FEDERATION_PROPOSE_DISPATCH_WIRED: bool = true;
+
+/// `accept_share` verb dispatch wired (inbound receive path).
+///
+/// Flipped `true`: verb-layer landing (T8) is in place and the MCP
+/// surface injects the rebac context + consent lookup + outbox deps
+/// through `FederationState`.
+pub const FEDERATION_ACCEPT_DISPATCH_WIRED: bool = true;
+
+/// `PropagationWorkflow` handler registered on the scheduler.
+///
+/// Flipped `true`: `cairn mcp serve` registers `PropagationHandler`
+/// on the live `Scheduler` when federation state is configured, so
+/// propagation jobs drain end to end.
+pub const FEDERATION_WORKFLOW_WIRED: bool = true;
+
+/// `cairn.federation.v1` MCP tool declarations wired (rmcp registration).
+///
+/// Flipped `true`: `crates/cairn-mcp/src/federation_tools.rs::dispatch`
+/// is replaced with real verb dispatch through `FederationState`.
+pub const FEDERATION_MCP_TOOLS_WIRED: bool = true;
+
+/// Single readiness source for advertising `cairn.federation.v1`.
+///
+/// Reads as `true` only when all five federation wiring constants
+/// flip. `cairn-core::status::advertise()` AND-gates this against
+/// `Phase::V0_3` before pushing
+/// `Capabilities::CairnMcpV1ExtensionFederation`, so flipping any
+/// single constant alone does not change the wire shape.
+#[must_use]
+pub const fn federation_extension_ready() -> bool {
+    FEDERATION_EXTENSION_WIRED
+        && FEDERATION_PROPOSE_DISPATCH_WIRED
+        && FEDERATION_ACCEPT_DISPATCH_WIRED
+        && FEDERATION_WORKFLOW_WIRED
+        && FEDERATION_MCP_TOOLS_WIRED
+}

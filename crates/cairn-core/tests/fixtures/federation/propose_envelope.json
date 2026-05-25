@@ -1,0 +1,21 @@
+{
+  "issuer_key_id": "hmn:alice",
+  "kind": "propose",
+  "link": {
+    "link_id": "01HQZX9F5N0000000000000000",
+    "payload": {
+      "expires_at": "2027-05-22T00:00:00Z",
+      "grant_tier": "team",
+      "issued_at": "2026-05-22T00:00:00Z",
+      "issuer": "hmn:alice",
+      "key_version": 1,
+      "nonce": "AAAAAAAAAAAAAAAAAAAAAA==",
+      "operation_id": "01HQZX9F5N0000000000000001",
+      "scope": { "project": "test-project" },
+      "target_hash": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+      "target_id_hashes": ["sha256:1111111111111111111111111111111111111111111111111111111111111111"]
+    },
+    "signature": "ed25519:00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+  },
+  "manifest": []
+}

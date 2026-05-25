@@ -130,6 +130,54 @@
           }
         }
       }
+    },
+    {
+      "if": {
+        "properties": {
+          "verb": {
+            "const": "propose_share"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "args": {
+            "$ref": "../verbs/propose_share.json#/$defs/Args"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "verb": {
+            "const": "accept_share"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "args": {
+            "$ref": "../verbs/accept_share.json#/$defs/Args"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "verb": {
+            "const": "revoke_share"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "args": {
+            "$ref": "../verbs/revoke_share.json#/$defs/Args"
+          }
+        }
+      }
     }
   ],
   "properties": {
@@ -155,7 +203,10 @@
         "assemble_hot",
         "capture_trace",
         "lint",
-        "forget"
+        "forget",
+        "propose_share",
+        "accept_share",
+        "revoke_share"
       ],
       "type": "string"
     }

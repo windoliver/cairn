@@ -50,6 +50,8 @@ const CONTRACT_FILES: &[&str] = &[
     "common/primitives.json",
     "common/record_exclusion.json",
     "common/scope_filter.json",
+    "common/sharing.json",
+    "common/federation_envelope.json",
     "prelude/status.json",
     "prelude/handshake.json",
     "verbs/ingest.json",
@@ -60,6 +62,9 @@ const CONTRACT_FILES: &[&str] = &[
     "verbs/capture_trace.json",
     "verbs/lint.json",
     "verbs/forget.json",
+    "verbs/propose_share.json",
+    "verbs/accept_share.json",
+    "verbs/revoke_share.json",
     "plugin/manifest.json",
 ];
 

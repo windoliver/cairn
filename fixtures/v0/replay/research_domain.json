@@ -1,0 +1,149 @@
+{
+  "id": "research_domain",
+  "description": "Extended research replay covering long-horizon literature memory, multi-session synthesis, search relevance, and privacy/forget.",
+  "config": {
+    "local_embeddings": false
+  },
+  "records": [
+    {
+      "id": "01HQZX9F5N00000000000000R0",
+      "kind": "trace",
+      "class": "episodic",
+      "visibility": "private",
+      "body": "research session one user collected lattice biology papers",
+      "session_id": "research-literature",
+      "turn_id": "1",
+      "sequence": 1,
+      "trace_event": "user_message"
+    },
+    {
+      "id": "01HQZX9F5N00000000000000R1",
+      "kind": "trace",
+      "class": "episodic",
+      "visibility": "private",
+      "body": "agent extracted lattice biology baseline assumptions",
+      "session_id": "research-literature",
+      "turn_id": "1",
+      "sequence": 2,
+      "trace_event": "agent_message"
+    },
+    {
+      "id": "01HQZX9F5N00000000000000R2",
+      "kind": "trace",
+      "class": "episodic",
+      "visibility": "private",
+      "body": "research session two user compared organoid protocol drift",
+      "session_id": "research-literature",
+      "turn_id": "2",
+      "sequence": 3,
+      "trace_event": "user_message"
+    },
+    {
+      "id": "01HQZX9F5N00000000000000R3",
+      "kind": "trace",
+      "class": "episodic",
+      "visibility": "private",
+      "body": "agent linked protocol drift to lattice biology hypothesis",
+      "session_id": "research-literature",
+      "turn_id": "2",
+      "sequence": 4,
+      "trace_event": "agent_message"
+    },
+    {
+      "id": "01HQZX9F5N00000000000000R4",
+      "kind": "reasoning",
+      "class": "semantic",
+      "visibility": "private",
+      "body": "research summary preserves lattice biology baseline and organoid drift synthesis",
+      "session_id": "research-literature",
+      "turn_id": "summary",
+      "sequence": 5,
+      "trace_event": "turn_summary"
+    },
+    {
+      "id": "01HQZX9F5N00000000000000R5",
+      "kind": "project",
+      "class": "semantic",
+      "visibility": "private",
+      "body": "research project hypothesis lattice biology drift marker validates long horizon memory"
+    },
+    {
+      "id": "01HQZX9F5N00000000000000R6",
+      "kind": "fact",
+      "class": "semantic",
+      "visibility": "private",
+      "body": "embargoed reviewer identity delta fox should be forgotten"
+    },
+    {
+      "id": "01HQZX9F5N00000000000000R7",
+      "kind": "fact",
+      "class": "semantic",
+      "visibility": "private",
+      "body": "research unrelated note centrifuge shelf inventory"
+    }
+  ],
+  "actions": [
+    {
+      "verb": "capture_trace",
+      "story": "RESEARCH_CAPTURE_LONG_HORIZON",
+      "session_id": "research-literature",
+      "expected_trace_events": ["user_message", "agent_message", "user_message", "agent_message", "turn_summary"],
+      "metric_category": "recall_precision"
+    },
+    {
+      "verb": "retrieve_session",
+      "story": "RESEARCH_MULTI_SESSION_COHERENCE",
+      "session_id": "research-literature",
+      "expected_turn_ids": ["1", "2"],
+      "expected_trace_events": ["user_message", "agent_message", "user_message", "agent_message", "turn_summary"],
+      "metric_category": "recall_precision"
+    },
+    {
+      "verb": "retrieve_turn",
+      "story": "RESEARCH_RETRIEVE_LATER_TURN",
+      "session_id": "research-literature",
+      "turn_id": "2",
+      "expected_trace_events": ["user_message", "agent_message"],
+      "metric_category": "recall_precision"
+    },
+    {
+      "verb": "summarize",
+      "story": "RESEARCH_SUMMARY_GOLDEN",
+      "session_id": "research-literature",
+      "expected_record_ids": ["01HQZX9F5N00000000000000R4"],
+      "metric_category": "summary_quality"
+    },
+    {
+      "verb": "search",
+      "story": "RESEARCH_SEARCH_RELEVANCE",
+      "mode": "keyword",
+      "query": "lattice biology drift marker",
+      "limit": 1,
+      "expected": {
+        "status": "hits",
+        "record_ids": ["01HQZX9F5N00000000000000R5"]
+      },
+      "metric_category": "search_usefulness"
+    },
+    {
+      "verb": "search",
+      "story": "RESEARCH_STALE_AVOIDANCE",
+      "mode": "keyword",
+      "query": "hypothesis drift marker",
+      "limit": 5,
+      "expected": {
+        "status": "hits",
+        "record_ids": ["01HQZX9F5N00000000000000R5"]
+      },
+      "stale_record_ids": ["01HQZX9F5N00000000000000R7"]
+    },
+    {
+      "verb": "forget_record",
+      "story": "RESEARCH_PRIVACY_FORGET",
+      "record_id": "01HQZX9F5N00000000000000R6",
+      "followup_query": "embargoed reviewer identity delta fox",
+      "expected_absent_from_search": true,
+      "metric_category": "forget_completeness"
+    }
+  ]
+}

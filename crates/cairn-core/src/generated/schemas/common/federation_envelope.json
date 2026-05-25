@@ -1,0 +1,128 @@
+{
+  "$defs": {
+    "FederationEnvelope": {
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "propose"
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          },
+          "then": {
+            "required": [
+              "link"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "revoke"
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          },
+          "then": {
+            "required": [
+              "revocation"
+            ]
+          }
+        }
+      ],
+      "description": "Transport envelope for federation operations. Carries either a share proposal or a revocation (brief §12.a). The kind discriminator is enforced: 'propose' requires 'link'; 'revoke' requires 'revocation'.",
+      "properties": {
+        "issuer_key_id": {
+          "$ref": "./primitives.json#/$defs/Identity"
+        },
+        "kind": {
+          "enum": [
+            "propose",
+            "revoke"
+          ],
+          "type": "string"
+        },
+        "link": {
+          "$ref": "./sharing.json#/$defs/SignedShareLink"
+        },
+        "manifest": {
+          "items": {
+            "$ref": "#/$defs/MemoryRecordStub"
+          },
+          "type": "array"
+        },
+        "revocation": {
+          "$ref": "./sharing.json#/$defs/SignedRevocation"
+        }
+      },
+      "required": [
+        "kind",
+        "issuer_key_id"
+      ],
+      "type": "object"
+    },
+    "MemoryRecordStub": {
+      "additionalProperties": false,
+      "description": "Minimal wire representation of a memory record included in a federation envelope manifest (brief §12.a). body_hash enables cheap content-integrity verification independent of the canonical target_hash.",
+      "properties": {
+        "body": {
+          "type": "string"
+        },
+        "body_hash": {
+          "description": "SHA-256 hex digest of the record body only (no metadata), prefixed 'sha256:'. Lets the receiver verify body integrity independently of the full canonical target_hash.",
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "kind": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "record_id": {
+          "$ref": "./primitives.json#/$defs/Ulid"
+        },
+        "scope": {
+          "$ref": "./sharing.json#/$defs/ScopeTuple"
+        },
+        "tags": {
+          "items": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "visibility": {
+          "enum": [
+            "private",
+            "session",
+            "project",
+            "team",
+            "org",
+            "public"
+          ],
+          "type": "string"
+        }
+      },
+      "required": [
+        "record_id",
+        "kind",
+        "scope",
+        "visibility",
+        "body_hash"
+      ],
+      "type": "object"
+    }
+  },
+  "$id": "https://cairn.dev/schema/cairn.mcp.v1/common/federation_envelope.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "Canonical definitions for the FederationEnvelope transport type and the MemoryRecordStub manifest entry used in inbound federation operations (brief §12.a).",
+  "title": "Cairn federation envelope types",
+  "x-cairn-contract": "cairn.mcp.v1"
+}

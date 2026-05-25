@@ -64,6 +64,10 @@ pub const REMEDIATION: &[(&str, &str)] = &[
          wiring; upgrade to a build that enables the coord extension",
     ),
     (
+        "cairn.mcp.v1.extension.federation",
+        "enable federation: set federation.enabled = true and configure a peer endpoint",
+    ),
+    (
         "cairn.mcp.v1.replay.sequence",
         "signed-intent replay protection requires a wired challenge dispatch \
          path; not available in this build",

@@ -161,6 +161,12 @@ pub struct CapabilityGates {
     /// AND (b) the surface registers `EvaluationHandler` on the
     /// scheduler. Issue #91, brief §15.
     pub evaluation_runtime_ready: bool,
+    /// True when the surface has wired federation deps
+    /// (`FederationState` on the handler) AND `PropagationHandler` is
+    /// registered on the scheduler. Mirrors the workflow gates; held
+    /// independently because federation requires signing keys + transport
+    /// that are deployment-specific. Issue #123, brief §12.a.
+    pub federation_runtime_ready: bool,
 }
 
 impl CapabilityGates {
@@ -258,6 +264,12 @@ pub fn advertise(gates: &CapabilityGates) -> Vec<Capabilities> {
     // -- extensions -------------------------------------------------------
     if phase >= Phase::V0_3 && wiring::coord_extension_ready() {
         out.push(Capabilities::CairnMcpV1ExtensionCoord);
+    }
+    if phase >= Phase::V0_3
+        && wiring::federation_extension_ready()
+        && gates.federation_runtime_ready
+    {
+        out.push(Capabilities::CairnMcpV1ExtensionFederation);
     }
 
     // ── replay (held back per brief §15 fail-closed) ─────────────────────

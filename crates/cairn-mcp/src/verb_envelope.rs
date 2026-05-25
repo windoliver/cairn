@@ -11,6 +11,14 @@ use serde::de::DeserializeOwned;
 const CONTRACT: &str = "cairn.mcp.v1";
 
 /// Return the generated core request verb for an MCP tool name.
+///
+/// Includes the three federation extension verbs (`propose_share`,
+/// `accept_share`, `revoke_share`) so dispatch-stub / parse-args paths
+/// can construct typed response envelopes against the codegenerated
+/// args types. The federation capability gate in
+/// `crate::federation_tools::runtime_ready` is the authoritative
+/// admission check — this helper only maps tool names to verb enum
+/// variants.
 #[must_use]
 pub fn core_verb_for_tool(name: &str) -> Option<RequestVerb> {
     match name {
@@ -22,6 +30,9 @@ pub fn core_verb_for_tool(name: &str) -> Option<RequestVerb> {
         "capture_trace" => Some(RequestVerb::CaptureTrace),
         "lint" => Some(RequestVerb::Lint),
         "forget" => Some(RequestVerb::Forget),
+        "propose_share" => Some(RequestVerb::ProposeShare),
+        "accept_share" => Some(RequestVerb::AcceptShare),
+        "revoke_share" => Some(RequestVerb::RevokeShare),
         _ => None,
     }
 }
@@ -38,6 +49,9 @@ pub fn response_verb(verb: RequestVerb) -> ResponseVerb {
         RequestVerb::CaptureTrace => ResponseVerb::CaptureTrace,
         RequestVerb::Lint => ResponseVerb::Lint,
         RequestVerb::Forget => ResponseVerb::Forget,
+        RequestVerb::ProposeShare => ResponseVerb::ProposeShare,
+        RequestVerb::AcceptShare => ResponseVerb::AcceptShare,
+        RequestVerb::RevokeShare => ResponseVerb::RevokeShare,
         _ => ResponseVerb::Unknown,
     }
 }
@@ -69,6 +83,13 @@ pub fn parse_args(
         RequestVerb::CaptureTrace => parse_arg_payload(verb, args).map(RequestArgs::CaptureTrace),
         RequestVerb::Lint => parse_arg_payload(verb, args).map(RequestArgs::Lint),
         RequestVerb::Forget => parse_arg_payload(verb, args).map(RequestArgs::Forget),
+        // Federation extension verbs (brief §12.a). The MCP `call_tool`
+        // path routes these through `federation_tools` first, so this
+        // arm is only reached when an embedder calls `parse_args`
+        // directly (e.g., the dispatch stub envelope serialiser).
+        RequestVerb::ProposeShare => parse_arg_payload(verb, args).map(RequestArgs::ProposeShare),
+        RequestVerb::AcceptShare => parse_arg_payload(verb, args).map(RequestArgs::AcceptShare),
+        RequestVerb::RevokeShare => parse_arg_payload(verb, args).map(RequestArgs::RevokeShare),
         _ => Err(unknown_verb_response(format!("{verb:?}"))),
     }
 }

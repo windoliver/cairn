@@ -1,0 +1,50 @@
+---
+source: crates/cairn-idl/tests/wire_compat_v1.rs
+expression: body
+---
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cairn.dev/schema/cairn.mcp.v1/verbs/revoke_share.json",
+  "title": "Cairn verb: revoke_share",
+  "x-cairn-contract": "cairn.mcp.v1",
+  "x-cairn-verb-id": "revoke_share",
+  "x-cairn-capability": "cairn.mcp.v1.extension.federation",
+  "x-cairn-auth": "signed_chain",
+  "x-cairn-extension": "cairn.federation.v1",
+  "x-cairn-cli": {
+    "command": "revoke-share",
+    "flags": [
+      { "name": "link_id", "long": "link-id", "value_source": "string" }
+    ]
+  },
+  "x-cairn-skill-triggers": {
+    "positive_triggers": [
+      "use when the user wants to cancel a previously issued share link",
+      "use when the user says 'revoke this share', 'cancel access grant', or 'unshare these records'"
+    ],
+    "negative_triggers": [
+      "do NOT use to propose a new share — that belongs to propose_share",
+      "do NOT use to accept an inbound share — that belongs to accept_share"
+    ],
+    "exclusivity_hints": "this is the sole share-revocation surface; there is no other revoke path for federation links"
+  },
+  "type": "object",
+  "$defs": {
+    "Args": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["link_id"],
+      "properties": {
+        "link_id": { "type": "string", "minLength": 1 }
+      }
+    },
+    "Data": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["operation_id"],
+      "properties": {
+        "operation_id": { "$ref": "../common/primitives.json#/$defs/Ulid" }
+      }
+    }
+  }
+}

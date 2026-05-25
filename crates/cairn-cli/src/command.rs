@@ -66,6 +66,7 @@ pub fn build_command() -> clap::Command {
         .subcommand(llm_subcommand())
         .subcommand(verbs::screen::command())
         .subcommand(verbs::session::command())
+        .subcommand(verbs::share::command())
         .subcommand(verbs::sensor::command())
         .subcommand(repair_subcommand())
         .subcommand(identity::cli::identity_subcommand());
