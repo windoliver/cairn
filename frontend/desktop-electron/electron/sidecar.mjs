@@ -1,0 +1,119 @@
+// Sidecar — spawn the cairn binary, parse its bound address from the
+// first stdout line, tee stderr to a log file, and own the child's
+// lifecycle. The first stdout line is the canonical "cairn-desktop
+// listening on http://HOST:PORT" emitted by `cairn serve`.
+
+import { spawn } from "node:child_process";
+import { createWriteStream } from "node:fs";
+import { promises as fs } from "node:fs";
+import { dirname } from "node:path";
+import { createInterface } from "node:readline";
+
+const PREFIX = "cairn-desktop listening on http://";
+const DEFAULT_BOOT_TIMEOUT_MS = 10_000;
+
+/**
+ * @typedef {object} SpawnOpts
+ * @property {string} binary       Absolute path to the `cairn` binary
+ * @property {string} vault        Vault path (passed via --vault; informational in alpha)
+ * @property {string} logPath      Where to tee stderr
+ * @property {number} [bootTimeoutMs]
+ */
+
+/**
+ * @typedef {object} SidecarHandle
+ * @property {string} address      e.g. "127.0.0.1:54321"
+ * @property {boolean} exited
+ * @property {() => Promise<void>} kill
+ */
+
+/**
+ * @param {SpawnOpts} opts
+ * @returns {Promise<SidecarHandle>}
+ */
+export async function spawnSidecar(opts) {
+  const timeoutMs = opts.bootTimeoutMs ?? DEFAULT_BOOT_TIMEOUT_MS;
+  await fs.mkdir(dirname(opts.logPath), { recursive: true });
+  const logStream = createWriteStream(opts.logPath, { flags: "a" });
+
+  let child;
+  try {
+    child = spawn(
+      opts.binary,
+      ["serve", "--port", "0", "--vault", opts.vault],
+      { stdio: ["ignore", "pipe", "pipe"] },
+    );
+  } catch (err) {
+    logStream.end();
+    throw err;
+  }
+
+  child.stderr.pipe(logStream);
+
+  // ENOENT shows up as a process error event, not a spawn throw.
+  const errPromise = new Promise((_, reject) => {
+    child.on("error", reject);
+  });
+
+  const linePromise = new Promise((resolve, reject) => {
+    const rl = createInterface({ input: child.stdout });
+    let settled = false;
+    rl.once("line", (line) => {
+      settled = true;
+      rl.close();
+      if (!line.startsWith(PREFIX)) {
+        reject(new Error(`unexpected first stdout line (prefix mismatch): ${line}`));
+        return;
+      }
+      resolve(line.slice(PREFIX.length).trim());
+    });
+    rl.once("close", () => {
+      if (!settled) {
+        reject(new Error("sidecar stdout closed before first line"));
+      }
+    });
+  });
+
+  const timeout = new Promise((_, reject) => {
+    setTimeout(
+      () => reject(new Error(`sidecar boot timeout after ${timeoutMs}ms`)),
+      timeoutMs,
+    );
+  });
+
+  let address;
+  try {
+    address = await Promise.race([linePromise, errPromise, timeout]);
+  } catch (err) {
+    try {
+      child.kill("SIGTERM");
+    } catch {}
+    throw err;
+  }
+
+  /** @type {SidecarHandle} */
+  const handle = {
+    address,
+    exited: false,
+    async kill() {
+      if (this.exited) return;
+      child.kill("SIGTERM");
+      await new Promise((resolve) => {
+        const grace = setTimeout(() => {
+          try {
+            child.kill("SIGKILL");
+          } catch {}
+        }, 5000);
+        child.on("exit", () => {
+          clearTimeout(grace);
+          this.exited = true;
+          resolve();
+        });
+      });
+    },
+  };
+  child.on("exit", () => {
+    handle.exited = true;
+  });
+  return handle;
+}
