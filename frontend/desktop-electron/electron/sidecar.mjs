@@ -44,7 +44,9 @@ export async function spawnSidecar(opts) {
       { stdio: ["ignore", "pipe", "pipe"] },
     );
   } catch (err) {
-    logStream.end();
+    await new Promise((resolve) => {
+      logStream.end(() => resolve());
+    });
     throw err;
   }
 
@@ -91,7 +93,9 @@ export async function spawnSidecar(opts) {
     try {
       child.kill("SIGTERM");
     } catch {}
-    logStream.end();
+    await new Promise((resolve) => {
+      logStream.end(() => resolve());
+    });
     throw err;
   }
 
