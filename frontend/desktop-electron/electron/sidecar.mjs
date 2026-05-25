@@ -74,8 +74,9 @@ export async function spawnSidecar(opts) {
     });
   });
 
+  let bootTimeoutId;
   const timeout = new Promise((_, reject) => {
-    setTimeout(
+    bootTimeoutId = setTimeout(
       () => reject(new Error(`sidecar boot timeout after ${timeoutMs}ms`)),
       timeoutMs,
     );
@@ -84,10 +85,13 @@ export async function spawnSidecar(opts) {
   let address;
   try {
     address = await Promise.race([linePromise, errPromise, timeout]);
+    errPromise.catch(() => {});
+    clearTimeout(bootTimeoutId);
   } catch (err) {
     try {
       child.kill("SIGTERM");
     } catch {}
+    logStream.end();
     throw err;
   }
 
