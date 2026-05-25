@@ -94,6 +94,16 @@ pub enum GateError {
         #[source]
         source: serde_json::Error,
     },
+    /// Baseline parsed but violated a content invariant (unsupported
+    /// `schema_version`, missing/unknown category, score out of range,
+    /// passed > total, etc.).
+    #[error("baseline {path}: {reason}")]
+    BaselineInvalid {
+        /// Path that failed.
+        path: String,
+        /// Human-readable invariant that was violated.
+        reason: String,
+    },
 }
 
 impl GateError {
@@ -104,10 +114,18 @@ impl GateError {
     #[must_use]
     pub const fn exit_code(&self) -> u8 {
         match self {
-            Self::Replay(_)
-            | Self::Threshold(_)
+            Self::Threshold(_)
             | Self::BaselineIo { .. }
-            | Self::BaselineJson { .. } => 78,
+            | Self::BaselineJson { .. }
+            | Self::BaselineInvalid { .. } => 78,
+            // Replay errors split by variant: content-shaped problems are
+            // config (78), store/runtime problems are runtime (1).
+            Self::Replay(replay) => match replay {
+                cairn_test_fixtures::replay::ReplayError::Io { .. }
+                | cairn_test_fixtures::replay::ReplayError::Json { .. }
+                | cairn_test_fixtures::replay::ReplayError::InvalidManifest(_) => 78,
+                cairn_test_fixtures::replay::ReplayError::Store(_) => 1,
+            },
             Self::Score(_) | Self::Trend(_) => 1,
         }
     }
@@ -121,9 +139,14 @@ impl GateError {
 /// Returns any error from replay, scoring, threshold loading, or trend I/O.
 pub async fn run_coherence_gate(opts: GateOptions) -> Result<GateOutcome, GateError> {
     let manifest = load_manifest(&opts.manifest_path)?;
+    // A configured `baseline_path` MUST exist and parse. Silently treating
+    // a missing file as "no baseline" would disable the regression-delta
+    // check; a typo or accidental deletion in CI would turn the 2% gate
+    // into floor-only validation. `baseline_path: None` (programmatic
+    // first-run / smoke tests) is the only path that skips the delta.
     let baseline = match &opts.baseline_path {
-        Some(p) if p.exists() => Some(load_baseline(p)?),
-        _ => None,
+        Some(p) => Some(load_baseline(p)?),
+        None => None,
     };
 
     let mut all_actions: Vec<cairn_test_fixtures::replay::ReplayAction> = Vec::new();
@@ -159,7 +182,12 @@ pub async fn run_coherence_gate(opts: GateOptions) -> Result<GateOutcome, GateEr
         append_trend(&opts.trend_path, &entry)?;
     }
 
+    // Refuse to rewrite the baseline when the gate failed: a regression
+    // that just tripped the delta check would otherwise be normalised into
+    // the committed floor on the very next run. `--gate none` always
+    // "passes" (GateNone is_pass), which is the intended seeding path.
     if opts.update_baseline
+        && gate_passed
         && let Some(path) = &opts.baseline_path
     {
         write_baseline(
@@ -172,6 +200,11 @@ pub async fn run_coherence_gate(opts: GateOptions) -> Result<GateOutcome, GateEr
                 metrics: report.metrics.clone(),
             },
         )?;
+    } else if opts.update_baseline && !gate_passed {
+        eprintln!(
+            "coherence: refusing to --update-baseline because the gate failed; \
+             fix the regression first or rerun with --gate none"
+        );
     }
 
     Ok(GateOutcome {
@@ -323,10 +356,55 @@ fn load_baseline(path: &std::path::Path) -> Result<Baseline, GateError> {
         path: path.display().to_string(),
         source,
     })?;
-    serde_json::from_str(&raw).map_err(|source| GateError::BaselineJson {
+    let baseline: Baseline =
+        serde_json::from_str(&raw).map_err(|source| GateError::BaselineJson {
+            path: path.display().to_string(),
+            source,
+        })?;
+    validate_baseline(&baseline).map_err(|reason| GateError::BaselineInvalid {
         path: path.display().to_string(),
-        source,
-    })
+        reason,
+    })?;
+    Ok(baseline)
+}
+
+/// Verify the typed invariants that the JSON schema alone cannot catch
+/// once the file is deserialised: supported `schema_version`, exactly
+/// the five canonical category keys (no missing, no unknown), per-metric
+/// score in `[0, 1]`, and `passed <= total`. Returns the first violation
+/// found so the caller can map it to `EX_CONFIG`.
+fn validate_baseline(baseline: &Baseline) -> Result<(), String> {
+    use std::collections::BTreeSet;
+    if baseline.schema_version != 1 {
+        return Err(format!(
+            "unsupported baseline schema_version {}",
+            baseline.schema_version
+        ));
+    }
+    let expected: BTreeSet<&'static str> = ALL_CATEGORIES.iter().copied().map(as_str).collect();
+    let actual: BTreeSet<&str> = baseline.metrics.keys().map(String::as_str).collect();
+    if actual != expected {
+        let missing: Vec<&&str> = expected.difference(&actual).collect();
+        let unknown: Vec<&&str> = actual.difference(&expected).collect();
+        return Err(format!(
+            "metrics keys mismatch (missing: {missing:?}, unknown: {unknown:?})"
+        ));
+    }
+    for (name, score) in &baseline.metrics {
+        if !score.score.is_finite() || !(0.0..=1.0).contains(&score.score) {
+            return Err(format!(
+                "metric {name}: score {} out of [0, 1] or non-finite",
+                score.score
+            ));
+        }
+        if score.passed > score.total {
+            return Err(format!(
+                "metric {name}: passed ({}) > total ({})",
+                score.passed, score.total
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn write_baseline(path: &std::path::Path, baseline: &Baseline) -> Result<(), GateError> {
@@ -363,6 +441,10 @@ mod tests {
                 path: "p".to_owned(),
                 source: serde_json::from_str::<serde_json::Value>("not json").unwrap_err(),
             },
+            GateError::BaselineInvalid {
+                path: "p".to_owned(),
+                reason: "missing metric".to_owned(),
+            },
             GateError::Replay(cairn_test_fixtures::replay::ReplayError::InvalidManifest(
                 "bad".to_owned(),
             )),
@@ -383,9 +465,101 @@ mod tests {
                 path: "p".to_owned(),
                 line: 1,
             }),
+            // Replay::Store represents tempdir/DB/vault runtime failures
+            // and must NOT be misreported as a config error.
+            GateError::Replay(cairn_test_fixtures::replay::ReplayError::Store(
+                "tempdir died".to_owned(),
+            )),
         ];
         for err in cases {
             assert_eq!(err.exit_code(), 1, "{err:?} should map to 1");
         }
+    }
+
+    fn good_baseline() -> Baseline {
+        let mut metrics = std::collections::BTreeMap::new();
+        for cat in ALL_CATEGORIES {
+            metrics.insert(
+                as_str(cat).to_owned(),
+                CategoryScore {
+                    passed: 1,
+                    total: 1,
+                    score: 1.0,
+                },
+            );
+        }
+        Baseline {
+            schema_version: 1,
+            captured_at: "2026-05-24T12:00:00Z".to_owned(),
+            cairn_version: "0.0.0".to_owned(),
+            git_sha: "test".to_owned(),
+            metrics,
+        }
+    }
+
+    #[test]
+    fn validate_baseline_accepts_canonical_shape() {
+        assert!(validate_baseline(&good_baseline()).is_ok());
+    }
+
+    #[test]
+    fn validate_baseline_rejects_unsupported_schema_version() {
+        let mut b = good_baseline();
+        b.schema_version = 99;
+        let err = validate_baseline(&b).unwrap_err();
+        assert!(err.contains("schema_version"), "{err}");
+    }
+
+    #[test]
+    fn validate_baseline_rejects_missing_metric() {
+        let mut b = good_baseline();
+        b.metrics.remove("forget_completeness");
+        let err = validate_baseline(&b).unwrap_err();
+        assert!(err.contains("missing") || err.contains("mismatch"), "{err}");
+    }
+
+    #[test]
+    fn validate_baseline_rejects_unknown_metric() {
+        let mut b = good_baseline();
+        b.metrics.insert(
+            "made_up_metric".to_owned(),
+            CategoryScore {
+                passed: 0,
+                total: 0,
+                score: 1.0,
+            },
+        );
+        let err = validate_baseline(&b).unwrap_err();
+        assert!(err.contains("unknown") || err.contains("mismatch"), "{err}");
+    }
+
+    #[test]
+    fn validate_baseline_rejects_score_out_of_range() {
+        let mut b = good_baseline();
+        b.metrics.insert(
+            "recall_precision".to_owned(),
+            CategoryScore {
+                passed: 1,
+                total: 1,
+                score: 1.5,
+            },
+        );
+        let err = validate_baseline(&b).unwrap_err();
+        assert!(err.contains("out of"), "{err}");
+    }
+
+    #[test]
+    fn validate_baseline_rejects_passed_gt_total() {
+        let mut b = good_baseline();
+        b.metrics.insert(
+            "recall_precision".to_owned(),
+            CategoryScore {
+                passed: 5,
+                total: 1,
+                score: 1.0,
+            },
+        );
+        let err = validate_baseline(&b).unwrap_err();
+        assert!(err.contains("passed"), "{err}");
     }
 }

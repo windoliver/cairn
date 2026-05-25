@@ -193,3 +193,72 @@ max_drop_pct = 100.0\n",
     assert!(!outcome.gate_passed, "gate should have failed");
     assert!(outcome.report.failures.contains(&"recall_precision"));
 }
+
+#[tokio::test]
+async fn missing_baseline_path_fails_closed() {
+    // Configuring a baseline path that doesn't exist must NOT silently
+    // disable the regression delta check — it must surface as EX_CONFIG.
+    use cairn_bench::coherence::GateError;
+    let dir = tempdir().unwrap();
+    let opts = GateOptions {
+        mode: GateMode::Beta,
+        cassettes_dir: workspace_root().join("fixtures/v0/replay"),
+        include: vec!["research_domain".to_owned()],
+        manifest_path: manifest_path(),
+        baseline_path: Some(dir.path().join("does-not-exist.json")),
+        trend_path: dir.path().join("trend.jsonl"),
+        update_baseline: false,
+        write_trend: false,
+        cairn_version: env!("CARGO_PKG_VERSION").to_owned(),
+        git_sha: "smoke".to_owned(),
+        now: "2026-05-24T12:00:00Z".to_owned(),
+        run_id: "01J000000000000000000000RUN".to_owned(),
+    };
+    let err = run_coherence_gate(opts).await.expect_err("must fail");
+    assert!(
+        matches!(err, GateError::BaselineIo { .. }),
+        "expected BaselineIo, got {err:?}"
+    );
+    assert_eq!(err.exit_code(), 78);
+}
+
+#[tokio::test]
+async fn failed_gate_does_not_update_baseline() {
+    // A regression that trips --gate beta must not be normalised into the
+    // committed baseline. `--update-baseline` is honoured only when the
+    // gate actually passes (or when --gate none is in use).
+    let dir = tempdir().unwrap();
+    let fake_manifest = dir.path().join("coherence.toml");
+    std::fs::write(
+        &fake_manifest,
+        "schema_version = 1\n\
+[recall_precision]\nbeta_min = 1.001\nrc_min = 1.001\nmax_drop_pct = 0.0\n\
+[stale_avoidance]\nbeta_min = 0.0\nrc_min = 0.0\nmax_drop_pct = 100.0\n\
+[summary_quality]\nbeta_min = 0.0\nrc_min = 0.0\nmax_drop_pct = 100.0\n\
+[search_usefulness]\nbeta_min = 0.0\nrc_min = 0.0\nmax_drop_pct = 100.0\n\
+[forget_completeness]\nbeta_min = 0.0\nrc_min = 0.0\nmax_drop_pct = 100.0\n",
+    )
+    .unwrap();
+    let target_baseline = dir.path().join("baseline.json");
+    std::fs::copy(baseline_path(), &target_baseline).unwrap();
+    let before = std::fs::read_to_string(&target_baseline).unwrap();
+
+    let opts = GateOptions {
+        mode: GateMode::Beta,
+        cassettes_dir: workspace_root().join("fixtures/v0/replay"),
+        include: vec!["research_domain".to_owned()],
+        manifest_path: fake_manifest,
+        baseline_path: Some(target_baseline.clone()),
+        trend_path: dir.path().join("trend.jsonl"),
+        update_baseline: true,
+        write_trend: false,
+        cairn_version: env!("CARGO_PKG_VERSION").to_owned(),
+        git_sha: "smoke".to_owned(),
+        now: "2026-05-24T12:00:00Z".to_owned(),
+        run_id: "01J000000000000000000000RUN".to_owned(),
+    };
+    let outcome = run_coherence_gate(opts).await.expect("gate run");
+    assert!(!outcome.gate_passed);
+    let after = std::fs::read_to_string(&target_baseline).unwrap();
+    assert_eq!(before, after, "baseline must not be rewritten on gate fail");
+}
