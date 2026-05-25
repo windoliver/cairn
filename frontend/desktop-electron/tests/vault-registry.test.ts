@@ -35,20 +35,43 @@ describe("vault-registry", () => {
     expect(await readRegistry(path)).toEqual(reg);
   });
 
-  it("preserves a .bak on corrupt JSON", async () => {
+  it("throws CORRUPT_REGISTRY and preserves a .bak on corrupt JSON", async () => {
     writeFileSync(path, "{not valid json");
-    const result = await readRegistry(path);
-    expect(result).toBeNull();
+    try {
+      await readRegistry(path);
+      throw new Error("expected throw");
+    } catch (err) {
+      expect(err.code).toBe("CORRUPT_REGISTRY");
+      expect(err.backupPath).toBe(`${path}.bak`);
+    }
     expect(existsSync(`${path}.bak`)).toBe(true);
     expect(readFileSync(`${path}.bak`, "utf8")).toBe("{not valid json");
   });
 
-  it("rejects unknown future schema version", async () => {
+  it("throws CORRUPT_REGISTRY when version field is missing", async () => {
+    writeFileSync(path, JSON.stringify({ vaults: [], active: null }));
+    try {
+      await readRegistry(path);
+      throw new Error("expected throw");
+    } catch (err) {
+      expect(err.code).toBe("CORRUPT_REGISTRY");
+    }
+    expect(existsSync(`${path}.bak`)).toBe(true);
+  });
+
+  it("throws UNSUPPORTED_VERSION for future schema version", async () => {
     writeFileSync(
       path,
       JSON.stringify({ version: 99, vaults: [], active: null }),
     );
-    await expect(readRegistry(path)).rejects.toThrow(/version 99/);
+    try {
+      await readRegistry(path);
+      throw new Error("expected throw");
+    } catch (err) {
+      expect(err.code).toBe("UNSUPPORTED_VERSION");
+      expect(err.version).toBe(99);
+      expect(err.message).toMatch(/version 99/);
+    }
   });
 
   it("writes atomically (tmp + rename)", async () => {

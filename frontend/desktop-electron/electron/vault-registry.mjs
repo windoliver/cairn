@@ -11,11 +11,20 @@ export const CURRENT_VERSION = 1;
  */
 
 /**
- * Read the registry. Returns null when the file is missing OR corrupted
- * (in the corrupt case, the original is preserved as <path>.bak before
- * returning null so the caller can re-run onboarding). Throws when the
- * file exists, parses, but reports an unknown schema version — that's
- * a downgrade case and the caller must NOT silently overwrite it.
+ * Read the registry.
+ *
+ * Returns null ONLY when the file is missing (ENOENT). Throws a typed
+ * error otherwise so the caller can distinguish "first launch" from
+ * "user data exists but unreadable" and never silently overwrites a
+ * .bak'd registry.
+ *
+ * @throws {Error & {code: "CORRUPT_REGISTRY", backupPath: string}}
+ *   When the file exists but does not parse, the original is saved to
+ *   <path>.bak first and a CORRUPT_REGISTRY error is thrown.
+ * @throws {Error & {code: "UNSUPPORTED_VERSION", version: number}}
+ *   When the file parses but reports a schema version newer than this
+ *   build understands. The caller must show a downgrade error and not
+ *   overwrite the existing file.
  *
  * @param {string} path
  * @returns {Promise<VaultRegistry|null>}
@@ -32,19 +41,34 @@ export async function readRegistry(path) {
   try {
     parsed = JSON.parse(raw);
   } catch {
-    await fs.writeFile(`${path}.bak`, raw);
-    return null;
+    const backupPath = `${path}.bak`;
+    await fs.writeFile(backupPath, raw);
+    const err = new Error(
+      `vault_registry.json is unreadable; original saved to ${backupPath}`,
+    );
+    err.code = "CORRUPT_REGISTRY";
+    err.backupPath = backupPath;
+    throw err;
   }
   if (typeof parsed.version !== "number") {
-    await fs.writeFile(`${path}.bak`, raw);
-    return null;
+    const backupPath = `${path}.bak`;
+    await fs.writeFile(backupPath, raw);
+    const err = new Error(
+      `vault_registry.json has no version field; original saved to ${backupPath}`,
+    );
+    err.code = "CORRUPT_REGISTRY";
+    err.backupPath = backupPath;
+    throw err;
   }
   if (parsed.version > CURRENT_VERSION) {
-    throw new Error(
+    const err = new Error(
       `vault_registry.json was written by a newer Cairn (version ${parsed.version}). ` +
         `This build only understands version ${CURRENT_VERSION}. ` +
         `Upgrade Cairn or point at a different vault.`,
     );
+    err.code = "UNSUPPORTED_VERSION";
+    err.version = parsed.version;
+    throw err;
   }
   // No v0→v1 migration yet (v1 is the initial schema).
   return parsed;

@@ -68,7 +68,45 @@ async function main() {
   const smoke = parseSmokeFlags(process.argv);
   await ensureAppSupport();
 
-  let registry = await readRegistry(REGISTRY_PATH);
+  let registry;
+  try {
+    registry = await readRegistry(REGISTRY_PATH);
+  } catch (err) {
+    // Distinguish corrupt vs unsupported-version recovery paths so we
+    // never silently overwrite the user's vault index. Both block start
+    // until the user takes explicit action.
+    if (err.code === "CORRUPT_REGISTRY") {
+      const { response } = await dialog.showMessageBox({
+        type: "error",
+        title: "Cairn vault index unreadable",
+        message:
+          `Cairn could not read its vault index. The original was saved ` +
+          `to ${err.backupPath}. Choose how to proceed.`,
+        detail:
+          "Reset clears the index and starts a fresh first-launch (vaults " +
+          "themselves are NOT deleted). Quit lets you inspect the backup.",
+        buttons: ["Reset index (start fresh)", "Quit"],
+        cancelId: 1,
+        defaultId: 1,
+      });
+      if (response === 1) {
+        app.exit(1);
+        return;
+      }
+      registry = null; // Caller will treat as first-launch and write fresh.
+    } else if (err.code === "UNSUPPORTED_VERSION") {
+      await dialog.showMessageBox({
+        type: "error",
+        title: "Cairn version mismatch",
+        message: err.message,
+        buttons: ["Quit"],
+      });
+      app.exit(1);
+      return;
+    } else {
+      throw err;
+    }
+  }
 
   let vaultPath;
   if (smoke.enabled) {
@@ -119,6 +157,30 @@ async function main() {
     // First launch (non-smoke) OR registry exists but has zero vaults.
     // Minimal blocking flow for v1 of this packaging slice — a richer
     // React onboarding lands in a sibling issue. Default ~/Documents/cairn.
+    //
+    // Disclose the alpha-fixture state to the user ONCE before we create
+    // any state on their disk. Smoke skips this (CI is not a user).
+    if (!smoke.enabled) {
+      const { response } = await dialog.showMessageBox({
+        type: "info",
+        title: "Cairn alpha — fixture data only",
+        message:
+          "This Cairn build is an alpha. The window will show example data, " +
+          "not the contents of any vault you select. A scratch vault " +
+          "(~/Documents/cairn) is created so future versions can wire your " +
+          "real data in without an extra migration step.",
+        detail:
+          "Real vault binding is a follow-up release. Nothing you do in this " +
+          "window will modify the example data or your real files.",
+        buttons: ["Continue", "Quit"],
+        cancelId: 1,
+        defaultId: 0,
+      });
+      if (response === 1) {
+        app.exit(0);
+        return;
+      }
+    }
     vaultPath = join(homedir(), "Documents", "cairn");
     await fs.mkdir(vaultPath, { recursive: true });
     const entry = {
