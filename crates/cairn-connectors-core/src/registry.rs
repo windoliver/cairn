@@ -2,25 +2,27 @@
 //! poll/webhook → disable → shutdown.
 //!
 //! The registry is the single point of authority over which connectors are
-//! active, which consent grants cover them, and whether a poll scheduler is
+//! active, which consent grants cover them, and whether a poll task is
 //! running. It is the only place that wires together
 //! [`CredentialStore`], [`ConnectorConsentJournal`], [`PipelineEmit`], and
-//! the [`PollScheduler`].
+//! the per-entry poll tasks.
 //!
 //! # Architecture notes
 //!
 //! - State reads are lock-free: each [`Entry`] holds an [`ArcSwap`] so
 //!   readers never block writers (and vice-versa). The mutable `&mut self`
 //!   methods (`register`, `enable`, `disable`) are the only mutation points.
-//! - The scheduler is lazily created on the first `enable` call for a
-//!   poll-capable connector; it shares the `shutdown` token so a single
-//!   `shutdown()` call drains everything.
-//! - `disable` marks the entry as `Disabled` and revokes the grant in the
-//!   consent journal, but it does **not** cancel the individual poll task
-//!   for the connector. The running task will fail-fast on the next tick
-//!   because `process_event` checks the entry state before forwarding
-//!   events. Full per-connector task cancellation requires a per-task
-//!   [`CancellationToken`] and is deferred to a follow-up issue.
+//! - Each poll-capable connector gets its own [`CancellationToken`] and
+//!   [`tokio::task::JoinHandle`] stored in the [`Entry`]. `enable` spawns
+//!   the task and stores both; `disable` cancels the token, awaits the
+//!   handle, then marks the entry [`ConnectorState::Disabled`]. This
+//!   ensures disabled connectors never make further upstream calls.
+//! - Calling `enable` on an already-enabled connector is rejected with a
+//!   [`ConnectorError::Fatal`] — the caller must `disable` first to avoid
+//!   spawning a duplicate task.
+//! - [`PollScheduler`] is intentionally **not** used by the registry.
+//!   Per-entry tasks with per-entry tokens replace it here. `PollScheduler`
+//!   remains available for other consumers in the crate.
 //!
 //! Issue #130, brief §9.1 source sensors, §19 v0.3.
 
@@ -30,6 +32,7 @@ use std::time::Duration;
 
 use arc_swap::ArcSwap;
 use bon::Builder;
+use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use cairn_core::contract::connector_consent::{
@@ -41,7 +44,6 @@ use crate::connector::{Connector, ConnectorPlugin, PollContext};
 use crate::credential::{CredentialHandle, CredentialStore};
 use crate::emit::{PipelineEmit, build_capture_event};
 use crate::error::ConnectorError;
-use crate::poll::{PollScheduler, PollTick};
 use crate::redact::RedactionPipeline;
 
 // ---------------------------------------------------------------------------
@@ -73,6 +75,15 @@ struct Entry {
     /// hold a clone without going through `&Entry`. Reads are lock-free;
     /// writes use [`ArcSwap::store`].
     state: Arc<ArcSwap<ConnectorState>>,
+    /// Per-entry cancellation token. Created when a poll task is spawned by
+    /// [`ConnectorRegistry::enable`] and cancelled by
+    /// [`ConnectorRegistry::disable`]. `None` before first enable and after
+    /// disable completes.
+    poll_token: Option<CancellationToken>,
+    /// Join handle for the running poll task. Taken (set to `None`) by
+    /// [`ConnectorRegistry::disable`] so the registry can `.await` the
+    /// task's exit before marking the entry `Disabled`.
+    poll_handle: Option<JoinHandle<()>>,
 }
 
 // ---------------------------------------------------------------------------
@@ -94,8 +105,9 @@ struct Entry {
 /// Then:
 /// 1. [`register`][Self::register] — add a connector plugin.
 /// 2. [`enable`][Self::enable] — write a consent grant and start polling.
-/// 3. [`disable`][Self::disable] — revoke the grant and mark Disabled.
-/// 4. [`shutdown`][Self::shutdown] — cancel the scheduler and drain tasks.
+/// 3. [`disable`][Self::disable] — revoke the grant, cancel the poll task,
+///    and await its exit.
+/// 4. [`shutdown`][Self::shutdown] — cancel all tasks and await them.
 #[derive(Builder)]
 pub struct ConnectorRegistry {
     /// Credential store used to fetch OAuth tokens for poll calls.
@@ -111,7 +123,8 @@ pub struct ConnectorRegistry {
     ///
     /// [`CaptureEvent`]: cairn_core::domain::capture::CaptureEvent
     emit: Arc<dyn PipelineEmit>,
-    /// Token that stops the poll scheduler when cancelled.
+    /// Registry-wide shutdown token. Cancelling this stops all per-entry poll
+    /// tasks without needing to enumerate the entries.
     ///
     /// Defaults to a fresh token so callers that do not need external
     /// cancellation control can omit this field.
@@ -120,10 +133,6 @@ pub struct ConnectorRegistry {
     /// Registered connector entries, keyed by connector name.
     #[builder(skip)]
     entries: HashMap<String, Entry>,
-    /// Lazily-created scheduler; `None` until the first poll-capable connector
-    /// is enabled.
-    #[builder(skip)]
-    scheduler: Option<PollScheduler>,
 }
 
 impl ConnectorRegistry {
@@ -151,6 +160,8 @@ impl ConnectorRegistry {
             Entry {
                 connector: Arc::new(plugin),
                 state: Arc::new(ArcSwap::from_pointee(ConnectorState::Disabled)),
+                poll_token: None,
+                poll_handle: None,
             },
         );
         Ok(())
@@ -158,18 +169,29 @@ impl ConnectorRegistry {
 
     /// Enable a connector and write a consent grant to the journal.
     ///
-    /// If the connector advertises `capabilities().poll == true`, a poll task
-    /// is spawned in the background scheduler.
+    /// If the connector advertises `capabilities().poll == true`, a dedicated
+    /// per-entry poll task is spawned. The task is bound to a per-entry
+    /// [`CancellationToken`] so that [`disable`][Self::disable] can stop it
+    /// precisely without cancelling other connectors.
     ///
     /// # Errors
     ///
-    /// Returns [`ConnectorError::Fatal`] if the connector name is not
-    /// registered, or if the consent journal fails to write the grant.
+    /// Returns [`ConnectorError::Fatal`] if:
+    /// - The connector name is not registered.
+    /// - The connector is already enabled (call `disable` first).
+    /// - The consent journal fails to write the grant.
     pub async fn enable(&mut self, name: &str, grant: ConsentGrant) -> Result<(), ConnectorError> {
         let entry = self
             .entries
-            .get(name)
+            .get_mut(name)
             .ok_or_else(|| ConnectorError::fatal_msg(format!("unknown connector {name}")))?;
+
+        // Reject double-enable: spawning a second task would leak the first.
+        if matches!(**entry.state.load(), ConnectorState::Enabled { .. }) {
+            return Err(ConnectorError::fatal_msg(format!(
+                "connector {name} is already enabled; call disable() first"
+            )));
+        }
 
         let grant_id = self
             .consent
@@ -181,50 +203,71 @@ impl ConnectorRegistry {
             .state
             .store(Arc::new(ConnectorState::Enabled { grant, grant_id }));
 
-        // Lazily spawn a poll task if the connector supports polling.
-        // see #[cfg(any(test, feature = "fixture"))] block in T18 for poll_now
+        // Spawn a per-entry poll task if the connector supports polling.
         if entry.connector.capabilities().poll {
-            let sched = self.scheduler.get_or_insert_with(|| {
-                PollScheduler::new(self.shutdown.clone(), Duration::from_mins(5))
-            });
+            // Per-entry token, child of the registry-wide shutdown token so
+            // `shutdown()` also stops all per-entry tasks.
+            let entry_token = self.shutdown.child_token();
             let connector = entry.connector.clone();
             let emit = self.emit.clone();
             let consent = self.consent.clone();
-            // Clone the Arc so the closure shares the *real* state, not a dummy.
             let state = Arc::clone(&entry.state);
             let name_owned = name.to_owned();
+            let interval = Duration::from_mins(5);
+            // Clone the token for the task; store the original for cancel.
+            let task_token = entry_token.clone();
 
-            sched.spawn(name_owned, move |cursor| {
-                let connector = connector.clone();
-                let emit = emit.clone();
-                let consent = consent.clone();
-                let state = Arc::clone(&state);
-                async move {
-                    let cx = PollContext {
-                        credentials: Arc::new(CredentialHandle::empty()),
-                        last_cursor: cursor,
-                        budget_remaining_items: u32::MAX,
-                    };
-                    let outcome = connector.poll(&cx).await?;
-                    let next_cursor = outcome.next_cursor.clone();
-                    for event in outcome.events {
-                        process_event(event, &connector, &state, &consent, &emit).await?;
+            let handle = tokio::spawn(async move {
+                let mut cursor: Option<String> = None;
+                loop {
+                    tokio::select! {
+                        // Cancellation arm: per-entry token or registry shutdown.
+                        () = task_token.cancelled() => break,
+                        () = tokio::time::sleep(interval) => {
+                            let cx = PollContext {
+                                credentials: Arc::new(CredentialHandle::empty()),
+                                last_cursor: cursor.clone(),
+                                budget_remaining_items: u32::MAX,
+                            };
+                            match connector.poll(&cx).await {
+                                Ok(outcome) => {
+                                    cursor = outcome.next_cursor.clone();
+                                    for event in outcome.events {
+                                        if let Err(err) = process_event(
+                                            event, &connector, &state, &consent, &emit,
+                                        ).await {
+                                            tracing::warn!(
+                                                connector = %name_owned,
+                                                ?err,
+                                                "process_event returned an error; retrying on next interval",
+                                            );
+                                        }
+                                    }
+                                }
+                                Err(err) => {
+                                    tracing::warn!(
+                                        connector = %name_owned,
+                                        ?err,
+                                        "poll tick returned an error; retrying on next interval",
+                                    );
+                                }
+                            }
+                        }
                     }
-                    Ok(PollTick::done(next_cursor))
                 }
             });
+
+            entry.poll_token = Some(entry_token);
+            entry.poll_handle = Some(handle);
         }
         Ok(())
     }
 
-    /// Disable a connector by revoking its consent grant and marking it
-    /// [`Disabled`][ConnectorState::Disabled].
+    /// Disable a connector: revoke its consent grant, cancel and await the
+    /// poll task, then mark the entry [`Disabled`][ConnectorState::Disabled].
     ///
-    /// **Limitation:** this does not cancel the connector's individual poll
-    /// task. The task will detect the state change on the next tick via
-    /// [`process_event`]'s state check and return a
-    /// [`ConnectorError::ConsentRevoked`] which the scheduler logs at `warn`
-    /// level. Full per-task cancellation is deferred to a follow-up issue.
+    /// After this call returns, the connector is fully stopped — no further
+    /// poll ticks or upstream HTTP calls will be made.
     ///
     /// # Errors
     ///
@@ -233,7 +276,7 @@ impl ConnectorRegistry {
     pub async fn disable(&mut self, name: &str) -> Result<(), ConnectorError> {
         let entry = self
             .entries
-            .get(name)
+            .get_mut(name)
             .ok_or_else(|| ConnectorError::fatal_msg(format!("unknown connector {name}")))?;
 
         let state = (**entry.state.load()).clone();
@@ -242,6 +285,17 @@ impl ConnectorRegistry {
                 .revoke(&grant_id)
                 .await
                 .map_err(ConnectorError::fatal_msg)?;
+        }
+
+        // Cancel the per-entry poll task and wait for it to exit cleanly.
+        if let Some(token) = entry.poll_token.take() {
+            token.cancel();
+        }
+        if let Some(handle) = entry.poll_handle.take() {
+            // A JoinError here means the task panicked — treat as Fatal.
+            handle.await.map_err(|e| ConnectorError::fatal_msg(format!(
+                "poll task for {name} panicked during disable: {e}"
+            )))?;
         }
 
         entry.state.store(Arc::new(ConnectorState::Disabled));
@@ -282,13 +336,30 @@ impl ConnectorRegistry {
         Ok(())
     }
 
-    /// Cancel the poll scheduler and drain all running tasks.
+    /// Cancel all per-entry poll tasks and await them.
+    ///
+    /// Cancels the registry-wide shutdown token (which is the parent of all
+    /// per-entry tokens) and then awaits every running task's
+    /// [`JoinHandle`][tokio::task::JoinHandle]. Panics in tasks are logged at
+    /// `error` level but do not propagate — `shutdown` is a best-effort drain.
     ///
     /// Consumes `self` so the registry cannot be reused after shutdown.
-    pub async fn shutdown(self) {
+    pub async fn shutdown(mut self) {
+        // Cancel all per-entry tasks via the registry-wide token (parent of
+        // every child token created in `enable`).
         self.shutdown.cancel();
-        if let Some(sched) = self.scheduler {
-            sched.shutdown().await;
+        // Await each running handle; log panics but do not propagate them.
+        for (name, entry) in &mut self.entries {
+            let Some(handle) = entry.poll_handle.take() else {
+                continue;
+            };
+            if let Err(e) = handle.await {
+                tracing::error!(
+                    connector = %name,
+                    error = %e,
+                    "poll task panicked during registry shutdown",
+                );
+            }
         }
     }
 }
