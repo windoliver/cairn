@@ -198,7 +198,11 @@ async fn gate_outcome_69_on_failing_gate() {
     let fake_manifest = dir.path().join("coherence.toml");
     std::fs::write(&fake_manifest, failing_manifest_toml()).unwrap();
     let cassettes_dir = dir.path().to_path_buf();
-    std::fs::write(cassettes_dir.join("force_fail.json"), failing_cassette_json()).unwrap();
+    std::fs::write(
+        cassettes_dir.join("force_fail.json"),
+        failing_cassette_json(),
+    )
+    .unwrap();
     let opts = GateOptions {
         mode: GateMode::Beta,
         cassettes_dir,
@@ -247,6 +251,45 @@ async fn missing_baseline_path_fails_closed() {
 }
 
 #[tokio::test]
+async fn update_baseline_rejects_zero_coverage_run() {
+    // --update-baseline + a run that doesn't actually exercise every
+    // category would otherwise lock in 0/0 vacuous-pass scores and
+    // destroy the prior real measurement.
+    use cairn_bench::coherence::GateError;
+    let dir = tempdir().unwrap();
+    // Use the P0 cassette which has NO metric_category tags, so every
+    // category bucket comes back empty (total=0). With --gate none the
+    // gate "passes" (GateNone), so previously the orchestrator would
+    // proceed to write a vacuous baseline.
+    let target_baseline = dir.path().join("baseline.json");
+    std::fs::copy(baseline_path(), &target_baseline).unwrap();
+    let before = std::fs::read_to_string(&target_baseline).unwrap();
+    let opts = GateOptions {
+        mode: GateMode::None,
+        cassettes_dir: workspace_root().join("fixtures/v0/replay"),
+        include: vec!["p0_stories".to_owned()],
+        manifest_path: manifest_path(),
+        baseline_path: Some(target_baseline.clone()),
+        trend_path: dir.path().join("trend.jsonl"),
+        update_baseline: true,
+        write_trend: false,
+        cairn_version: env!("CARGO_PKG_VERSION").to_owned(),
+        git_sha: "smoke".to_owned(),
+        now: "2026-05-24T12:00:00Z".to_owned(),
+        run_id: "01J000000000000000000000RUN".to_owned(),
+    };
+    let err = run_coherence_gate(opts).await.expect_err("must reject");
+    assert!(
+        matches!(err, GateError::BaselineInvalid { .. }),
+        "expected BaselineInvalid, got {err:?}"
+    );
+    assert_eq!(err.exit_code(), 78);
+    // Baseline file untouched.
+    let after = std::fs::read_to_string(&target_baseline).unwrap();
+    assert_eq!(before, after);
+}
+
+#[tokio::test]
 async fn failed_gate_does_not_update_baseline() {
     // A regression that trips --gate beta must not be normalised into the
     // committed baseline. `--update-baseline` is honoured only when the
@@ -255,7 +298,11 @@ async fn failed_gate_does_not_update_baseline() {
     let fake_manifest = dir.path().join("coherence.toml");
     std::fs::write(&fake_manifest, failing_manifest_toml()).unwrap();
     let cassettes_dir = dir.path().to_path_buf();
-    std::fs::write(cassettes_dir.join("force_fail.json"), failing_cassette_json()).unwrap();
+    std::fs::write(
+        cassettes_dir.join("force_fail.json"),
+        failing_cassette_json(),
+    )
+    .unwrap();
     let target_baseline = dir.path().join("baseline.json");
     std::fs::copy(baseline_path(), &target_baseline).unwrap();
     let before = std::fs::read_to_string(&target_baseline).unwrap();

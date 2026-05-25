@@ -186,10 +186,26 @@ pub async fn run_coherence_gate(opts: GateOptions) -> Result<GateOutcome, GateEr
     // that just tripped the delta check would otherwise be normalised into
     // the committed floor on the very next run. `--gate none` always
     // "passes" (GateNone is_pass), which is the intended seeding path.
+    //
+    // Also refuse when any canonical category has zero coverage. An
+    // empty `--include` set (or cassettes that simply forgot to tag
+    // their actions) produces a vacuous-pass score of 1.0 / 0 actions
+    // for every empty category, which `validate_baseline` happily
+    // accepts. Writing that as the new baseline would silently destroy
+    // the prior measurement and lock in 0/0 perfect scores.
     if opts.update_baseline
         && gate_passed
         && let Some(path) = &opts.baseline_path
     {
+        if let Some(empty) = first_empty_category(&report.metrics) {
+            return Err(GateError::BaselineInvalid {
+                path: path.display().to_string(),
+                reason: format!(
+                    "refusing to --update-baseline: category {empty} has 0 actions; \
+                     pass --include cassettes that exercise every category",
+                ),
+            });
+        }
         write_baseline(
             path,
             &Baseline {
@@ -421,6 +437,21 @@ fn validate_baseline(baseline: &Baseline) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+/// Return the first canonical category whose recorded `total` is zero,
+/// so the orchestrator can refuse a baseline rewrite that would lock in
+/// a vacuous-pass score for a category nothing exercised this run.
+fn first_empty_category(
+    metrics: &std::collections::BTreeMap<String, CategoryScore>,
+) -> Option<&'static str> {
+    for category in ALL_CATEGORIES {
+        let label = as_str(category);
+        if metrics.get(label).is_none_or(|score| score.total == 0) {
+            return Some(label);
+        }
+    }
+    None
 }
 
 fn write_baseline(path: &std::path::Path, baseline: &Baseline) -> Result<(), GateError> {

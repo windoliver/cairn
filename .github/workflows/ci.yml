@@ -15,9 +15,9 @@ name: ci
 
 on:
   pull_request:
-    branches: [main]
+    branches: [main, "release/**"]
   push:
-    branches: [main]
+    branches: [main, "release/**"]
   merge_group:
   workflow_dispatch:
 
@@ -171,6 +171,10 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          # Need history so we can `git show` the base ref's trusted
+          # baseline + manifest below.
+          fetch-depth: 0
       - name: Install toolchain (rust-toolchain.toml)
         run: rustup show active-toolchain || rustup toolchain install
       - name: Cache cargo build
@@ -183,10 +187,43 @@ jobs:
         run: |
           cargo build --release --locked -p cairn-cli --bin cairn
           cargo build --release --locked -p cairn-bench
+      - name: Resolve gate mode + trusted manifest/baseline
+        id: gate
+        run: |
+          # Pick gate mode from the destination branch (PRs) or the
+          # pushed branch (pushes / merge_group). release/* -> rc;
+          # everything else -> beta.
+          target_branch=""
+          case "${{ github.event_name }}" in
+            pull_request) target_branch="${{ github.base_ref }}" ;;
+            *)            target_branch="${{ github.ref_name }}" ;;
+          esac
+          case "$target_branch" in
+            release/*) mode="rc" ;;
+            *)         mode="beta" ;;
+          esac
+          echo "mode=$mode" >> "$GITHUB_OUTPUT"
+          # Fetch the base ref's manifest + baseline so a PR that lowers
+          # floors or rewrites baselines cannot weaken the required check.
+          # On pushes / merge_group the checked-out tree IS the trusted
+          # tree, so we point at the in-tree files.
+          mkdir -p .ci-trusted
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            git fetch --depth=1 origin "$target_branch"
+            git show "origin/$target_branch:crates/cairn-bench/manifests/coherence.toml" > .ci-trusted/coherence.toml
+            git show "origin/$target_branch:crates/cairn-bench/baselines/coherence.json" > .ci-trusted/coherence.json
+            echo "manifest=.ci-trusted/coherence.toml" >> "$GITHUB_OUTPUT"
+            echo "baseline=.ci-trusted/coherence.json" >> "$GITHUB_OUTPUT"
+          else
+            echo "manifest=crates/cairn-bench/manifests/coherence.toml" >> "$GITHUB_OUTPUT"
+            echo "baseline=crates/cairn-bench/baselines/coherence.json" >> "$GITHUB_OUTPUT"
+          fi
       - name: Run coherence gate
         run: |
           ./target/release/cairn-bench coherence run \
-            --gate ${{ startsWith(github.ref, 'refs/heads/release/') && 'rc' || 'beta' }}
+            --gate ${{ steps.gate.outputs.mode }} \
+            --manifest ${{ steps.gate.outputs.manifest }} \
+            --baseline ${{ steps.gate.outputs.baseline }}
         env:
           CAIRN_MOCK_EMBEDDER: "1"
           CAIRN_KEYSTORE: "file"

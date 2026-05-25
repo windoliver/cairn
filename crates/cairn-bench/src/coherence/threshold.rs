@@ -301,7 +301,11 @@ fn evaluate_one(
     }
     if let Some(prev) = previous {
         let drop_pct = (prev - score) * 100.0;
-        if drop_pct > threshold.max_drop_pct {
+        // Tolerate float rounding in the multiplication. The spec is
+        // "fail when the drop *exceeds* the budget"; exact budget hits
+        // pass. Without the epsilon, prev=1.0 / score=0.98 produces
+        // 2.0000000000000018 and trips a 2.0% budget.
+        if drop_pct - threshold.max_drop_pct > DROP_EPSILON {
             return MetricOutcome::ExceededDrop {
                 previous: prev,
                 drop_pct,
@@ -310,6 +314,11 @@ fn evaluate_one(
     }
     MetricOutcome::Pass
 }
+
+/// Tolerance for the percentage-point drop comparison. Picked an order
+/// of magnitude above the worst f64 multiplication error for a 100-scale
+/// computation on values in [0, 1].
+const DROP_EPSILON: f64 = 1e-9;
 
 /// True if every metric passed (or the gate was `None`).
 #[must_use]
@@ -351,6 +360,26 @@ mod tests {
             }
             other => panic!("expected ExceededDrop, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn gate_passes_at_exact_drop_budget() {
+        // prev=1.0, score=0.98 -> drop is 2.0% on paper but 2.0000…018
+        // in f64. The epsilon tolerance keeps an exact-budget drop on
+        // the pass side; only drops *exceeding* the budget should fail.
+        let outcome = evaluate_one(GateMode::Beta, 0.98, threshold(0.0, 0.0, 2.0), Some(1.0));
+        assert_eq!(
+            outcome,
+            MetricOutcome::Pass,
+            "exact 2.0% drop should pass, not be tripped by float rounding"
+        );
+    }
+
+    #[test]
+    fn gate_fails_just_past_drop_budget() {
+        // A drop a hair past the budget should still fail.
+        let outcome = evaluate_one(GateMode::Beta, 0.97, threshold(0.0, 0.0, 2.0), Some(1.0));
+        assert!(matches!(outcome, MetricOutcome::ExceededDrop { .. }));
     }
 
     #[test]
