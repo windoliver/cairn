@@ -1,0 +1,59 @@
+name: desktop-smoke
+
+on:
+  workflow_call: {}
+  workflow_dispatch: {}
+
+jobs:
+  smoke:
+    runs-on: macos-14
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: cairn-macos-dmg
+          path: ./dmg
+
+      - name: Mount + install
+        run: |
+          DMG=$(ls dmg/*.dmg | head -1)
+          hdiutil attach "$DMG" -mountpoint /Volumes/Cairn
+          cp -R /Volumes/Cairn/Cairn.app /Applications/
+          hdiutil detach /Volumes/Cairn
+
+      - name: Smoke launch (--smoke-test)
+        timeout-minutes: 2
+        run: |
+          mkdir -p "$RUNNER_TEMP/smoke-vault"
+          open -W -a Cairn --args --smoke-test --vault "$RUNNER_TEMP/smoke-vault"
+          code=$?
+          echo "app exit: $code"
+          if [ "$code" -ne 0 ]; then
+            echo "smoke test failed — sidecar didn't reach /health"
+            cat "$HOME/Library/Application Support/cairn/logs/desktop.log" 2>/dev/null || true
+            exit 1
+          fi
+
+      - name: Assert backend started
+        run: |
+          LOG="$HOME/Library/Application Support/cairn/logs/desktop.log"
+          test -f "$LOG" || { echo "no log file"; exit 1; }
+          # The sidecar tees the child's STDERR to this file.
+          # tracing-subscriber writes axum startup messages there.
+          # The literal "listening on http://" goes to STDOUT and is
+          # consumed by sidecar.mjs for port-parsing — not in the log.
+          # Instead, assert that the log file exists and is non-empty
+          # (proves the sidecar process started and tracing came up).
+          if [ ! -s "$LOG" ]; then
+            echo "log file is empty — sidecar did not start"
+            exit 1
+          fi
+          echo "--- desktop.log head ---"
+          head -20 "$LOG"
+
+      - name: Cleanup
+        if: always()
+        run: |
+          rm -rf /Applications/Cairn.app
+          bash "$GITHUB_WORKSPACE/scripts/uninstall.sh" --yes --full || true
