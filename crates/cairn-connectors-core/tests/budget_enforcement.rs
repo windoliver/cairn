@@ -1097,3 +1097,224 @@ async fn failed_emit_cleans_up_spool_file() {
 
     reg.shutdown().await;
 }
+
+// ---------------------------------------------------------------------------
+// Finding R — daily byte budget must block events that exceed the day cap
+// ---------------------------------------------------------------------------
+
+/// Manifest with a 1 KiB daily byte cap — used by Finding R tests.
+///
+/// The item budget is large so byte exhaustion, not item exhaustion, is
+/// the limiting factor.
+const BYTE_BUDGET_MANIFEST: &str = r#"
+[connector]
+name = "budget-test"
+contract = "Connector"
+contract_version = "0.1.0"
+sensor_identity = "snr:local:connector:budget-test:v1"
+
+[capabilities]
+poll = true
+webhook = false
+backfill = false
+
+[oauth]
+required_scopes = []
+token_lifetime = "1h"
+refresh = false
+
+[budget]
+max_items_per_hour = 1000
+max_bytes_per_day = "1024"
+
+[labels]
+allowed = ["note"]
+
+[[scopes.declared]]
+kind = "project"
+pattern = "*"
+
+[webhook]
+"signature.algorithm" = "hmac-sha256"
+"signature.header" = "X-Sig"
+allowed_mimes = ["application/json"]
+
+[poll]
+cursor_kind = "opaque-string"
+min_interval = "30s"
+default_interval = "5m"
+
+[payload]
+max_bytes = "256KiB"
+max_depth = 10
+"#;
+
+fn byte_budget_manifest() -> ConnectorManifest {
+    ConnectorManifest::parse_toml(BYTE_BUDGET_MANIFEST).expect("BYTE_BUDGET_MANIFEST must parse")
+}
+
+fn byte_budget_grant() -> cairn_core::contract::connector_consent::ConsentGrant {
+    cairn_core::contract::connector_consent::ConsentGrant::new(
+        "budget-test",
+        byte_budget_manifest().hash(),
+        BTreeSet::from(["note".to_string()]),
+        vec!["project:*".to_string()],
+        1_700_000_000,
+        Identity::parse("hmn:alice").expect("hmn:alice is valid"),
+    )
+}
+
+/// Build a JSON-payload event whose serialized byte size is controlled by
+/// the length of the `payload_str` argument.
+///
+/// The body is `{"data": "<payload_str>"}`. For a string of length `n` the
+/// serialized JSON is roughly `n + 10` bytes (key + quotes + braces).
+fn make_byte_event(id: &str, payload_str: &str) -> ConnectorEvent {
+    ConnectorEvent::new(
+        ConnectorEventId::new(id),
+        "budget-test",
+        SourceRef::new("issue", id, None),
+        0,
+        BTreeSet::from(["note".to_string()]),
+        ConnectorScope::project("owner/repo"),
+        ConnectorPayload::Json {
+            mime: "application/json".into(),
+            body: serde_json::json!({"data": payload_str}),
+        },
+        DeliveryMode::Poll { cursor: None },
+    )
+}
+
+/// The daily byte budget must block events that would push total emitted bytes
+/// past `max_bytes_per_day` (Finding R).
+///
+/// Setup:
+/// - `max_bytes_per_day = 1024` (1 KiB), `max_items_per_hour = 1000` (not limiting).
+/// - First event: ~600 bytes of JSON body → accepted (600 ≤ 1024).
+/// - Second event: another ~600 bytes → total would be ~1200 > 1024 → rejected.
+///
+/// Assertions:
+/// - First `poll_now` succeeds; emit count = 1.
+/// - Second `poll_now` returns `Err(BudgetExceeded)`; emit count stays at 1.
+// inline connector struct after variable setup is idiomatic in integration tests
+#[allow(clippy::items_after_statements)]
+#[tokio::test]
+async fn daily_byte_budget_blocks_oversize_total() {
+    // Build a 600-character filler string so the JSON body serialises to
+    // approximately 600 bytes.
+    let filler_600: String = "x".repeat(600);
+
+    let emit = Arc::new(CountEmit::default());
+    let tmp = tempfile::tempdir().expect("tempdir");
+
+    // Connector emitting two sequential events via two poll_now calls.
+    struct TwoCallConnector {
+        manifest: ConnectorManifest,
+        sensor: Identity,
+        call: std::sync::Mutex<u32>,
+        filler: String,
+    }
+
+    #[async_trait]
+    impl Connector for TwoCallConnector {
+        fn name(&self) -> &'static str {
+            "budget-test"
+        }
+        fn manifest(&self) -> &ConnectorManifest {
+            &self.manifest
+        }
+        fn capabilities(&self) -> &ConnectorCapabilities {
+            static C: ConnectorCapabilities = ConnectorCapabilities {
+                poll: true,
+                webhook: false,
+                backfill: false,
+            };
+            &C
+        }
+        fn sensor_identity(&self) -> &Identity {
+            &self.sensor
+        }
+        fn supported_contract_versions(&self) -> VersionRange {
+            VersionRange::new(ContractVersion::new(0, 1, 0), ContractVersion::new(0, 2, 0))
+        }
+        async fn poll(&self, _: &PollContext) -> Result<PollOutcome, ConnectorError> {
+            let mut call = self.call.lock().expect("call mutex");
+            *call += 1;
+            let id = if *call == 1 {
+                "01ARZ3NDEKTSV4RRFFQ69G5FD1"
+            } else {
+                "01ARZ3NDEKTSV4RRFFQ69G5FD2"
+            };
+            Ok(PollOutcome {
+                events: vec![make_byte_event(id, &self.filler)],
+                next_cursor: None,
+                rate_limit_hint: None,
+            })
+        }
+        async fn ingest_webhook(
+            &self,
+            _: &WebhookRequest,
+            _: &WebhookContext,
+        ) -> Result<Vec<ConnectorEvent>, ConnectorError> {
+            Ok(vec![])
+        }
+    }
+
+    impl ConnectorPlugin for TwoCallConnector {
+        const NAME: &'static str = "budget-test";
+        const SUPPORTED_VERSIONS: VersionRange =
+            VersionRange::new(ContractVersion::new(0, 1, 0), ContractVersion::new(0, 2, 0));
+    }
+
+    let mut reg = ConnectorRegistry::builder()
+        .credentials(Arc::new(InMemoryCredentialStore::default()))
+        .consent(Arc::new(AcceptAllConsent::default()))
+        .emit(emit.clone() as Arc<dyn PipelineEmit>)
+        .spool_root(tmp.path().to_path_buf())
+        .build();
+
+    reg.register(TwoCallConnector {
+        manifest: byte_budget_manifest(),
+        sensor: Identity::parse("snr:local:connector:budget-test:v1")
+            .expect("sensor identity must parse"),
+        call: std::sync::Mutex::new(0),
+        filler: filler_600,
+    })
+    .expect("register must succeed");
+    reg.enable("budget-test", byte_budget_grant())
+        .await
+        .expect("enable must succeed");
+
+    // First poll — byte budget available; event must be accepted.
+    reg.poll_now("budget-test")
+        .await
+        .expect("first poll_now must succeed — byte budget not yet exceeded");
+
+    {
+        let count = *emit.0.lock().expect("mutex");
+        assert_eq!(
+            count, 1,
+            "first poll_now must emit exactly 1 event (got {count})"
+        );
+    }
+
+    // Second poll — adding another ~600 bytes would exceed 1 KiB total.
+    let err = reg
+        .poll_now("budget-test")
+        .await
+        .expect_err("second poll_now must fail — daily byte budget exceeded");
+
+    assert!(
+        matches!(err, ConnectorError::BudgetExceeded { .. }),
+        "expected BudgetExceeded when daily byte cap is exceeded, got {err:?}",
+    );
+
+    // Emit count must still be 1 — the second event was rejected before emit.
+    let count = *emit.0.lock().expect("mutex");
+    assert_eq!(
+        count, 1,
+        "over-byte-budget event must not reach emit; count must remain 1 (got {count})",
+    );
+
+    reg.shutdown().await;
+}
