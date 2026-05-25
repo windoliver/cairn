@@ -38,7 +38,7 @@ use crate::webhook::WebhookRequest;
 /// Minimal in-tree connector used by framework tests.
 ///
 /// Implements both poll and webhook capabilities; each invocation returns
-/// exactly one [`sample_event`]. No network I/O, no credentials required.
+/// exactly one `sample_event`. No network I/O, no credentials required.
 #[derive(Debug)]
 pub struct FixtureConnector {
     manifest: ConnectorManifest,

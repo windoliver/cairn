@@ -40,7 +40,7 @@ pub struct ConnectorCapabilities {
 
 /// Per-call context handed to [`Connector::poll`].
 ///
-/// The `cancel` token is signalled by [`ConnectorRegistry::disable`] when the
+/// The `cancel` token is signalled by [`crate::ConnectorRegistry::disable`] when the
 /// connector is being stopped. Adapter implementations that perform long
 /// upstream operations (e.g. paginating HTTP responses) SHOULD `tokio::select!`
 /// on `cancel.cancelled()` inside their `poll` body so that `disable` can
@@ -53,7 +53,7 @@ pub struct PollContext {
     pub last_cursor: Option<String>,
     /// How many items remain in the per-scope budget for this call.
     pub budget_remaining_items: u32,
-    /// Cancellation token signalled when [`ConnectorRegistry::disable`] is
+    /// Cancellation token signalled when [`crate::ConnectorRegistry::disable`] is
     /// called. Adapters SHOULD poll this token during long upstream operations.
     pub cancel: tokio_util::sync::CancellationToken,
 }

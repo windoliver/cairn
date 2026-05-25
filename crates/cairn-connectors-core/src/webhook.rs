@@ -138,8 +138,8 @@ pub fn hex_hmac_sha256(secret: &[u8], body: &[u8]) -> String {
 /// Composes per-connector `axum` routes under `/webhooks`.
 ///
 /// `WebhookRouter` is registry-internal: only [`ConnectorRegistry`] constructs
-/// and populates it via the `pub(crate)` [`mount`][Self::mount] method. The
-/// public surface is [`ConnectorRegistry::webhook_router`], which ensures all
+/// and populates it via the `pub(crate)` `mount` method. The
+/// public surface is [`crate::ConnectorRegistry::webhook_router`], which ensures all
 /// webhook routes include signature verification, capability checks, and consent
 /// gates before calling `Connector::ingest_webhook`.
 ///

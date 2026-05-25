@@ -9,18 +9,18 @@
 //!
 //! # Architecture notes
 //!
-//! - State reads are lock-free: each [`Entry`] holds an [`ArcSwap`] so
+//! - State reads are lock-free: each `Entry` holds an [`ArcSwap`] so
 //!   readers never block writers (and vice-versa). The mutable `&mut self`
 //!   methods (`register`, `enable`, `disable`) are the only mutation points.
 //! - Each poll-capable connector gets its own [`CancellationToken`] and
-//!   [`tokio::task::JoinHandle`] stored in the [`Entry`]. `enable` spawns
+//!   [`tokio::task::JoinHandle`] stored in the `Entry`. `enable` spawns
 //!   the task and stores both; `disable` cancels the token, awaits the
-//!   handle, then marks the entry [`ConnectorState::Disabled`]. This
+//!   handle, then marks the entry `ConnectorState::Disabled`. This
 //!   ensures disabled connectors never make further upstream calls.
 //! - Calling `enable` on an already-enabled connector is rejected with a
 //!   [`ConnectorError::Fatal`] — the caller must `disable` first to avoid
 //!   spawning a duplicate task.
-//! - [`PollScheduler`] is intentionally **not** used by the registry.
+//! - [`crate::poll::PollScheduler`] is intentionally **not** used by the registry.
 //!   Per-entry tasks with per-entry tokens replace it here. `PollScheduler`
 //!   remains available for other consumers in the crate.
 //!
@@ -328,7 +328,7 @@ pub struct ConnectorRegistry {
 impl ConnectorRegistry {
     /// Register a connector plugin.
     ///
-    /// The connector starts in the [`Disabled`][ConnectorState::Disabled]
+    /// The connector starts in the `ConnectorState::Disabled`
     /// state. Call [`enable`][Self::enable] to make it active.
     ///
     /// # Sensor-identity binding (Finding C)
@@ -633,7 +633,7 @@ impl ConnectorRegistry {
     ///
     /// The steps are intentionally ordered so that the local poll task is
     /// stopped **before** the consent journal is contacted.  An intermediate
-    /// [`Disabling`][ConnectorState::Disabling] state is used so that a failed
+    /// `ConnectorState::Disabling` state is used so that a failed
     /// `revoke` can be retried without losing the `grant_id`:
     ///
     /// 1. Read the current state.
@@ -642,13 +642,13 @@ impl ConnectorRegistry {
     ///      to step 5 (retry the `revoke`).
     ///    - `Enabled { grant_id, .. }` → continue with steps 2–5.
     /// 2. Extract the `grant_id` and set state to
-    ///    [`Disabling { grant_id }`][ConnectorState::Disabling] so in-flight
+    ///    `ConnectorState::Disabling { grant_id }` so in-flight
     ///    `process_event` calls see a non-`Enabled` state immediately.
     /// 3. Cancel the per-entry [`CancellationToken`] so the poll task exits at
     ///    its next `select!` branch.
     /// 4. Await the [`JoinHandle`] — the task has actually exited.
     /// 5. Call [`ConnectorConsentJournal::revoke`].
-    ///    - On success: set state to [`Disabled`][ConnectorState::Disabled] and
+    ///    - On success: set state to `ConnectorState::Disabled` and
     ///      return `Ok`.
     ///    - On failure: **leave state as `Disabling`** (the `grant_id` is
     ///      preserved) and return `Err`. The caller can call `disable` again to
@@ -904,7 +904,7 @@ impl ConnectorRegistry {
     ///
     /// Cancels the registry-wide shutdown token (which is the parent of all
     /// per-entry tokens) and then awaits every running task's
-    /// [`JoinHandle`][tokio::task::JoinHandle]. Panics in tasks are logged at
+    /// [`tokio::task::JoinHandle`]. Panics in tasks are logged at
     /// `error` level but do not propagate — `shutdown` is a best-effort drain.
     ///
     /// Consumes `self` so the registry cannot be reused after shutdown.
@@ -1066,7 +1066,7 @@ async fn remove_tmp_file_if_exists(path: &std::path::Path) -> Result<(), std::io
 /// from a consent grant's `scope_patterns` list.
 ///
 /// Pattern semantics (simple glob, P0 — same rules as
-/// [`ConnectorManifest::scope_matches`]):
+/// `scope_pattern_matches`):
 ///
 /// Patterns are in the same `"<kind>:<value_pattern>"` wire form as scope keys.
 ///
@@ -1173,7 +1173,7 @@ fn sanitize_path_component(component: &str) -> Result<&str, ConnectorError> {
 ///    return [`ConnectorError::BudgetExceeded`] without writing to the spool
 ///    or calling `emit`. This prevents orphaned spool files from over-budget
 ///    events (Finding M fix).
-/// 5. Run [`RedactionPipeline::new().redact(event)`] to strip PII. On error,
+/// 5. Run `RedactionPipeline::new().redact(event)` to strip PII. On error,
 ///    refund the reservation from step 4.
 /// 6. Spool the post-redaction bytes to `{spool_root}/connector/<name>/…` and
 ///    compute a real SHA-256 hash from those bytes (Finding H). The hash

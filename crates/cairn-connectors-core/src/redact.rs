@@ -106,7 +106,7 @@ impl RedactionPipeline {
     ///   [`cairn_core::pipeline::filter::redact::redact`] once.
     /// - [`ConnectorPayload::Json`]: every string leaf of the JSON value is
     ///   walked with a bounded-depth iterator and redacted individually.
-    ///   If the JSON exceeds [`Self::max_depth`] (set by
+    ///   If the JSON exceeds `max_depth` (set by
     ///   [`with_max_depth`][Self::with_max_depth]) the method returns
     ///   [`ConnectorError::MalformedPayload`].
     /// - [`ConnectorPayload::Binary`]: bytes reside in the spool; the
