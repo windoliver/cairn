@@ -18,3 +18,5 @@ The user-facing adapters are intentionally thin:
 The current P0 implementation favors fail-closed behavior. If a command or
 plugin cannot provide the claimed behavior, it reports that state explicitly
 instead of degrading silently.
+
+See the [capability matrix](../reference/capability-matrix.md) for which capabilities ship in which release.
