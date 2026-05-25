@@ -113,8 +113,8 @@ The following changes are **breaking** and trigger a v2 cut:
    `cairn mcp` advertises both contracts in `status.contract` (the field
    becomes an array during the deprecation window); clients pin via the
    `contract` field on every envelope.
-5. **Retire.** After the deprecation window plus one full release cycle
-   past v2 cutover, `cairn.mcp.v1` shutdown ships as a separate major
+5. **Retire.** After the deprecation window plus one full minor release
+   past v2 cutover, `cairn.mcp.v1` retirement ships as a separate major
    Cairn release.
 
 ### 6. Extension-namespace policy
