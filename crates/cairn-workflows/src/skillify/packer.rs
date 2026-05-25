@@ -513,7 +513,14 @@ pub fn unpack_archive_staged(
     let parent_dir = vault_root.join(".cairn/evolution/skillify");
     fs::create_dir_all(&parent_dir)?;
     let lock_path = parent_dir.join(".install.lock");
-    let _install_lock = acquire_install_lock(&lock_path)?;
+    // Round-18 hardening: the install lock MUST be held until the caller
+    // commits or rolls back the transaction (not just until this function
+    // returns). Otherwise: install A acquires the lock, swaps, releases
+    // when this fn returns, re-gates; install B acquires, swaps,
+    // commits; install A then fails re-gate and rolls back, deleting
+    // B's data. Move the lock into the returned InstallTransaction so
+    // its Drop fires only when the transaction is consumed.
+    let install_lock = acquire_install_lock(&lock_path)?;
 
     let file = fs::File::open(archive_path)?;
     let dec = flate2::read::GzDecoder::new(file);
@@ -783,7 +790,13 @@ pub fn unpack_archive_staged(
     // the CLI's re-gate step: a re-gate failure (e.g. trigger collision
     // with existing vault skills) would leave the previous candidate
     // permanently gone.
-    Ok((manifest, InstallTransaction { swap_log }))
+    Ok((
+        manifest,
+        InstallTransaction {
+            swap_log,
+            _install_lock: install_lock,
+        },
+    ))
 }
 
 /// In-flight install state returned by [`unpack_archive`]. The caller MUST
@@ -795,6 +808,11 @@ pub fn unpack_archive_staged(
 #[must_use = "InstallTransaction must be committed or rolled back"]
 pub struct InstallTransaction {
     swap_log: Vec<SwapAction>,
+    // Round-18: holding the install lock for the full transaction
+    // lifetime (until commit/rollback) prevents a concurrent install
+    // from sneaking in between staged swap and rollback, which could
+    // otherwise let an earlier rollback delete a later install's data.
+    _install_lock: InstallLockGuard,
 }
 
 /// Backward-compatible wrapper: runs `unpack_archive_staged` then commits

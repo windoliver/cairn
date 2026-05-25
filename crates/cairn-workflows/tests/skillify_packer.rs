@@ -225,3 +225,61 @@ fn unpack_rejects_archive_with_symlink_entry() {
         "expected symlink rejection, got: {msg}"
     );
 }
+
+#[cfg(unix)]
+#[test]
+fn install_lock_is_held_through_transaction_lifetime() {
+    // Round-18 regression: the install lock must be held until the
+    // InstallTransaction is consumed (commit/rollback), not just until
+    // unpack_archive_staged returns. Otherwise a second install can
+    // sneak in between staged swap and rollback.
+    use cairn_workflows::skillify::packer::unpack_archive_staged;
+    use std::sync::{Arc, Barrier};
+
+    let temp = TempDir::new().unwrap();
+    setup_candidate(&temp, "skc_lock_test", "lock-test");
+    let archive = SkillPackBuilder::new("lock-pack", "0.1.0", ">=0.1.0", "lock test")
+        .add_candidate("skc_lock_test")
+        .build(temp.path())
+        .unwrap();
+
+    // First install: stage but don't commit yet (hold the transaction).
+    let install_temp = TempDir::new().unwrap();
+    let (manifest1, transaction1) =
+        unpack_archive_staged(&archive.archive_path, install_temp.path(), "0.1.0").unwrap();
+
+    // Spawn a second install on the SAME vault while we hold transaction1.
+    // It must block (the lock is held by transaction1) — we time it out
+    // after 200ms and check it hasn't completed yet.
+    let archive_path = archive.archive_path.clone();
+    let vault_path = install_temp.path().to_path_buf();
+    let barrier = Arc::new(Barrier::new(2));
+    let barrier_clone = barrier.clone();
+    let handle = std::thread::spawn(move || {
+        barrier_clone.wait();
+        unpack_archive_staged(&archive_path, &vault_path, "0.1.0")
+    });
+
+    // Let the second-install thread reach the lock acquisition.
+    barrier.wait();
+    // Give it a generous head start to attempt the lock.
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    assert!(
+        !handle.is_finished(),
+        "second install completed before first transaction was consumed — lock not held"
+    );
+
+    // Roll back the first install; the second should now proceed.
+    let _ = manifest1;
+    transaction1.rollback();
+
+    // Second install should complete within a few seconds.
+    let start = std::time::Instant::now();
+    let result = handle.join().expect("second install thread");
+    assert!(
+        start.elapsed() < std::time::Duration::from_secs(10),
+        "second install took too long"
+    );
+    let (_, tx2) = result.expect("second install succeeded after rollback released lock");
+    tx2.commit();
+}
