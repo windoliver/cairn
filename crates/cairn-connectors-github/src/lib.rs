@@ -1,6 +1,20 @@
 //! GitHub connector adapter (issues, PRs, commits) for `cairn-connectors-core`.
 //!
 //! Issue #131, brief §19 v0.3 connector set, §9.1 source sensors.
+//!
+//! ## Live smoke tests
+//!
+//! The `tests/smoke_live_github.rs` file contains `#[ignore]`-gated tests that
+//! hit real `api.github.com`. Run them with a PAT:
+//!
+//! ```bash
+//! GITHUB_TOKEN=ghp_… \
+//!   cargo nextest run -p cairn-connectors-github \
+//!   --run-ignored only smoke_live_github --locked
+//! ```
+//!
+//! These tests verify that our DTOs and HTTP headers work against the real
+//! GitHub wire shape, not just our fixture JSON.
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
