@@ -7,6 +7,9 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
+    "build:sidecar": "node scripts/build-sidecar.mjs",
+    "pack": "npm run build && npm run build:sidecar && electron-builder --mac --dir",
+    "dist": "npm run build && npm run build:sidecar && electron-builder --mac",
     "electron": "electron .",
     "test": "vitest run"
   },
