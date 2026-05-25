@@ -7,7 +7,6 @@
 //! and the GUI displays a banner.
 
 use std::net::SocketAddr;
-use std::path::PathBuf;
 use std::process::ExitCode;
 
 use anyhow::Context;
@@ -42,17 +41,10 @@ pub fn subcommand() -> clap::Command {
                 .default_value("127.0.0.1")
                 .help("Bind address"),
         )
-        .arg(
-            clap::Arg::new("vault")
-                .long("vault")
-                .value_name("PATH")
-                .value_parser(clap::value_parser!(PathBuf))
-                .help(
-                    "Vault directory (currently informational — alpha \
-                     serves the fixture dataset; real-vault binding is \
-                     a follow-up issue)",
-                ),
-        )
+        // NB: `--vault` is supplied by the top-level `cairn` command as a
+        // global arg (see command.rs); we do not redeclare it here. clap
+        // panics on first access if the same arg name appears with a
+        // different `value_parser` at both levels.
 }
 
 /// Entry point. Returns an `ExitCode` so `main` can propagate.
@@ -65,7 +57,10 @@ pub fn run(matches: &ArgMatches) -> ExitCode {
     let port: u16 = *matches
         .get_one::<u16>("port")
         .expect("invariant: --port has a default_value");
-    let _vault: Option<PathBuf> = matches.get_one::<PathBuf>("vault").cloned();
+    // `--vault` is a global arg declared in command.rs as String; pick it
+    // up here so the alpha can log/print the requested vault path even
+    // though it's currently informational (fixture data is served).
+    let _vault: Option<String> = matches.get_one::<String>("vault").cloned();
 
     let runtime = match tokio::runtime::Builder::new_current_thread()
         .enable_all()

@@ -15,7 +15,6 @@
   },
   "dependencies": {
     "@vitejs/plugin-react": "^5.0.0",
-    "electron": "^38.0.0",
     "lucide-react": "^0.468.0",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
@@ -30,14 +29,9 @@
     "@types/node": "^22.0.0",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
+    "electron": "^38.0.0",
     "electron-builder": "^25.1.8",
     "jsdom": "^25.0.0",
     "vitest": "^2.1.0"
-  },
-  "build": {
-    "extends": null,
-    "directories": {
-      "buildResources": "scripts"
-    }
   }
 }

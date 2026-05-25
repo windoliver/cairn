@@ -33,4 +33,5 @@ crates/**/purpose.md
 
 # Electron desktop build outputs
 frontend/desktop-electron/dist/
+frontend/desktop-electron/release/
 frontend/desktop-electron/resources/bin/

@@ -14,14 +14,13 @@ Options:
           
           [default: 4000]
 
+      --vault <NAME_OR_PATH>
+          Active vault: name from registry or filesystem path (overrides CAIRN_VAULT)
+
       --host <HOST>
           Bind address
           
           [default: 127.0.0.1]
-
-      --vault <PATH>
-          Vault directory (currently informational — alpha serves the fixture dataset; real-vault
-          binding is a follow-up issue)
 
   -h, --help
           Print help (see a summary with '-h')
