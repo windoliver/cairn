@@ -1026,3 +1026,116 @@ async fn skill_contract_fails_when_frontmatter_close_is_not_a_delimiter_line() {
         "expected frontmatter error, got: {msg}"
     );
 }
+
+#[tokio::test]
+async fn e2e_smoke_runner_fails_when_trigger_phrase_does_not_match() {
+    // Round-11 regression: smoke must require trigger_phrase to actually
+    // resolve to the candidate. A phrase that doesn't match any of the
+    // candidate's resolver_triggers must fail.
+    let temp = TempDir::new().unwrap();
+    materialize_script(
+        temp.path(),
+        "deploy-hotfix",
+        "#!/usr/bin/env bash\necho deploy-hotfix\n",
+    );
+    let mut a = authored("deploy-hotfix");
+    a.smoke = json!({
+        "cases": [{"trigger_phrase": "completely unrelated phrase xyz", "expected_output": "deploy-hotfix\n"}]
+    });
+    let b = bundle("deploy-hotfix");
+    let ctx = GateRunContext {
+        vault_root: temp.path(),
+        candidate_id: "skc_test",
+        candidate_dir: temp.path().to_path_buf(),
+        bundle: &b,
+        authored: &a,
+        llm: None,
+        snapshot: &empty_snapshot(),
+    };
+    let result = E2eSmokeRunner.run(&ctx).await;
+    assert_eq!(result.status, SkillifyGateStatus::Failed);
+    assert!(
+        result
+            .message
+            .unwrap_or_default()
+            .contains("trigger_phrase"),
+        "expected trigger_phrase error"
+    );
+}
+
+#[tokio::test]
+async fn e2e_smoke_runner_fails_when_trigger_resolves_ambiguously() {
+    // If another live skill in the snapshot also matches the trigger
+    // phrase, the candidate must not promote.
+    let temp = TempDir::new().unwrap();
+    materialize_script(
+        temp.path(),
+        "deploy-hotfix",
+        "#!/usr/bin/env bash\necho deploy-hotfix\n",
+    );
+    let a = authored("deploy-hotfix");
+    let b = bundle("deploy-hotfix");
+    let snapshot = SkillLintSnapshot {
+        skills: vec![SkillLintSkill {
+            skill_id: "other-skill".to_owned(),
+            lane: "other.lane".to_owned(),
+            path: "skills/skill_other.md".to_owned(),
+            uses: None,
+            resolver_triggers: vec!["deploy hotfix".to_owned()], // collision
+            files_to: Some("wiki/other/".to_owned()),
+            gate_report_passed: true,
+            rollback_version_count: 1,
+            existing_paths: vec![],
+        }],
+    };
+    let ctx = GateRunContext {
+        vault_root: temp.path(),
+        candidate_id: "skc_test",
+        candidate_dir: temp.path().to_path_buf(),
+        bundle: &b,
+        authored: &a,
+        llm: None,
+        snapshot: &snapshot,
+    };
+    let result = E2eSmokeRunner.run(&ctx).await;
+    assert_eq!(result.status, SkillifyGateStatus::Failed);
+    assert!(
+        result.message.unwrap_or_default().contains("ambiguous"),
+        "expected ambiguous-resolution error"
+    );
+}
+
+#[tokio::test]
+async fn unit_test_runner_rejects_oversized_authored_timeout() {
+    // Round-11 regression: an LLM-authored timeout above MAX_CASE_TIMEOUT_MS
+    // must fail the gate rather than block the worker.
+    let temp = TempDir::new().unwrap();
+    materialize_script(
+        temp.path(),
+        "deploy-hotfix",
+        "#!/usr/bin/env bash\necho x\n",
+    );
+    let mut a = authored("deploy-hotfix");
+    a.unit_tests = json!({
+        "cases": [{"input": "", "expected_stdout": "x\n", "timeout_ms": 3_600_000_u64}]
+    });
+    let b = bundle("deploy-hotfix");
+    let ctx = GateRunContext {
+        vault_root: temp.path(),
+        candidate_id: "skc_test",
+        candidate_dir: temp.path().to_path_buf(),
+        bundle: &b,
+        authored: &a,
+        llm: None,
+        snapshot: &empty_snapshot(),
+    };
+    let result = UnitTestRunner.run(&ctx).await;
+    assert_eq!(result.status, SkillifyGateStatus::Failed);
+    assert!(
+        result
+            .message
+            .unwrap_or_default()
+            .contains("MAX_CASE_TIMEOUT_MS"),
+        "expected timeout-exceeded error"
+    );
+}

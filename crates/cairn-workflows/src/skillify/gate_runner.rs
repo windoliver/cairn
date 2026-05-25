@@ -431,10 +431,24 @@ impl GateRunner for UnitTestRunner {
                     timer.elapsed_ms(),
                 );
             };
-            let timeout_ms = case
+            // Clamp authored timeout to MAX_CASE_TIMEOUT_MS so an LLM can't
+            // set timeout_ms to effectively-unbounded values and tie up the
+            // worker. The cap is intentionally generous (60s) so legitimate
+            // cases pass; anything larger is rejected outright.
+            let raw_timeout = case
                 .get("timeout_ms")
                 .and_then(serde_json::Value::as_u64)
                 .unwrap_or(10_000);
+            if raw_timeout > MAX_CASE_TIMEOUT_MS {
+                return GateRunResult::failed(
+                    self.artifact_kind(),
+                    format!(
+                        "case {i}: timeout_ms {raw_timeout} exceeds MAX_CASE_TIMEOUT_MS ({MAX_CASE_TIMEOUT_MS})"
+                    ),
+                    timer.elapsed_ms(),
+                );
+            }
+            let timeout_ms = raw_timeout;
 
             match run_script(&script_path, input, timeout_ms, &[]).await {
                 Ok(stdout) if stdout == expected => {}
@@ -511,10 +525,20 @@ impl GateRunner for IntegrationTestRunner {
                     timer.elapsed_ms(),
                 );
             };
-            let timeout_ms = case
+            let raw_timeout = case
                 .get("timeout_ms")
                 .and_then(serde_json::Value::as_u64)
                 .unwrap_or(30_000);
+            if raw_timeout > MAX_CASE_TIMEOUT_MS {
+                return GateRunResult::failed(
+                    self.artifact_kind(),
+                    format!(
+                        "case {i}: timeout_ms {raw_timeout} exceeds MAX_CASE_TIMEOUT_MS ({MAX_CASE_TIMEOUT_MS})"
+                    ),
+                    timer.elapsed_ms(),
+                );
+            }
+            let timeout_ms = raw_timeout;
 
             match run_script(
                 &script_path,
@@ -996,11 +1020,80 @@ impl GateRunner for E2eSmokeRunner {
             .candidate_dir
             .join(format!("bundle/scripts/{}.sh", ctx.authored.slug));
 
+        // Round-11 hardening: smoke must exercise the full
+        // trigger → resolver → script path, not just run the script
+        // directly. For each case we:
+        //   1. require a non-empty `trigger_phrase`
+        //   2. run the same resolution algorithm the live resolver uses
+        //      (case-insensitive substring against the merged snapshot)
+        //   3. fail if no trigger matches OR if the matched skill is not
+        //      this candidate (collision with another vault skill)
+        //   4. only then run the script and compare expected_output
+        let candidate_triggers: Vec<String> = ctx
+            .authored
+            .resolver_triggers
+            .as_array()
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(serde_json::Value::as_str)
+                    .map(str::to_owned)
+                    .collect()
+            })
+            .unwrap_or_default();
+
         for (i, case) in cases.iter().enumerate() {
+            let trigger_phrase = case
+                .get("trigger_phrase")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("");
+            if trigger_phrase.is_empty() {
+                return GateRunResult::failed(
+                    self.artifact_kind(),
+                    format!("smoke case {i}: missing or empty trigger_phrase"),
+                    timer.elapsed_ms(),
+                );
+            }
             let expected = case
                 .get("expected_output")
                 .and_then(serde_json::Value::as_str)
                 .unwrap_or("");
+
+            // Resolve trigger_phrase against the merged (candidate +
+            // snapshot) skill set. The matched lane must be the
+            // candidate's lane or the smoke fails — proves the user-facing
+            // trigger actually routes to this skill.
+            let phrase_lower = trigger_phrase.to_lowercase();
+            let candidate_matches = candidate_triggers
+                .iter()
+                .any(|t| phrase_lower.contains(&t.to_lowercase()));
+            if !candidate_matches {
+                return GateRunResult::failed(
+                    self.artifact_kind(),
+                    format!(
+                        "smoke case {i}: trigger_phrase `{trigger_phrase}` matches none of the candidate's resolver_triggers"
+                    ),
+                    timer.elapsed_ms(),
+                );
+            }
+            // Check that no OTHER live skill in the snapshot would also
+            // resolve this phrase (resolution must be unambiguous).
+            for existing in &ctx.snapshot.skills {
+                if existing.lane == ctx.authored.lane {
+                    continue;
+                }
+                for existing_trigger in &existing.resolver_triggers {
+                    if phrase_lower.contains(&existing_trigger.to_lowercase()) {
+                        return GateRunResult::failed(
+                            self.artifact_kind(),
+                            format!(
+                                "smoke case {i}: trigger_phrase `{trigger_phrase}` also resolves to existing skill `{}` (lane `{}`); resolution is ambiguous",
+                                existing.skill_id, existing.lane
+                            ),
+                            timer.elapsed_ms(),
+                        );
+                    }
+                }
+            }
 
             match run_script(&script_path, "", 60_000, &[]).await {
                 Ok(stdout) if stdout == expected => {}
@@ -1081,6 +1174,18 @@ impl GateRunner for FilingRulesRunner {
     }
 }
 
+/// Hard upper bound for any per-case `timeout_ms` an LLM-authored test can
+/// request. Generous enough for legitimate gates (60s integration tests)
+/// but small enough that a malicious value can't tie up a worker for
+/// hours. Validated by each runner before calling [`run_script`].
+const MAX_CASE_TIMEOUT_MS: u64 = 60_000;
+
+/// Hard upper bound for stdout/stderr bytes captured from a gate script.
+/// Without this a script that writes gigabytes can OOM the worker before
+/// the timeout fires. 1 MiB per stream covers any realistic test output;
+/// anything larger fails the gate.
+const MAX_SCRIPT_OUTPUT_BYTES: usize = 1024 * 1024;
+
 /// Execute a script via subprocess with optional stdin and env vars.
 ///
 /// Containment (round 5 hardening — LLM-authored scripts must not run with
@@ -1099,6 +1204,10 @@ impl GateRunner for FilingRulesRunner {
 /// boundary. A motivated authored script can still exfiltrate via DNS,
 /// HTTP, or anything PATH-reachable. Full isolation (firejail/bubblewrap/
 /// nsjail) is tracked separately.
+#[allow(
+    clippy::too_many_lines,
+    reason = "linear subprocess lifecycle: sandbox setup, spawn, stdin write, capped reads, timeout, process-group kill. Splitting helpers obscures the ordering invariants."
+)]
 async fn run_script(
     script_path: &Path,
     input: &str,
@@ -1198,16 +1307,44 @@ async fn run_script(
                 drop(stdin); // EOF
             }
         };
-        let mut out = Vec::new();
-        let mut err = Vec::new();
-        let (_stdin, r_out, r_err, status) = tokio::join!(
-            stdin_task,
-            stdout.read_to_end(&mut out),
-            stderr.read_to_end(&mut err),
-            child.wait(),
-        );
-        r_out.map_err(|e| format!("stdout read: {e}"))?;
-        r_err.map_err(|e| format!("stderr read: {e}"))?;
+
+        // Capped reads — a script writing gigabytes mustn't OOM the worker
+        // before the outer timeout fires. `take(cap+1)` lets us detect
+        // overflow (returned bytes > cap means the script tried to write
+        // more than allowed).
+        let cap = MAX_SCRIPT_OUTPUT_BYTES as u64;
+        let stdout_fut = async {
+            let mut buf = Vec::with_capacity(8 * 1024);
+            let n = (&mut stdout)
+                .take(cap + 1)
+                .read_to_end(&mut buf)
+                .await
+                .map_err(|e| format!("stdout read: {e}"))?;
+            if n as u64 > cap {
+                return Err(format!(
+                    "stdout exceeded MAX_SCRIPT_OUTPUT_BYTES ({MAX_SCRIPT_OUTPUT_BYTES})"
+                ));
+            }
+            Ok::<_, String>(buf)
+        };
+        let stderr_fut = async {
+            let mut buf = Vec::with_capacity(8 * 1024);
+            let n = (&mut stderr)
+                .take(cap + 1)
+                .read_to_end(&mut buf)
+                .await
+                .map_err(|e| format!("stderr read: {e}"))?;
+            if n as u64 > cap {
+                return Err(format!(
+                    "stderr exceeded MAX_SCRIPT_OUTPUT_BYTES ({MAX_SCRIPT_OUTPUT_BYTES})"
+                ));
+            }
+            Ok::<_, String>(buf)
+        };
+        let (_stdin, r_out, r_err, status) =
+            tokio::join!(stdin_task, stdout_fut, stderr_fut, child.wait());
+        let out = r_out?;
+        let err = r_err?;
         let status = status.map_err(|e| format!("wait failed: {e}"))?;
         Ok::<_, String>((out, err, status))
     };

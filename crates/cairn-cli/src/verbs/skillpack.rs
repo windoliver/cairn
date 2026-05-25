@@ -142,6 +142,19 @@ fn run_install(args: &ArgMatches, explicit_vault: Option<&str>) -> ExitCode {
                 );
             }
             println!("vault:           {}", vault_root.display());
+            // The unpacker deliberately writes an "all gates Blocked"
+            // gate-report so the installed candidate is forced to re-gate
+            // locally rather than trust the archive's claimed status
+            // (round-3 integrity hardening). Surface this clearly so the
+            // operator knows the skill is NOT yet promotable.
+            println!();
+            println!("status:          installed but NOT promotable");
+            println!(
+                "                 each installed candidate's gate-report.json is reset\n\
+                 \x20                to all-Blocked; re-gate locally before any candidate\n\
+                 \x20                can be promoted. Skillify can re-author and re-run\n\
+                 \x20                gates by enqueueing the candidate's source records."
+            );
             ExitCode::SUCCESS
         }
         Err(e) => {
