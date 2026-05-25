@@ -60,9 +60,11 @@ pub fn subcommand() -> clap::Command {
 pub fn run(matches: &ArgMatches) -> ExitCode {
     let host: String = matches
         .get_one::<String>("host")
-        .cloned()
-        .unwrap_or_else(|| "127.0.0.1".to_string());
-    let port: u16 = matches.get_one::<u16>("port").copied().unwrap_or(4000);
+        .expect("invariant: --host has a default_value")
+        .clone();
+    let port: u16 = *matches
+        .get_one::<u16>("port")
+        .expect("invariant: --port has a default_value");
     let _vault: Option<PathBuf> = matches.get_one::<PathBuf>("vault").cloned();
 
     let runtime = match tokio::runtime::Builder::new_current_thread()
@@ -85,6 +87,7 @@ pub fn run(matches: &ArgMatches) -> ExitCode {
     }
 }
 
+/// Binds the listener, emits the sidecar discovery line, and runs until SIGTERM/SIGINT.
 async fn serve(host: String, port: u16) -> anyhow::Result<()> {
     use std::io::Write as _;
     tracing_subscriber::fmt()
