@@ -126,12 +126,12 @@ fn run_install(args: &ArgMatches, explicit_vault: Option<&str>) -> ExitCode {
     let vault_root = resolve_vault(explicit_vault);
     let cairn_version = env!("CARGO_PKG_VERSION");
 
-    match cairn_workflows::skillify::packer::unpack_archive(
+    match cairn_workflows::skillify::packer::unpack_archive_staged(
         archive_path,
         &vault_root,
         cairn_version,
     ) {
-        Ok(manifest) => {
+        Ok((manifest, transaction)) => {
             println!("installed pack:  {} v{}", manifest.name, manifest.version);
             println!("pack_id:         {}", manifest.pack_id);
             println!("skills installed:");
@@ -174,25 +174,25 @@ fn run_install(args: &ArgMatches, explicit_vault: Option<&str>) -> ExitCode {
                 let res = runtime.block_on(health.check(&entry.candidate_id));
                 match res {
                     Ok(report) => {
-                        // Round-16 hardening: with no LLM configured, the
-                        // LlmEvalRunner returns Blocked — that's expected
-                        // for unauthenticated CLI install, not a failure
-                        // the user can act on. Filter it out of the
-                        // promotability decision (but still surface the
-                        // raw regression list so operators can see what
-                        // ran). Other Blocked/Failed gates DO count.
-                        let actionable_regressions: Vec<&String> = report
-                            .regressions
-                            .iter()
-                            .filter(|r| r.as_str() != "llm_evals")
-                            .collect();
-                        if actionable_regressions.is_empty() {
-                            // Either fully healthy or only LLM eval is
-                            // blocked (which is fine without an LLM).
-                            let suffix = if report.regressions.is_empty() {
-                                ""
-                            } else {
+                        // Round-17: with the LlmEvalRunner now returning
+                        // Skipped (not Blocked) when no LLM is configured,
+                        // and HealthCheckRunner excluding Skipped from
+                        // regressions, the `regressions` list directly
+                        // represents actionable failures. Check the
+                        // persisted gate-report for an LLM Skipped entry
+                        // to show a helpful suffix.
+                        let llm_skipped = report.gate_report.gates.iter().any(|g| {
+                            g.name == "llm_evals"
+                                && matches!(
+                                    g.status,
+                                    cairn_core::pipeline::skillify::SkillifyGateStatus::Skipped
+                                )
+                        });
+                        if report.regressions.is_empty() {
+                            let suffix = if llm_skipped {
                                 " (LLM eval skipped — no provider)"
+                            } else {
+                                ""
                             };
                             println!("  - {} : promotable{suffix}", entry.candidate_id);
                         } else {
@@ -200,12 +200,8 @@ fn run_install(args: &ArgMatches, explicit_vault: Option<&str>) -> ExitCode {
                             println!(
                                 "  - {} : NOT promotable ({} gate(s) not passing: {})",
                                 entry.candidate_id,
-                                actionable_regressions.len(),
-                                actionable_regressions
-                                    .iter()
-                                    .map(|s| s.as_str())
-                                    .collect::<Vec<_>>()
-                                    .join(", "),
+                                report.regressions.len(),
+                                report.regressions.join(", "),
                             );
                         }
                     }
@@ -216,25 +212,27 @@ fn run_install(args: &ArgMatches, explicit_vault: Option<&str>) -> ExitCode {
                 }
             }
             if any_unhealthy {
+                // Round-17 hardening: roll back the swap so the vault
+                // returns to its pre-install state. Previously the
+                // backup of any pre-existing candidate was deleted
+                // immediately after the swap, so a re-gate failure
+                // would leave the operator with neither the old nor
+                // the new candidate. With InstallTransaction the
+                // backups are preserved until commit/rollback.
                 println!();
                 println!(
                     "warning: at least one installed candidate is NOT promotable.\n\
-                     The vault has been modified (archive bytes are durable on\n\
-                     disk) but no candidate that fails re-gate may be promoted.\n\
-                     Inspect each candidate's gate-report.json for details.\n\
-                     Note: some gates (LLM eval) are intentionally Blocked when\n\
-                     running install without an LLM provider configured —\n\
-                     enable LLM credentials and re-run install if you need them\n\
-                     to pass."
+                     Rolling back the install — vault returned to its pre-install\n\
+                     state. Inspect each candidate's gate-report.json for details\n\
+                     (the gate-report from the failed install is gone after\n\
+                     rollback; rebuild the pack with fixes if needed)."
                 );
-                // Round-15 hardening: any unhealthy candidate must surface
-                // a non-zero exit so automation does not treat partial
-                // installs as success. The vault changes are intentionally
-                // NOT rolled back — installed bytes remain on disk for
-                // operator inspection — but the exit code reflects the
-                // re-gate outcome.
+                transaction.rollback();
                 return ExitCode::from(1);
             }
+            // All candidates promotable: commit the transaction so the
+            // backups (if any) are removed.
+            transaction.commit();
             ExitCode::SUCCESS
         }
         Err(e) => {

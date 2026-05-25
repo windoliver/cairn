@@ -499,7 +499,11 @@ async fn llm_eval_runner_fails_when_judge_returns_fail() {
 }
 
 #[tokio::test]
-async fn llm_eval_runner_blocked_without_llm() {
+async fn llm_eval_runner_skipped_without_llm() {
+    // Round-17 behavior change: with no LLM provider configured, the
+    // runner returns Skipped (deliberate policy) rather than Blocked
+    // (couldn't run). ready_for_promotion() accepts Skipped so installs
+    // without LLM credentials produce promotable candidates.
     let temp = TempDir::new().unwrap();
     let a = authored("deploy-hotfix");
     let b = bundle("deploy-hotfix");
@@ -513,7 +517,7 @@ async fn llm_eval_runner_blocked_without_llm() {
         snapshot: &empty_snapshot(),
     };
     let result = LlmEvalRunner.run(&ctx).await;
-    assert_eq!(result.status, SkillifyGateStatus::Blocked);
+    assert_eq!(result.status, SkillifyGateStatus::Skipped);
 }
 
 // -- ResolverEvalRunner --

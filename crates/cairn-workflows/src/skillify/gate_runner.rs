@@ -505,6 +505,16 @@ impl GateRunner for UnitTestRunner {
                 timer.elapsed_ms(),
             );
         }
+        if cases.len() > MAX_CASES_PER_GATE {
+            return GateRunResult::failed(
+                self.artifact_kind(),
+                format!(
+                    "unit_tests cases count {} exceeds MAX_CASES_PER_GATE ({MAX_CASES_PER_GATE})",
+                    cases.len()
+                ),
+                timer.elapsed_ms(),
+            );
+        }
 
         let script_path = ctx
             .candidate_dir
@@ -599,6 +609,16 @@ impl GateRunner for IntegrationTestRunner {
                 timer.elapsed_ms(),
             );
         }
+        if cases.len() > MAX_CASES_PER_GATE {
+            return GateRunResult::failed(
+                self.artifact_kind(),
+                format!(
+                    "integration_tests cases count {} exceeds MAX_CASES_PER_GATE ({MAX_CASES_PER_GATE})",
+                    cases.len()
+                ),
+                timer.elapsed_ms(),
+            );
+        }
 
         let script_path = ctx
             .candidate_dir
@@ -679,11 +699,22 @@ impl GateRunner for LlmEvalRunner {
     )]
     async fn run(&self, ctx: &GateRunContext<'_>) -> GateRunResult {
         let timer = GateTimer::start();
+        // Round-17 hardening: when no LLM provider is configured (typical
+        // for CLI install), return `Skipped` rather than `Blocked`.
+        // `Skipped` is a deliberate policy choice ("we chose not to run
+        // this gate"), `Blocked` means "we couldn't run, retry later".
+        // The promotion-readiness predicate accepts Skipped specifically
+        // for this kind, so installs without an LLM configured produce
+        // a candidate that's actually promotable.
         let Some(llm) = ctx.llm else {
-            return GateRunResult::blocked(
-                self.artifact_kind(),
-                "LLM provider required for eval gate — gate blocked without LLM".to_owned(),
-            );
+            return GateRunResult {
+                kind: self.artifact_kind(),
+                status: SkillifyGateStatus::Skipped,
+                message: Some("LLM provider not configured — gate skipped by policy".to_owned()),
+                evidence_refs: Vec::new(),
+                duration_ms: timer.elapsed_ms(),
+                transient_error_detail: None,
+            };
         };
 
         let Some(rubric) = ctx
@@ -704,6 +735,16 @@ impl GateRunner for LlmEvalRunner {
                 self.artifact_kind(),
                 "llm_evals rubric array is empty — gate requires at least one rubric item"
                     .to_owned(),
+                timer.elapsed_ms(),
+            );
+        }
+        if rubric.len() > MAX_CASES_PER_GATE {
+            return GateRunResult::failed(
+                self.artifact_kind(),
+                format!(
+                    "llm_evals rubric count {} exceeds MAX_CASES_PER_GATE ({MAX_CASES_PER_GATE})",
+                    rubric.len()
+                ),
                 timer.elapsed_ms(),
             );
         }
@@ -909,6 +950,17 @@ impl GateRunner for ResolverEvalRunner {
             );
         };
 
+        if intents.len() > MAX_CASES_PER_GATE {
+            return GateRunResult::failed(
+                self.artifact_kind(),
+                format!(
+                    "resolver_eval intents count {} exceeds MAX_CASES_PER_GATE ({MAX_CASES_PER_GATE})",
+                    intents.len()
+                ),
+                timer.elapsed_ms(),
+            );
+        }
+
         let triggers: Vec<String> = ctx
             .authored
             .resolver_triggers
@@ -1103,6 +1155,10 @@ impl GateRunner for E2eSmokeRunner {
         SkillArtifactKind::E2eSmoke
     }
 
+    #[allow(
+        clippy::too_many_lines,
+        reason = "linear smoke flow: per-case trigger validation, resolver match against snapshot, script execution, output comparison. Splitting helpers obscures the resolution semantics."
+    )]
     async fn run(&self, ctx: &GateRunContext<'_>) -> GateRunResult {
         let timer = GateTimer::start();
         let Some(cases) = ctx
@@ -1122,6 +1178,16 @@ impl GateRunner for E2eSmokeRunner {
             return GateRunResult::failed(
                 self.artifact_kind(),
                 "smoke cases array is empty — gate requires at least one case".to_owned(),
+                timer.elapsed_ms(),
+            );
+        }
+        if cases.len() > MAX_CASES_PER_GATE {
+            return GateRunResult::failed(
+                self.artifact_kind(),
+                format!(
+                    "smoke cases count {} exceeds MAX_CASES_PER_GATE ({MAX_CASES_PER_GATE})",
+                    cases.len()
+                ),
                 timer.elapsed_ms(),
             );
         }
@@ -1295,6 +1361,12 @@ const MAX_CASE_TIMEOUT_MS: u64 = 60_000;
 /// the timeout fires. 1 MiB per stream covers any realistic test output;
 /// anything larger fails the gate.
 const MAX_SCRIPT_OUTPUT_BYTES: usize = 1024 * 1024;
+
+/// Hard upper bound for the number of cases/rubric items per gate
+/// artifact. Without this an LLM could ship 10k+ cases that pass JSON
+/// size limits but tie up a worker for hours through repeated executions.
+/// 100 covers any realistic test/eval set.
+const MAX_CASES_PER_GATE: usize = 100;
 
 /// Execute a script via subprocess with optional stdin and env vars.
 ///

@@ -84,7 +84,14 @@ impl HealthCheckRunner {
         let mut regressions = Vec::new();
 
         for result in &results {
-            if result.status != SkillifyGateStatus::Passed {
+            // Round-17 hardening: Skipped (gate deliberately not run by
+            // policy, e.g. LlmEvalRunner with no LLM configured) is not
+            // a regression. Promotion-readiness accepts Skipped. Only
+            // Failed/Blocked count as health regressions.
+            if !matches!(
+                result.status,
+                SkillifyGateStatus::Passed | SkillifyGateStatus::Skipped
+            ) {
                 regressions.push(result.kind.as_str().to_owned());
             }
             report.gates.push(result.clone().into_gate());

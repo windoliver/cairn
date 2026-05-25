@@ -41,14 +41,23 @@ pub struct SkillifyGateReport {
 }
 
 impl SkillifyGateReport {
-    /// Returns true when every required gate is present and all reported gates passed.
+    /// Returns true when every required gate is present and either passed
+    /// or was deliberately skipped by policy (status `Skipped`).
+    ///
+    /// `Skipped` is distinct from `Blocked`: `Blocked` means the gate
+    /// couldn't run (retry later); `Skipped` means the operator
+    /// configured the gate to not run (e.g. `LlmEvalRunner` skipping
+    /// itself when no LLM provider is configured). Promotion accepts
+    /// `Skipped`; it rejects `Blocked` / `Failed`.
     #[must_use]
     pub fn ready_for_promotion(&self) -> bool {
-        self.gates
+        self.gates.iter().all(|gate| {
+            matches!(
+                gate.status,
+                SkillifyGateStatus::Passed | SkillifyGateStatus::Skipped
+            )
+        }) && SkillArtifactKind::required()
             .iter()
-            .all(|gate| gate.status == SkillifyGateStatus::Passed)
-            && SkillArtifactKind::required()
-                .iter()
-                .all(|required| self.gates.iter().any(|gate| gate.name == required.as_str()))
+            .all(|required| self.gates.iter().any(|gate| gate.name == required.as_str()))
     }
 }

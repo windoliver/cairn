@@ -500,11 +500,11 @@ fn update_field(hasher: &mut Sha256, label: &str, value: &str) {
     clippy::too_many_lines,
     reason = "single linear flow: lock, extract, validate, per-artifact verify, atomic swap, rollback. Splitting would obscure the ordering invariants."
 )]
-pub fn unpack_archive(
+pub fn unpack_archive_staged(
     archive_path: &Path,
     vault_root: &Path,
     cairn_version: &str,
-) -> Result<SkillPackManifest, SkillPackBuildError> {
+) -> Result<(SkillPackManifest, InstallTransaction), SkillPackBuildError> {
     // Serialize concurrent installs against the same vault. Without this,
     // two installs operating on the same candidate id can interleave their
     // rename+rollback steps and silently delete each other's results.
@@ -777,14 +777,59 @@ pub fn unpack_archive(
         }
     }
 
-    // All swaps succeeded — remove backups (created entries have no backup).
-    for action in &swap_log {
-        if let SwapAction::Replaced { backup, .. } = action {
-            let _ = fs::remove_dir_all(backup);
+    // Round-17 hardening: return the swap log so the caller can roll
+    // back if post-install re-gate fails. Previously backups were deleted
+    // unconditionally here, which made install non-transactional through
+    // the CLI's re-gate step: a re-gate failure (e.g. trigger collision
+    // with existing vault skills) would leave the previous candidate
+    // permanently gone.
+    Ok((manifest, InstallTransaction { swap_log }))
+}
+
+/// In-flight install state returned by [`unpack_archive`]. The caller MUST
+/// call [`InstallTransaction::commit`] on success (deletes backups) or
+/// [`InstallTransaction::rollback`] on failure (restores previous candidate
+/// state). If neither is called (transaction dropped), backups remain on
+/// disk until manual cleanup — explicit commit/rollback avoids ambiguous
+/// vault state.
+#[must_use = "InstallTransaction must be committed or rolled back"]
+pub struct InstallTransaction {
+    swap_log: Vec<SwapAction>,
+}
+
+/// Backward-compatible wrapper: runs `unpack_archive_staged` then commits
+/// immediately. New callers should prefer the staged form so they can
+/// re-gate before committing.
+///
+/// # Errors
+/// Propagates errors from [`unpack_archive_staged`].
+pub fn unpack_archive(
+    archive_path: &Path,
+    vault_root: &Path,
+    cairn_version: &str,
+) -> Result<SkillPackManifest, SkillPackBuildError> {
+    let (manifest, tx) = unpack_archive_staged(archive_path, vault_root, cairn_version)?;
+    tx.commit();
+    Ok(manifest)
+}
+
+impl InstallTransaction {
+    /// Commit the install: delete all backups, leaving the new candidate
+    /// bytes in place.
+    pub fn commit(self) {
+        for action in &self.swap_log {
+            if let SwapAction::Replaced { backup, .. } = action {
+                let _ = fs::remove_dir_all(backup);
+            }
         }
     }
 
-    Ok(manifest)
+    /// Roll back the install: remove every newly-installed candidate dir
+    /// and restore replaced candidates from their backups. After rollback
+    /// the vault is in the state it was before [`unpack_archive`] ran.
+    pub fn rollback(self) {
+        rollback_install(&self.swap_log);
+    }
 }
 
 /// One install rename, recorded for rollback.
