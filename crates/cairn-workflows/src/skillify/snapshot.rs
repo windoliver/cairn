@@ -347,9 +347,7 @@ fn rel(vault_root: &Path, path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cairn_core::pipeline::skillify::{
-        SkillArtifactKind, SkillifyGate, SkillifyGateStatus,
-    };
+    use cairn_core::pipeline::skillify::{SkillArtifactKind, SkillifyGate, SkillifyGateStatus};
     use tempfile::TempDir;
 
     fn write_md(path: &Path, body: &str) {
@@ -525,7 +523,11 @@ mod tests {
         // gate present, all Blocked, no messages.
         write_gate_report(temp.path(), "skc_stub", false);
         let snap = build_vault_snapshot(temp.path(), None).unwrap();
-        assert_eq!(snap.skills.len(), 1, "in-flight stub marker must be visible");
+        assert_eq!(
+            snap.skills.len(),
+            1,
+            "in-flight stub marker must be visible"
+        );
     }
 
     #[test]
@@ -595,7 +597,10 @@ mod tests {
         std::fs::write(path, serde_json::to_vec_pretty(&report).unwrap()).unwrap();
 
         let snap = build_vault_snapshot(temp.path(), None).unwrap();
-        assert!(snap.skills.is_empty(), "gated-failed candidate must be excluded");
+        assert!(
+            snap.skills.is_empty(),
+            "gated-failed candidate must be excluded"
+        );
     }
 
     #[test]

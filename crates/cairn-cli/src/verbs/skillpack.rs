@@ -118,7 +118,10 @@ fn run_pack(args: &ArgMatches, explicit_vault: Option<&str>) -> ExitCode {
 // install
 // ---------------------------------------------------------------------------
 
-#[allow(clippy::too_many_lines, reason = "linear install flow: resolve, stage, re-gate per candidate, commit/rollback; splitting fragments would obscure the transactional sequence")]
+#[allow(
+    clippy::too_many_lines,
+    reason = "linear install flow: resolve, stage, re-gate per candidate, commit/rollback; splitting fragments would obscure the transactional sequence"
+)]
 fn run_install(args: &ArgMatches, explicit_vault: Option<&str>) -> ExitCode {
     let archive_path = args
         .get_one::<PathBuf>("path")

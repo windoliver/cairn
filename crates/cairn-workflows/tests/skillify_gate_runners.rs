@@ -744,15 +744,27 @@ async fn unit_test_runner_kills_descendant_on_timeout() {
         .parse()
         .expect("pid is int");
 
-    // Give the group-kill a moment to take effect.
-    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-
-    let status = std::process::Command::new("kill")
-        .args(["-0", &pid.to_string()])
-        .status()
-        .expect("kill -0");
+    // Poll for descendant death. SIGKILL is asynchronous and Linux CI
+    // runners can delay /proc state updates by tens to hundreds of ms.
+    // Up to 3s with 50ms backoff is generous but avoids spurious CI
+    // failures on slow runners while still catching real regressions
+    // (the test would otherwise wait the full sleep 30 if the kill
+    // never landed).
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    let mut alive = true;
+    while std::time::Instant::now() < deadline {
+        let status = std::process::Command::new("kill")
+            .args(["-0", &pid.to_string()])
+            .status()
+            .expect("kill -0");
+        if !status.success() {
+            alive = false;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
     assert!(
-        !status.success(),
+        !alive,
         "descendant PID {pid} should be dead after timeout but is still running"
     );
 }

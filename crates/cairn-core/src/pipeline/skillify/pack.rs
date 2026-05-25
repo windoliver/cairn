@@ -202,10 +202,10 @@ impl SkillPackManifest {
     }
 }
 
-/// Path-token validator matching the rules used by [`SkillSpecDraft`] and
-/// candidate id derivation. A token is safe iff it is non-empty, not `.` or
-/// `..`, contains no path separators, and consists only of ASCII
-/// alphanumerics, hyphens, and underscores.
+/// Path-token validator matching the rules used by
+/// [`super::spec::SkillSpecDraft`] and candidate id derivation. A token is
+/// safe iff it is non-empty, not `.` or `..`, contains no path separators,
+/// and consists only of ASCII alphanumerics, hyphens, and underscores.
 fn is_safe_path_token(value: &str) -> bool {
     !value.is_empty()
         && value != "."
