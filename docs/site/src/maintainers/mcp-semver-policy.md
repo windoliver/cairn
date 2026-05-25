@@ -43,16 +43,26 @@ NOT frozen under `cairn.mcp.v1` — each carries its own
 See [ADR 0004 §1–§2](https://github.com/windoliver/cairn/blob/main/docs/design/decisions/0004-mcp-v1-semver-freeze.md)
 for the exhaustive list.
 
-## Adding a capability (additive, no version bump — see wire caveat)
+## Adding a capability — reserve the identifier (additive); advertise it only when v1 clients can parse it
 
-**Wire caveat.** The generated `enum Capabilities` is a closed serde
-enum: an older v1 client built against the current schema will fail to
-deserialize a `status` response that includes a code it doesn't know.
-Adding a code to the registry is **contract-additive** but
-**release-coordinated** — operators on stale clients won't successfully
-discover capabilities until they upgrade. Plan the rollout with that
-in mind (announce in CHANGELOG; upgrade clients first when possible).
-Open-enum tolerance is a tracked v1.x compatibility improvement.
+**Wire constraint.** The generated `enum Capabilities` is a closed
+serde enum with no `#[serde(other)]` catch-all. An older v1 client
+built against the current schema will fail to deserialize a `status`
+response that contains a code it doesn't know.
+
+Implication:
+
+- **Reserving** a new code in `capabilities.json` (adding the
+  identifier without ever advertising it to v1 clients) is
+  contract-additive — the wire-compat snapshot is the only test that
+  flips. Recipe below.
+- **Advertising** the new code to v1 clients is **breaking under v1**
+  until the open-enum tolerance work (a tracked v1.x improvement)
+  ships. Either gate the new code behind a future phase + tolerant
+  clients, or route it through v2.
+
+This is the same rule for new `ErrorCode` and `ResponseTarget`
+variants: reserving is fine, emitting to v1 is not.
 
 1. Add the code identifier to
    `crates/cairn-idl/schema/capabilities/capabilities.json`.

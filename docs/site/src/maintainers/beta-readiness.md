@@ -107,11 +107,24 @@ are manual and listed at the end of the script output.
 ### 9. Capability sync (manual)
 
 Run `target/release/cairn status --json` and compare the `capabilities[]`
-array against the [capability matrix](../reference/capability-matrix.md) row
-for the target phase.
+array against the [capability matrix](../reference/capability-matrix.md).
+Compare against:
 
-**Pass:** the advertised set equals the matrix row exactly. No extras, no omissions.
-**Failure:** the runtime advertises a capability the matrix says shouldn't ship yet (or vice versa). Reconcile in `cairn-core::status::advertise` plus the matching `wiring::*_WIRED` constant per CLAUDE.md §4 invariant 6.
+- **Default-advertised at v0.1** bucket — always expected, every row.
+- **Phase-gated v0.2 / v0.3** buckets — only when the release ships
+  the matching phase (`status.contract_phase`).
+- **Non-default platform** rows — only those the operator intentionally
+  enabled (cfg / feature / OS).
+
+Do NOT compare against the **Deferred-wiring** bucket; those
+identifiers are reserved but not advertised by the runtime.
+
+**Pass:** the advertised set equals the union of the buckets above for
+the target phase + config. No extras, no omissions.
+**Failure:** the runtime advertises a capability the matrix doesn't
+expect at that phase (or vice versa). Reconcile in
+`cairn-core::status::advertise` plus the matching `wiring::*_WIRED`
+constant per CLAUDE.md §4 invariant 6.
 
 ### 10. Contract freeze verified (manual)
 

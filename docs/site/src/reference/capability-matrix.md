@@ -38,47 +38,87 @@ advertised in `cairn status`. Clients MUST inspect `status.capabilities`
 before issuing a mode; the runtime fails closed with `CapabilityUnavailable`
 on any un-advertised code (brief §8.0.a).
 
-> **Source of truth.** The actual capability registry is
-> `crates/cairn-idl/schema/capabilities/capabilities.json`. The table
-> below mirrors it row-for-row. If a code appears here, it exists in
-> the registry; if it doesn't appear in the registry, it doesn't
-> exist yet — pin against this table only for codes the registry
-> already names.
+> **Source of truth.** Buckets below mirror
+> `crates/cairn-core/tests/capability_matrix_v1.rs::EXPECTED_PHASE`.
+> Gate 9 in the [beta-readiness checklist](../maintainers/beta-readiness.md)
+> compares `cairn status --json` against the **Default-advertised**
+> bucket plus any **non-default platform** entries the operator
+> intentionally enabled — never against the deferred-wiring or
+> later-phase rows.
 
-| Capability code | Stability |
-|-----------------|-----------|
-| `cairn.mcp.v1.search.keyword` | frozen v1.0 |
-| `cairn.mcp.v1.search.semantic` | frozen v1.0 |
-| `cairn.mcp.v1.search.hybrid` | frozen v1.0 |
-| `cairn.mcp.v1.retrieve.record` | frozen v1.0 |
-| `cairn.mcp.v1.retrieve.session` | frozen v1.0 |
-| `cairn.mcp.v1.retrieve.turn` | frozen v1.0 |
-| `cairn.mcp.v1.retrieve.tool_call` | frozen v1.0 |
-| `cairn.mcp.v1.retrieve.folder` | frozen v1.0 |
-| `cairn.mcp.v1.retrieve.scope` | frozen v1.0 |
-| `cairn.mcp.v1.retrieve.profile` | frozen v1.0 |
-| `cairn.mcp.v1.forget.record` | frozen v1.0 |
-| `cairn.mcp.v1.forget.session` | frozen v1.0 |
-| `cairn.mcp.v1.forget.scope` | frozen v1.0 |
-| `cairn.mcp.v1.summarize.narrative` | frozen v1.0 |
-| `cairn.mcp.v1.policy_trace` | frozen v1.0 |
-| `cairn.mcp.v1.replay.challenge` | frozen v1.0 |
-| `cairn.mcp.v1.replay.sequence` | frozen v1.0 |
-| `cairn.mcp.v1.sensors.pre_compact` | frozen v1.0 |
-| `cairn.mcp.v1.extension.admin` | reserved v1 (dispatch deferred per `capability_matrix_v1::DEFERRED_AT_PHASE`) |
-| `cairn.mcp.v1.extension.aggregate` | independent (`cairn.aggregate.v1`) |
-| `cairn.mcp.v1.extension.coord` | independent (`cairn.coord.v1`) |
-| `cairn.mcp.v1.extension.federation` | independent (`cairn.federation.v1`) |
-| `cairn.mcp.v1.extension.sessiontree` | independent (`cairn.sessiontree.v1`) |
-| `cairn.workflows.v1.consolidation` | workflows namespace (independent) |
-| `cairn.workflows.v1.dream` | workflows namespace (independent) |
-| `cairn.workflows.v1.expiration` | workflows namespace (independent) |
-| `cairn.workflows.v1.evaluation` | workflows namespace (independent) |
-| `cairn.sensor.v1.screen.xcap` | sensors namespace (independent) |
-| `cairn.sensor.v1.screen.screenpipe` | sensors namespace (independent) |
-| `cairn.sensor.v1.screen.ocr.tesseract` | sensors namespace (independent) |
-| `cairn.sensor.v1.screen.ocr.vision` | sensors namespace (independent) |
-| `cairn.sensor.v1.screen.ocr.winrt` | sensors namespace (independent) |
+### Default-advertised at v0.1 (case A in `advertise()`)
+
+These are the codes `cairn status` emits on a default-P0 binary with
+full gates ON. Stability: frozen v1.0.
+
+| Capability code |
+|-----------------|
+| `cairn.mcp.v1.search.keyword` |
+| `cairn.mcp.v1.search.semantic` |
+| `cairn.mcp.v1.search.hybrid` |
+| `cairn.mcp.v1.retrieve.session` |
+| `cairn.mcp.v1.retrieve.turn` |
+| `cairn.mcp.v1.retrieve.tool_call` |
+| `cairn.mcp.v1.forget.record` |
+| `cairn.mcp.v1.policy_trace` |
+| `cairn.workflows.v1.consolidation` |
+| `cairn.workflows.v1.dream` |
+| `cairn.workflows.v1.expiration` |
+| `cairn.workflows.v1.evaluation` |
+| `cairn.sensor.v1.screen.xcap` |
+| `cairn.sensor.v1.screen.ocr.tesseract` |
+
+### Phase-gated under v0.2
+
+Advertised once the runtime reports `contract_phase: V0_2`. Stability:
+frozen v1.0 (identifier reserved at v0.1).
+
+| Capability code |
+|-----------------|
+| `cairn.mcp.v1.summarize.narrative` |
+| `cairn.mcp.v1.forget.session` |
+| `cairn.mcp.v1.extension.aggregate` |
+
+### Phase-gated under v0.3
+
+Advertised once the runtime reports `contract_phase: V0_3`. Stability:
+frozen v1.0 (identifier reserved at v0.1).
+
+| Capability code |
+|-----------------|
+| `cairn.mcp.v1.forget.scope` |
+| `cairn.mcp.v1.extension.federation` |
+| `cairn.mcp.v1.extension.sessiontree` |
+| `cairn.mcp.v1.extension.coord` |
+
+### Deferred wiring (reserved v1; not advertised today)
+
+Identifier is frozen — the name belongs to v1 and can't be reassigned.
+The dispatch path is not yet wired, so `advertise()` does **not** emit
+these codes; Gate 9 must not expect to see them.
+
+| Capability code |
+|-----------------|
+| `cairn.mcp.v1.retrieve.record` |
+| `cairn.mcp.v1.retrieve.folder` |
+| `cairn.mcp.v1.retrieve.scope` |
+| `cairn.mcp.v1.retrieve.profile` |
+| `cairn.mcp.v1.sensors.pre_compact` |
+| `cairn.mcp.v1.replay.sequence` |
+| `cairn.mcp.v1.replay.challenge` |
+| `cairn.mcp.v1.extension.admin` |
+| `cairn.sensor.v1.screen.ocr.vision` |
+
+### Non-default platform (cfg / feature / OS-gated)
+
+Advertised only when the operator opts in (config or build feature)
+and the host OS supports the producer. Stability: reserved v1; the
+sensors namespace itself is independent.
+
+| Capability code | Gated by |
+|-----------------|----------|
+| `cairn.sensor.v1.screen.screenpipe` | `--features screenpipe-runtime` + `sensors.screen.backend: screenpipe` |
+| `cairn.sensor.v1.screen.ocr.winrt` | Windows |
 
 Stability tiers and the freeze rules are governed by
 [ADR 0004 — `cairn.mcp.v1` semver freeze](https://github.com/windoliver/cairn/blob/main/docs/design/decisions/0004-mcp-v1-semver-freeze.md).

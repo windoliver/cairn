@@ -92,16 +92,26 @@ The following changes are **additive** and ship under `cairn.mcp.v1`:
   trigger).
 - New optional field on existing verb args. The field MUST be `Option<T>`
   in Rust with `#[serde(default)]` so older requests still deserialize.
-- New variant on a `#[non_exhaustive]` enum (error codes, `retrieve`
-  targets, capability codes). **Wire caveat**: Rust `#[non_exhaustive]`
-  protects API consumers from breakage on exhaustive matches but has
-  no effect on serde — the generated `enum ErrorCode`,
-  `enum ResponseTarget`, and `enum Capabilities` are all closed for
-  deserialization. Adding a variant is contract-additive (no v2 bump)
-  but advertising / emitting that variant to an older v1 client will
-  fail their deserializer until open-enum tolerance ships. Treat such
-  additions as release-coordinated rather than free; the same caveat
-  as the capability registry above applies.
+- **Reserving an identifier** in any closed v1 enum schema (a new
+  `oneOf` entry in `errors/error.json`, `capabilities/capabilities.json`,
+  a new `target` arm in `verbs/retrieve.json`). Reserving the string
+  prevents future reassignment under v1; this is what the wire-compat
+  snapshot enforces. Reserving is contract-additive (no v2 bump).
+
+The dual to "what's additive" is what *isn't* additive. **Emitting** a
+new closed-enum variant to v1 clients — advertising a new capability
+code in `status.capabilities`, returning a new `ErrorCode` from a
+verb, returning a new `target` from `retrieve` — is **breaking under
+v1** until the wire model grows tolerance. Rationale:
+`enum Capabilities` / `enum ErrorCode` / `enum ResponseTarget` are
+all generated `#[non_exhaustive]` but **closed for serde**, with no
+`#[serde(other)]` catch-all. Older v1 clients built against the
+current schema cannot deserialize a response that contains a new
+variant; semantically the server has shipped a breaking change even
+though `cairn.mcp.v1` is the contract version on the wire. Until the
+v1.x open-enum tolerance work lands (tracked as a separate v1.x
+compatibility improvement, not a v2 trigger), reserved identifiers
+must not be emitted on v1 connections.
 - New extension namespace (`cairn.<name>.v1`).
 - New tool description text, new examples, new docs — non-wire surface.
 - Bug-fixing the runtime decision in `cairn-core::status::advertise` so
@@ -169,10 +179,13 @@ The following changes are **breaking** and trigger a v2 cut:
 - Extensions MUST NOT define a verb ID already used by core or by another
   extension. Collisions are a contract bug; this ADR commits to a CI lint
   enforcing the rule when a second extension lands.
-- Extensions MAY ship inside the same Cairn release as core but advertise
-  their freeze status separately
-  (`status.extensions[].stability`: `stable` | `beta`). At v1.0, only
-  `cairn.admin.v1` is `stable`.
+- Each extension's freeze status (stable / beta / reserved) is tracked
+  in this ADR + the maintainer page + the per-namespace ADR (when one
+  exists). It is **not** carried on the wire under v1 — the v1
+  `status.extensions[]` schema is frozen (no `stability` property
+  exists; the schema is `additionalProperties: false`). Adding wire
+  stability would itself require either an open-map extension point
+  (`experimental["cairn.contracts"]` per §5.4) or v2.
 - An extension's breaking change does **not** trigger `cairn.mcp.v2`.
   It triggers `cairn.<name>.v2` on its own cadence.
 
