@@ -80,10 +80,35 @@ async function main() {
       vaultPath =
         registry.vaults.find((v) => v.id === registry.active)?.path ?? null;
     }
-    // If active points at a vanished id but the vaults list is non-empty,
-    // do NOT overwrite the registry (that would erase the user's index).
-    // Fall back to the first listed vault and persist the corrected active.
-    if (!vaultPath && registry.vaults.length > 0) {
+    // If active points at a vanished id with multiple vaults present, do
+    // NOT silently pick one — that could open the wrong vault and persist
+    // the choice. Ask the user explicitly.
+    if (!vaultPath && registry.vaults.length > 1) {
+      const labels = registry.vaults.map(
+        (v, i) => `${i + 1}. ${v.label || v.path}`,
+      );
+      const { response } = await dialog.showMessageBox({
+        type: "warning",
+        title: "Cairn vault selection needed",
+        message:
+          "The vault registry references a vault id that no longer exists. " +
+          "Pick which vault to open. Your registry will not be overwritten " +
+          "until you confirm.",
+        buttons: [...labels, "Quit"],
+        cancelId: labels.length,
+        defaultId: 0,
+      });
+      if (response === labels.length) {
+        app.exit(0);
+        return;
+      }
+      vaultPath = registry.vaults[response].path;
+      registry.active = registry.vaults[response].id;
+      await writeRegistry(REGISTRY_PATH, registry);
+    }
+    // Single-vault case: stale active is unambiguous, fall back without
+    // a dialog.
+    if (!vaultPath && registry.vaults.length === 1) {
       vaultPath = registry.vaults[0].path;
       registry.active = registry.vaults[0].id;
       await writeRegistry(REGISTRY_PATH, registry);

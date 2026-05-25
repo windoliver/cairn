@@ -22,5 +22,10 @@ Options:
           
           [default: 127.0.0.1]
 
+      --alpha-fixture
+          Acknowledge that the alpha serves canned fixture data regardless of --vault. Required when
+          --vault is set, so callers cannot silently mislead users about which vault is open.
+          Real-vault binding is a follow-up issue.
+
   -h, --help
           Print help (see a summary with '-h')

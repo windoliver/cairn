@@ -41,7 +41,18 @@ export async function spawnSidecar(opts) {
   try {
     child = spawn(
       opts.binary,
-      ["serve", "--port", String(opts.port ?? 4000), "--vault", opts.vault],
+      [
+        "serve",
+        "--port",
+        String(opts.port ?? 4000),
+        "--vault",
+        opts.vault,
+        // The alpha doesn't bind --vault to a real repository; serve refuses
+        // to start with --vault unless this ack flag is also set. main.mjs
+        // is the one place that knows it's launching the alpha desktop, so
+        // it's the right place to assert the acknowledgement.
+        "--alpha-fixture",
+      ],
       { stdio: ["ignore", "pipe", "pipe"] },
     );
   } catch (err) {
@@ -100,29 +111,44 @@ export async function spawnSidecar(opts) {
     throw err;
   }
 
+  // Single, persistent exit-observer attached BEFORE returning the handle.
+  // Without this, a child that exits in the window between the kill() guard
+  // check and the kill()-local "exit" listener registration would leave the
+  // kill() promise pending forever, hanging app shutdown.
+  let exited = child.exitCode !== null || child.signalCode !== null;
+  const exitPromise = new Promise((resolve) => {
+    if (exited) {
+      resolve();
+      return;
+    }
+    child.once("exit", () => {
+      exited = true;
+      resolve();
+    });
+  });
+
   /** @type {SidecarHandle} */
   const handle = {
     address,
-    exited: false,
+    get exited() {
+      return exited;
+    },
     async kill() {
-      if (this.exited) return;
-      child.kill("SIGTERM");
-      await new Promise((resolve) => {
-        const grace = setTimeout(() => {
-          try {
-            child.kill("SIGKILL");
-          } catch {}
-        }, 5000);
-        child.on("exit", () => {
-          clearTimeout(grace);
-          this.exited = true;
-          resolve();
-        });
-      });
+      if (exited) return;
+      try {
+        child.kill("SIGTERM");
+      } catch {}
+      const grace = setTimeout(() => {
+        try {
+          child.kill("SIGKILL");
+        } catch {}
+      }, 5000);
+      try {
+        await exitPromise;
+      } finally {
+        clearTimeout(grace);
+      }
     },
   };
-  child.on("exit", () => {
-    handle.exited = true;
-  });
   return handle;
 }

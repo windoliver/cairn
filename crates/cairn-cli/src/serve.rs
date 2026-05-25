@@ -41,6 +41,17 @@ pub fn subcommand() -> clap::Command {
                 .default_value("127.0.0.1")
                 .help("Bind address"),
         )
+        .arg(
+            clap::Arg::new("alpha-fixture")
+                .long("alpha-fixture")
+                .action(clap::ArgAction::SetTrue)
+                .help(
+                    "Acknowledge that the alpha serves canned fixture data \
+                     regardless of --vault. Required when --vault is set, \
+                     so callers cannot silently mislead users about which \
+                     vault is open. Real-vault binding is a follow-up issue.",
+                ),
+        )
         // NB: `--vault` is supplied by the top-level `cairn` command as a
         // global arg (see command.rs); we do not redeclare it here. clap
         // panics on first access if the same arg name appears with a
@@ -57,14 +68,27 @@ pub fn run(matches: &ArgMatches) -> ExitCode {
     let port: u16 = *matches
         .get_one::<u16>("port")
         .expect("invariant: --port has a default_value");
-    // `--vault` is a global arg declared in command.rs as String; pick it
-    // up here so the alpha can warn the user that fixture data is served
-    // regardless of the vault path (real-vault binding is a follow-up).
+    // `--vault` is a global arg declared in command.rs as String. The alpha
+    // does NOT bind to it — fixture data is served regardless. Require an
+    // explicit `--alpha-fixture` ack when `--vault` is passed so callers
+    // cannot mislead end users about which vault is open. Real-vault
+    // binding lands in a follow-up issue.
     let vault: Option<String> = matches.get_one::<String>("vault").cloned();
+    let alpha_fixture = matches.get_flag("alpha-fixture");
     if let Some(ref v) = vault {
+        if !alpha_fixture {
+            eprintln!(
+                "cairn serve: refusing to start. --vault {v} was supplied \
+                 but the alpha serves canned fixture data regardless of the \
+                 vault path. Re-run with --alpha-fixture to acknowledge \
+                 that the renderer will NOT see the contents of this vault, \
+                 or wait for the real-vault-binding follow-up issue."
+            );
+            return ExitCode::from(78); // EX_CONFIG
+        }
         eprintln!(
-            "cairn serve: --vault {v} accepted but ignored (alpha serves \
-             fixture data; vault binding lands in a follow-up issue)"
+            "cairn serve: --vault {v} accepted but ignored \
+             (alpha fixture mode; --alpha-fixture acknowledged)"
         );
     }
 
