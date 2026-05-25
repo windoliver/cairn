@@ -25,6 +25,7 @@
 
 # Reference
 
+- [Capability Matrix](reference/capability-matrix.md)
 - [Generated CLI Reference](reference/generated/cli.md)
   - [`cairn ingest`](reference/generated/commands/ingest.md)
   - [`cairn search`](reference/generated/commands/search.md)
