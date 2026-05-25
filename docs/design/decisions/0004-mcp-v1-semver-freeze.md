@@ -135,13 +135,29 @@ The following changes are **breaking** and trigger a v2 cut:
    v2 cutover.
 4. **Cut.** `cairn.mcp.v2` ships in a separate
    `crates/cairn-idl/schema-v2/` directory with its own manifest. The
-   v1 `status.contract` field stays a scalar `cairn.mcp.v1` (mutating it
-   would itself be breaking per §4). v2 negotiation rides on an additive
-   `supported_contracts: ["cairn.mcp.v1", "cairn.mcp.v2"]` field added
-   to the `status` response — older v1 clients ignore it per §3.
+   v1 `status.contract` field stays a scalar `cairn.mcp.v1` and the v1
+   `prelude/status.json` schema (`additionalProperties: false`) stays
+   exactly as-is — mutating it or adding a new property would itself
+   be breaking per §4 (the current `StatusResponse` is also generated
+   with `#[serde(deny_unknown_fields)]`, so the schema and Rust agree).
+
+   v2 negotiation rides on the **MCP `serverCapabilities.experimental`
+   map**, which the MCP spec explicitly reserves for vendor
+   extensions and which Cairn already uses for
+   `experimental["cairn.status"]` (see `crates/cairn-mcp/src/handler.rs`).
+   v2-capable servers add a new sibling key
+   `experimental["cairn.contracts"] = { "supported": ["cairn.mcp.v1", "cairn.mcp.v2"], "default": "cairn.mcp.v1" }`.
+   v1 clients only read `experimental["cairn.status"]`; they ignore the
+   new key per the MCP spec's open-map semantics. This is the only
+   truly wire-additive negotiation path against the closed v1
+   `StatusResponse` schema.
+
    `cairn mcp` dispatches v1 vs v2 verbs by the inbound envelope's
    `contract` value; clients that wish to negotiate to v2 pin the
-   contract on every envelope they send.
+   contract on every envelope they send. Alternative: a separate
+   `cairn mcp --contract v2` invocation that v2-only clients connect
+   to directly, never sharing a process with v1 — also wire-additive
+   because v1 clients simply don't connect to that endpoint.
 5. **Retire.** After the deprecation window plus one full minor release
    past v2 cutover, `cairn.mcp.v1` retirement ships as a separate major
    Cairn release.
