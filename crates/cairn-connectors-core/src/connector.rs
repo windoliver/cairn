@@ -80,6 +80,7 @@ impl PollContext {
 }
 
 /// Per-call context handed to [`Connector::ingest_webhook`].
+#[non_exhaustive]
 pub struct WebhookContext {
     /// Credentials for the connector's OAuth scope (placeholder until T9).
     pub credentials: Arc<CredentialHandle>,
