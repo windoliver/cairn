@@ -10,16 +10,16 @@ use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use cairn_connectors_core::{
-    ConnectorRegistry, CredentialStore, InMemoryCredentialStore, PipelineEmit,
-};
 use cairn_connectors_core::error::ConnectorError;
 use cairn_connectors_core::fixture::AcceptAllConsent;
 use cairn_connectors_core::manifest::ConnectorManifest;
+use cairn_connectors_core::{
+    ConnectorRegistry, CredentialStore, InMemoryCredentialStore, PipelineEmit,
+};
 use cairn_connectors_github::GitHubConnector;
 use cairn_core::contract::connector_consent::ConsentGrant;
-use cairn_core::domain::capture::CaptureEvent;
 use cairn_core::domain::Identity;
+use cairn_core::domain::capture::CaptureEvent;
 use tempfile::tempdir;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -114,8 +114,7 @@ async fn registry_poll_dispatches_events_to_pipeline_emit() {
     Mock::given(method("GET"))
         .and(path("/repos/o/r/issues"))
         .respond_with(
-            ResponseTemplate::new(200)
-                .set_body_string(include_str!("fixtures/issues_page_1.json")),
+            ResponseTemplate::new(200).set_body_string(include_str!("fixtures/issues_page_1.json")),
         )
         .mount(&server)
         .await;
@@ -123,12 +122,23 @@ async fn registry_poll_dispatches_events_to_pipeline_emit() {
     Mock::given(method("GET"))
         .and(path("/repos/o/r/pulls"))
         .respond_with(
-            ResponseTemplate::new(200)
-                .set_body_string(include_str!("fixtures/prs_page_1.json")),
+            ResponseTemplate::new(200).set_body_string(include_str!("fixtures/prs_page_1.json")),
         )
         .mount(&server)
         .await;
 
+    // Fix 4: `CommitsResource` now calls `GET /repos/{o}/{r}` when `cursor.branch`
+    // is `None` (first poll) to discover the default branch.  Mount the endpoint
+    // so the mock server does not return 404.
+    Mock::given(method("GET"))
+        .and(path("/repos/o/r"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "id": 1,
+            "default_branch": "main",
+            "full_name": "o/r"
+        })))
+        .mount(&server)
+        .await;
     Mock::given(method("GET"))
         .and(path("/repos/o/r/commits"))
         .respond_with(

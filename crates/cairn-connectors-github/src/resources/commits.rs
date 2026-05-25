@@ -17,6 +17,27 @@ use crate::resources::{GhResource, Repo, ResourcePoll};
 
 pub(crate) struct CommitsResource;
 
+/// Minimal response shape for `GET /repos/{owner}/{name}`.
+///
+/// Only `default_branch` is needed; other fields are silently ignored by serde
+/// because this struct does not use `#[serde(deny_unknown_fields)]`.
+#[derive(Debug, Deserialize)]
+struct RepoMetaDto {
+    default_branch: String,
+}
+
+/// Fetch the default branch name from the GitHub repository metadata.
+///
+/// Called once per poll cycle when `sub_cursor.branch` is `None` (i.e. on
+/// the very first poll for a repository, or when the cursor has been reset).
+/// The result is stored in the returned cursor so subsequent polls re-use it
+/// without making an extra API call.
+async fn fetch_default_branch(client: &GhClient, repo: &Repo) -> Result<String, GhError> {
+    let path = format!("/repos/{}/{}", repo.owner, repo.name);
+    let meta: RepoMetaDto = client.get_json(&path, &[]).await?;
+    Ok(meta.default_branch)
+}
+
 #[derive(Debug, Deserialize)]
 struct CommitDto {
     sha: String,
@@ -84,10 +105,20 @@ impl GhResource for CommitsResource {
         budget: u32,
     ) -> Result<ResourcePoll, GhError> {
         let per_page: u32 = 50.min(budget);
-        let branch = sub_cursor
-            .branch
-            .clone()
-            .unwrap_or_else(|| "main".to_string());
+        // Fix 4: discover the default branch from the repository metadata
+        // instead of hard-coding "main".  For repositories using "master" or
+        // any other default, hard-coding "main" would cause every commit poll
+        // to fail — and because `GitHubConnector::poll` returns `Err`
+        // immediately on any resource error, that would discard events already
+        // fetched for issues and PRs in the same tick.
+        //
+        // We only call the `/repos/{o}/{r}` endpoint when `branch` is not yet
+        // recorded in the cursor (i.e. on the first poll or after a cursor
+        // reset).  Subsequent ticks re-use the cached value from the cursor.
+        let branch = match sub_cursor.branch.clone() {
+            Some(b) => b,
+            None => fetch_default_branch(client, repo).await?,
+        };
         let mut query: Vec<(&str, String)> =
             vec![("sha", branch.clone()), ("per_page", per_page.to_string())];
         if let Some(since) = sub_cursor.since {
@@ -238,6 +269,14 @@ fn push_commit_to_event(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use cairn_connectors_core::CredentialHandle;
+    use wiremock::matchers::{method, path, query_param};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    fn pat_handle(token: &str) -> CredentialHandle {
+        let env = serde_json::json!({"kind": "pat", "token": token});
+        CredentialHandle::from_bytes(env.to_string().into_bytes())
+    }
 
     #[test]
     fn webhook_push_emits_one_event_per_commit() {
@@ -267,5 +306,76 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    /// Fix 4: when `cursor.branch` is `None`, the resource must call
+    /// `GET /repos/{o}/{r}` to discover the default branch and use it for the
+    /// commit query, rather than falling back to the hard-coded `"main"`.
+    #[tokio::test]
+    async fn discovers_default_branch_from_repo_meta() {
+        let server = MockServer::start().await;
+
+        // Mount: GET /repos/o/r → {"default_branch": "master", ...}
+        Mock::given(method("GET"))
+            .and(path("/repos/o/r"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": 1,
+                "default_branch": "master",
+                "full_name": "o/r"
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        // Mount: GET /repos/o/r/commits?sha=master → fixture commits.
+        Mock::given(method("GET"))
+            .and(path("/repos/o/r/commits"))
+            .and(query_param("sha", "master"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                {
+                    "sha": "deadbeef",
+                    "commit": {
+                        "author": {
+                            "name": "Alice",
+                            "email": "a@x.com",
+                            "date": "2026-05-24T08:00:00Z"
+                        },
+                        "committer": {
+                            "name": "Alice",
+                            "email": "a@x.com",
+                            "date": "2026-05-24T08:00:00Z"
+                        },
+                        "message": "init"
+                    },
+                    "author": {"login": "alice"},
+                    "html_url": "https://github.com/o/r/commit/deadbeef"
+                }
+            ])))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let auth = std::sync::Arc::new(
+            crate::auth::GitHubAuth::from_handle(&pat_handle("tok")).expect("auth"),
+        );
+        let client = GhClient::new(auth, url::Url::parse(&server.uri()).unwrap());
+        let repo = Repo {
+            owner: "o".into(),
+            name: "r".into(),
+        };
+        // cursor.branch = None → should trigger repo-meta fetch.
+        let sub = ResourceCursor::default();
+        let result = CommitsResource
+            .poll(&client, &repo, &sub, 50)
+            .await
+            .expect("poll succeeds");
+
+        // The returned cursor must record the discovered branch.
+        assert_eq!(
+            result.next_cursor.branch.as_deref(),
+            Some("master"),
+            "cursor must cache the discovered default branch"
+        );
+        assert_eq!(result.events.len(), 1, "one commit event emitted");
     }
 }

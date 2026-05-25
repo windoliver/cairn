@@ -29,6 +29,18 @@ async fn full_poll_emits_events_from_all_resources() {
         .respond_with(ResponseTemplate::new(200).set_body_string(prs_body))
         .mount(&server)
         .await;
+    // Fix 4: `CommitsResource` now calls `GET /repos/{o}/{r}` when `cursor.branch`
+    // is `None` (first poll) to discover the default branch.  Mount the endpoint
+    // so the mock server does not return 404.
+    Mock::given(method("GET"))
+        .and(path("/repos/o/r"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "id": 1,
+            "default_branch": "main",
+            "full_name": "o/r"
+        })))
+        .mount(&server)
+        .await;
     Mock::given(method("GET"))
         .and(path("/repos/o/r/commits"))
         .respond_with(ResponseTemplate::new(200).set_body_string(commits_body))
