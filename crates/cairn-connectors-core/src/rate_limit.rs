@@ -295,7 +295,7 @@ impl ByteRateLimit {
         let mut map = self
             .inner
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
 
         let bucket = map
             .get_mut(scope)
