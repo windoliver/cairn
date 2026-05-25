@@ -145,6 +145,25 @@ pub struct WebhookBlock {
     pub signature_header: String,
     /// MIME types accepted by the webhook endpoint.
     pub allowed_mimes: Vec<String>,
+    /// Optional HTTP header carrying a provider-assigned delivery identifier.
+    ///
+    /// # Finding V — delivery-id header for replay deduplication
+    ///
+    /// The default replay key is `(connector_name, HMAC_body_MAC_hex)`. Two
+    /// legitimate deliveries with identical bodies (e.g. heartbeat pings) hash
+    /// to the same MAC and the second is silently rejected as a duplicate.
+    ///
+    /// When this field is set (e.g. `"X-GitHub-Delivery"`, `"Idempotency-Key"`),
+    /// the framework instead uses `(connector_name, delivery_id_value)` as the
+    /// replay key, where `delivery_id_value` is the value of this header. If
+    /// the header is absent from a request the framework returns 400 Bad Request.
+    ///
+    /// HMAC verification is unchanged; this field only controls the replay-map
+    /// key.
+    ///
+    /// When `None` (the default), the existing body-MAC keying is used.
+    #[serde(default)]
+    pub delivery_id_header: Option<String>,
 }
 
 /// Poll scheduling parameters.

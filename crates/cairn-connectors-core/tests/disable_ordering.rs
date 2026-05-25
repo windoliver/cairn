@@ -810,3 +810,169 @@ async fn disable_revokes_when_journal_healthy() {
 
     reg.shutdown().await;
 }
+
+// ---------------------------------------------------------------------------
+// Finding T — Disabling intermediate state + retryable revoke
+// ---------------------------------------------------------------------------
+
+/// A consent journal where `revoke` fails on the first call and succeeds on
+/// subsequent calls.
+///
+/// Used to test Finding T: the `disable` call must return `Err` on the first
+/// attempt (state = Disabling) and `Ok` on the second attempt (state =
+/// Disabled) once the journal recovers.
+#[derive(Default)]
+struct FirstFailRevokeConsent {
+    revoke_calls: std::sync::atomic::AtomicUsize,
+}
+
+#[async_trait]
+impl ConnectorConsentJournal for FirstFailRevokeConsent {
+    async fn put_grant(&self, grant: ConsentGrant) -> Result<ConsentGrantId, String> {
+        Ok(ConsentGrantId::new(format!(
+            "gnt:{}:first-fail-revoke",
+            grant.connector
+        )))
+    }
+
+    async fn lookup(
+        &self,
+        _connector: &str,
+        _scope_key: &str,
+    ) -> Result<ConnectorConsentLookup, String> {
+        Ok(ConnectorConsentLookup::Granted)
+    }
+
+    async fn revoke(&self, _id: &ConsentGrantId) -> Result<(), String> {
+        let call = self
+            .revoke_calls
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if call == 0 {
+            Err("simulated first revoke failure (Finding T test)".to_owned())
+        } else {
+            Ok(())
+        }
+    }
+}
+
+/// `disable` must preserve the `grant_id` in `Disabling` state so that a
+/// second `disable` call can retry the consent-journal revoke without
+/// losing track of which grant to revoke.
+///
+/// Finding T fix: `Enabled → Disabling → Disabled` transition. If `revoke`
+/// fails the state stays `Disabling`; the next `disable` call skips the
+/// task-stop steps (already done) and retries only the revoke.
+///
+/// - First `disable`: returns `Err` (revoke failed); state = Disabling.
+/// - `poll_now` after first disable must fail (connector not Enabled).
+/// - Second `disable`: returns `Ok` (revoke succeeded); state = Disabled.
+#[tokio::test]
+async fn disable_retries_after_revoke_failure() {
+    let counter = Arc::new(CountingEmit::default());
+    let tmp = tempfile::tempdir().expect("tempdir");
+
+    let mut reg = ConnectorRegistry::builder()
+        .credentials(Arc::new(InMemoryCredentialStore::default()))
+        .consent(Arc::new(FirstFailRevokeConsent::default()))
+        .emit(counter.clone() as Arc<dyn PipelineEmit>)
+        .spool_root(tmp.path().to_path_buf())
+        .build();
+
+    reg.register(DPollConnector::new())
+        .expect("register must succeed");
+    reg.enable("dpoll", dpoll_grant())
+        .await
+        .expect("enable must succeed (put_grant always succeeds)");
+
+    // Drive one successful poll to confirm the connector is working.
+    reg.poll_now("dpoll")
+        .await
+        .expect("poll_now must succeed while enabled");
+    assert_eq!(
+        counter.0.load(Ordering::SeqCst),
+        1,
+        "expected 1 emit before first disable",
+    );
+
+    // First disable: revoke fails → Err, state = Disabling.
+    let first_err = reg
+        .disable("dpoll")
+        .await
+        .expect_err("first disable must fail because revoke fails");
+    assert!(
+        matches!(first_err, ConnectorError::Fatal(_)),
+        "expected Fatal wrapping the revoke error, got {first_err:?}",
+    );
+
+    // The connector is now Disabling — poll_now must reject (not Enabled).
+    let poll_err = reg
+        .poll_now("dpoll")
+        .await
+        .expect_err("poll_now must fail after first disable (Disabling state)");
+    assert!(
+        matches!(poll_err, ConnectorError::Fatal(_)),
+        "expected Fatal from Disabling state check, got {poll_err:?}",
+    );
+    assert_eq!(
+        counter.0.load(Ordering::SeqCst),
+        1,
+        "emit count must not grow after first disable",
+    );
+
+    // Second disable: revoke succeeds → Ok, state = Disabled.
+    reg.disable("dpoll")
+        .await
+        .expect("second disable must succeed (revoke now succeeds)");
+
+    // Connector is now fully Disabled. Attempting poll_now must still fail.
+    let poll_err2 = reg
+        .poll_now("dpoll")
+        .await
+        .expect_err("poll_now must fail after second disable (Disabled state)");
+    assert!(
+        matches!(poll_err2, ConnectorError::Fatal(_)),
+        "expected Fatal from Disabled state, got {poll_err2:?}",
+    );
+
+    reg.shutdown().await;
+}
+
+/// Calling `disable` twice on an already-fully-disabled connector must be
+/// idempotent: both calls return `Ok`.
+///
+/// Finding T fix: `disable` on a `Disabled` connector is a no-op. This
+/// prevents double-revoke and makes the API safe to call multiple times.
+#[tokio::test]
+async fn disable_on_disabled_connector_is_idempotent() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+
+    let mut reg = ConnectorRegistry::builder()
+        .credentials(Arc::new(InMemoryCredentialStore::default()))
+        .consent(Arc::new(AcceptAllConsent::default()))
+        .emit(Arc::new(CountingEmit::default()) as Arc<dyn PipelineEmit>)
+        .spool_root(tmp.path().to_path_buf())
+        .build();
+
+    reg.register(DPollConnector::new())
+        .expect("register must succeed");
+    reg.enable("dpoll", dpoll_grant())
+        .await
+        .expect("enable must succeed");
+
+    // First disable — normal path, revoke succeeds, state → Disabled.
+    reg.disable("dpoll")
+        .await
+        .expect("first disable must succeed");
+
+    // Second disable — connector is Disabled; must be idempotent (no-op Ok).
+    reg.disable("dpoll")
+        .await
+        .expect("second disable on already-Disabled connector must succeed (idempotent)");
+
+    // Third disable — same; still no-op Ok.
+    reg.disable("dpoll")
+        .await
+        .expect("third disable on already-Disabled connector must succeed (idempotent)");
+
+    reg.shutdown().await;
+}

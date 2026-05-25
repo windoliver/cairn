@@ -62,6 +62,20 @@ const WEBHOOK_SECRET: &[u8] = b"shh";
 /// Signature header name declared in the fixture connector manifest.
 const SIG_HEADER: &str = "X-Fixture-Signature";
 
+/// Delivery-id header declared in the fixture connector manifest (Finding V).
+const DELIVERY_ID_HEADER: &str = "X-Fixture-Delivery";
+
+/// Generate a unique delivery ID per request using a process-local counter.
+///
+/// Each call returns a distinct value of the form `"dlv-<n>"`, where `<n>` is
+/// a monotonically increasing integer. This is cheaper than a ULID and
+/// sufficient for test uniqueness.
+fn unique_delivery_id() -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    format!("dlv-{}", COUNTER.fetch_add(1, Ordering::Relaxed))
+}
+
 /// Provision the webhook secret for the `fixture` connector in `store`.
 async fn provision_secret(store: &InMemoryCredentialStore) {
     store
@@ -108,6 +122,7 @@ async fn webhook_post_emits_external_event() {
         .uri("/webhooks/fixture")
         .header("content-type", "application/json")
         .header(SIG_HEADER, &sig)
+        .header(DELIVERY_ID_HEADER, unique_delivery_id())
         .body(Body::from(body.clone()))
         .expect("request must build");
 
@@ -171,11 +186,15 @@ async fn webhook_post_rejects_bad_signature() {
     // Tampered signature — compute HMAC over the WRONG secret.
     let bad_sig = hex_hmac_sha256(b"wrong-secret", body.as_bytes());
 
+    // Bad-sig requests are rejected at HMAC verification before the delivery-id
+    // check — no need to add the delivery-id header, but we include it for
+    // symmetry and to confirm it has no effect on the rejection.
     let req = Request::builder()
         .method(Method::POST)
         .uri("/webhooks/fixture")
         .header("content-type", "application/json")
         .header(SIG_HEADER, &bad_sig)
+        .header(DELIVERY_ID_HEADER, unique_delivery_id())
         .body(Body::from(body))
         .expect("request must build");
 
@@ -281,6 +300,7 @@ async fn webhook_post_rejects_missing_credential() {
         .uri("/webhooks/fixture")
         .header("content-type", "application/json")
         .header(SIG_HEADER, &sig)
+        .header(DELIVERY_ID_HEADER, unique_delivery_id())
         .body(Body::from(body.as_slice()))
         .expect("request must build");
 
@@ -341,6 +361,9 @@ async fn replay_returns_conflict() {
 
     let body = serde_json::json!({"replay": "test"}).to_string();
     let sig = hex_hmac_sha256(WEBHOOK_SECRET, body.as_bytes());
+    // Both requests use the SAME delivery-id so the replay guard fires on the
+    // second request (Finding V: replay is keyed by delivery-id when declared).
+    let same_delivery_id = "dlv-replay-test-001";
 
     // First delivery — must succeed with 204.
     let req1 = Request::builder()
@@ -348,6 +371,7 @@ async fn replay_returns_conflict() {
         .uri("/webhooks/fixture")
         .header("content-type", "application/json")
         .header(SIG_HEADER, &sig)
+        .header(DELIVERY_ID_HEADER, same_delivery_id)
         .body(Body::from(body.clone()))
         .expect("request 1 must build");
 
@@ -362,12 +386,13 @@ async fn replay_returns_conflict() {
         "first delivery of a valid webhook must return 204",
     );
 
-    // Second delivery with the EXACT same signature — must return 409 Conflict.
+    // Second delivery with the EXACT same delivery-id — must return 409 Conflict.
     let req2 = Request::builder()
         .method(Method::POST)
         .uri("/webhooks/fixture")
         .header("content-type", "application/json")
         .header(SIG_HEADER, &sig)
+        .header(DELIVERY_ID_HEADER, same_delivery_id)
         .body(Body::from(body.clone()))
         .expect("request 2 must build");
 
@@ -453,6 +478,10 @@ async fn failed_processing_does_not_lock_signature() {
 
     let body = serde_json::json!({"finding": "L"}).to_string();
     let sig = hex_hmac_sha256(WEBHOOK_SECRET, body.as_bytes());
+    // Both req1 and req2 use the same delivery-id: the point of this test is
+    // that after a failed emit the delivery-id is NOT locked (Pending entry is
+    // removed), so the second registry accepts the same delivery-id.
+    let delivery_id = "dlv-finding-l-001";
 
     // First request: processing fails (emit error). Must NOT return 204.
     let req1 = Request::builder()
@@ -460,6 +489,7 @@ async fn failed_processing_does_not_lock_signature() {
         .uri("/webhooks/fixture")
         .header("content-type", "application/json")
         .header(SIG_HEADER, &sig)
+        .header(DELIVERY_ID_HEADER, delivery_id)
         .body(Body::from(body.clone()))
         .expect("request must build");
 
@@ -508,6 +538,7 @@ async fn failed_processing_does_not_lock_signature() {
         .uri("/webhooks/fixture")
         .header("content-type", "application/json")
         .header(SIG_HEADER, &sig)
+        .header(DELIVERY_ID_HEADER, delivery_id)
         .body(Body::from(body))
         .expect("request must build");
 
@@ -516,7 +547,7 @@ async fn failed_processing_does_not_lock_signature() {
     assert_eq!(
         resp2.status(),
         StatusCode::NO_CONTENT,
-        "retry with same signature must succeed (204) when signature was not locked on first failure",
+        "retry with same delivery-id must succeed (204) when delivery-id was not locked on first failure",
     );
 
     {
@@ -577,6 +608,8 @@ async fn concurrent_duplicate_deliveries_one_succeeds() {
 
     let body = serde_json::json!({"concurrent": "dedup"}).to_string();
     let sig = hex_hmac_sha256(WEBHOOK_SECRET, body.as_bytes());
+    // Both tasks use the same delivery-id to be considered duplicates (Finding V).
+    let concurrent_delivery_id = "dlv-concurrent-dedup-001".to_owned();
 
     // Spawn two tasks posting the identical signed request simultaneously.
     // `axum::Router` is `Clone` — both tasks get their own clone of the router
@@ -587,12 +620,14 @@ async fn concurrent_duplicate_deliveries_one_succeeds() {
     let router1 = router.clone();
     let body1 = body.clone();
     let sig1 = sig.clone();
+    let did1 = concurrent_delivery_id.clone();
     tokio::spawn(async move {
         let req = Request::builder()
             .method(Method::POST)
             .uri("/webhooks/fixture")
             .header("content-type", "application/json")
             .header(SIG_HEADER, &sig1)
+            .header(DELIVERY_ID_HEADER, &did1)
             .body(Body::from(body1))
             .expect("request 1 must build");
         let resp = router1.oneshot(req).await.expect("router must respond");
@@ -602,12 +637,14 @@ async fn concurrent_duplicate_deliveries_one_succeeds() {
     let router2 = router.clone();
     let body2 = body.clone();
     let sig2 = sig.clone();
+    let did2 = concurrent_delivery_id.clone();
     tokio::spawn(async move {
         let req = Request::builder()
             .method(Method::POST)
             .uri("/webhooks/fixture")
             .header("content-type", "application/json")
             .header(SIG_HEADER, &sig2)
+            .header(DELIVERY_ID_HEADER, &did2)
             .body(Body::from(body2))
             .expect("request 2 must build");
         let resp = router2.oneshot(req).await.expect("router must respond");
@@ -683,6 +720,166 @@ async fn registry_webhook_route_absent_for_disabled_connector() {
         StatusCode::NOT_FOUND,
         "disabled connector must not have a webhook route (expected 404)"
     );
+
+    reg.shutdown().await;
+}
+
+// ---------------------------------------------------------------------------
+// Finding V — delivery-id header for replay deduplication
+// ---------------------------------------------------------------------------
+
+/// Two webhook deliveries with identical bodies but distinct `X-Fixture-Delivery`
+/// headers must both succeed with 204 (Finding V).
+///
+/// Before the fix, the replay key was derived from the body MAC (HMAC-SHA256),
+/// so two deliveries with the same body were always considered duplicates — the
+/// second returned 409 even though it was a legitimate, distinct event.
+///
+/// With Finding V, the replay key is `(connector_name, delivery_id)`. Two
+/// requests with the same body but different delivery IDs are distinct.
+#[tokio::test]
+async fn identical_bodies_with_distinct_delivery_ids_both_succeed() {
+    let capturer = Arc::new(Capturer::default());
+    let creds = Arc::new(InMemoryCredentialStore::default());
+    provision_secret(&creds).await;
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let mut reg = ConnectorRegistry::builder()
+        .credentials(
+            Arc::clone(&creds) as Arc<dyn cairn_connectors_core::credential::CredentialStore>
+        )
+        .consent(Arc::new(AcceptAllConsent::default()))
+        .emit(capturer.clone() as Arc<dyn PipelineEmit>)
+        .spool_root(tmp.path().to_path_buf())
+        .build();
+
+    reg.register(FixtureConnector::with_default_manifest())
+        .expect("register must succeed");
+    reg.enable("fixture", default_grant())
+        .await
+        .expect("enable must succeed");
+
+    let router = reg.webhook_router();
+
+    // Same body for both requests — this used to cause a false-positive 409.
+    let body = serde_json::json!({"event": "heartbeat"}).to_string();
+    let sig = hex_hmac_sha256(WEBHOOK_SECRET, body.as_bytes());
+
+    // First request — unique delivery-id #1.
+    let req1 = Request::builder()
+        .method(Method::POST)
+        .uri("/webhooks/fixture")
+        .header("content-type", "application/json")
+        .header(SIG_HEADER, &sig)
+        .header(DELIVERY_ID_HEADER, "dlv-heartbeat-001")
+        .body(Body::from(body.clone()))
+        .expect("request 1 must build");
+
+    let resp1 = router
+        .clone()
+        .oneshot(req1)
+        .await
+        .expect("router must respond to first request");
+    assert_eq!(
+        resp1.status(),
+        StatusCode::NO_CONTENT,
+        "first heartbeat delivery must return 204 (Finding V)",
+    );
+
+    // Second request — identical body, but distinct delivery-id #2.
+    let req2 = Request::builder()
+        .method(Method::POST)
+        .uri("/webhooks/fixture")
+        .header("content-type", "application/json")
+        .header(SIG_HEADER, &sig)
+        .header(DELIVERY_ID_HEADER, "dlv-heartbeat-002")
+        .body(Body::from(body))
+        .expect("request 2 must build");
+
+    let resp2 = router
+        .clone()
+        .oneshot(req2)
+        .await
+        .expect("router must respond to second request");
+    assert_eq!(
+        resp2.status(),
+        StatusCode::NO_CONTENT,
+        "second heartbeat delivery with distinct delivery-id must also return 204 \
+         (Finding V — identical bodies must not collide when delivery-id differs)",
+    );
+
+    // Both events must have been emitted.
+    {
+        let events = capturer.0.lock().expect("mutex unpoisoned");
+        assert_eq!(
+            events.len(),
+            2,
+            "both heartbeat deliveries must be emitted (distinct delivery-ids); \
+             got {events:?}",
+        );
+    }
+
+    reg.shutdown().await;
+}
+
+/// A request that is missing the configured `X-Fixture-Delivery` header must
+/// return 400 Bad Request (Finding V).
+///
+/// When `delivery_id_header` is declared in the manifest, providers MUST
+/// include it. An absent header is a provider error, not an auth failure, so
+/// 400 is the correct status.
+#[tokio::test]
+async fn missing_delivery_id_header_returns_400() {
+    let capturer = Arc::new(Capturer::default());
+    let creds = Arc::new(InMemoryCredentialStore::default());
+    provision_secret(&creds).await;
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let mut reg = ConnectorRegistry::builder()
+        .credentials(
+            Arc::clone(&creds) as Arc<dyn cairn_connectors_core::credential::CredentialStore>
+        )
+        .consent(Arc::new(AcceptAllConsent::default()))
+        .emit(capturer.clone() as Arc<dyn PipelineEmit>)
+        .spool_root(tmp.path().to_path_buf())
+        .build();
+
+    reg.register(FixtureConnector::with_default_manifest())
+        .expect("register must succeed");
+    reg.enable("fixture", default_grant())
+        .await
+        .expect("enable must succeed");
+
+    let router = reg.webhook_router();
+
+    let body = serde_json::json!({"event": "missing-delivery-id"}).to_string();
+    let sig = hex_hmac_sha256(WEBHOOK_SECRET, body.as_bytes());
+
+    // Request is missing the X-Fixture-Delivery header.
+    let req = Request::builder()
+        .method(Method::POST)
+        .uri("/webhooks/fixture")
+        .header("content-type", "application/json")
+        .header(SIG_HEADER, &sig)
+        // Intentionally omit DELIVERY_ID_HEADER.
+        .body(Body::from(body))
+        .expect("request must build");
+
+    let resp = router.oneshot(req).await.expect("router must respond");
+    assert_eq!(
+        resp.status(),
+        StatusCode::BAD_REQUEST,
+        "missing X-Fixture-Delivery header must return 400 Bad Request (Finding V)",
+    );
+
+    {
+        let events = capturer.0.lock().expect("mutex unpoisoned");
+        assert_eq!(
+            events.len(),
+            0,
+            "no events must be emitted when the delivery-id header is missing",
+        );
+    }
 
     reg.shutdown().await;
 }

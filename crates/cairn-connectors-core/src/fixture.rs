@@ -263,6 +263,7 @@ pattern = "*"
 "signature.algorithm" = "hmac-sha256"
 "signature.header" = "X-Fixture-Signature"
 allowed_mimes = ["application/json"]
+delivery_id_header = "X-Fixture-Delivery"
 
 [poll]
 cursor_kind = "opaque-string"

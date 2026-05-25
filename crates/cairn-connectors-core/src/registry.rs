@@ -59,10 +59,39 @@ use crate::webhook::{WebhookRequest, verify_hmac_sha256};
 /// Lifecycle state of one registered connector.
 ///
 /// Stored behind an [`ArcSwap`] so transitions are lock-free.
+///
+/// # Finding T — retryable disable via `Disabling`
+///
+/// Directly jumping from `Enabled → Disabled` loses the `grant_id` if the
+/// consent-journal `revoke` call fails after the state flip. A later `disable`
+/// call finds `Disabled` with no `grant_id` to revoke — the stale grant is
+/// permanently left in the journal.
+///
+/// The fix introduces `Disabling { grant_id }` as an intermediate state:
+/// 1. `disable` extracts the `grant_id` and sets the state to `Disabling`.
+/// 2. The poll task is cancelled and awaited.
+/// 3. `revoke` is attempted. On success: state → `Disabled`. On failure:
+///    state stays `Disabling` and `Err` is returned to the caller.
+/// 4. A subsequent `disable` call sees `Disabling`, reads the saved
+///    `grant_id`, and retries only the `revoke` step — the task is already
+///    stopped.
+///
+/// `process_event` treats `Disabling` the same as `Disabled` (step 8
+/// re-check and step 1 initial check both reject events).
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 enum ConnectorState {
     /// Connector is registered but not yet enabled; no consent grant exists.
     Disabled,
+    /// `disable` is in progress or partially failed.
+    ///
+    /// The poll task has been stopped, but the consent-journal `revoke` has
+    /// not yet succeeded. The `grant_id` is preserved so the revoke can be
+    /// retried by a subsequent `disable` call.
+    Disabling {
+        /// Id of the consent grant that must be revoked to finish the disable.
+        grant_id: ConsentGrantId,
+    },
     /// Connector is enabled and has a live consent grant.
     Enabled {
         /// Full consent grant stored at enable-time. Used to verify
@@ -134,6 +163,11 @@ struct WebhookEntryState {
     /// HTTP header name that carries the HMAC-SHA256 signature, from
     /// `manifest.webhook.signature_header`.
     signature_header: String,
+    /// Optional HTTP header that carries a provider-assigned delivery identifier
+    /// (Finding V). When `Some`, the replay key is `(connector_name, delivery_id)`
+    /// rather than `(connector_name, body_MAC_hex)`. When `None`, the body-MAC
+    /// keying is used (backwards-compatible default).
+    delivery_id_header: Option<String>,
 }
 
 /// Maximum number of `(connector_name, signature_id)` pairs held in the
@@ -393,10 +427,21 @@ impl ConnectorRegistry {
             .ok_or_else(|| ConnectorError::fatal_msg(format!("unknown connector {name}")))?;
 
         // Reject double-enable: spawning a second task would leak the first.
-        if matches!(**entry.state.load(), ConnectorState::Enabled { .. }) {
-            return Err(ConnectorError::fatal_msg(format!(
-                "connector {name} is already enabled; call disable() first"
-            )));
+        // Also reject `Disabling`: the consent-journal revoke is still pending;
+        // the caller must complete the disable before re-enabling.
+        match **entry.state.load() {
+            ConnectorState::Enabled { .. } => {
+                return Err(ConnectorError::fatal_msg(format!(
+                    "connector {name} is already enabled; call disable() first"
+                )));
+            }
+            ConnectorState::Disabling { .. } => {
+                return Err(ConnectorError::fatal_msg(format!(
+                    "connector {name} is in Disabling state; \
+                     retry disable() to complete consent-journal revoke before re-enabling"
+                )));
+            }
+            ConnectorState::Disabled => {}
         }
 
         let grant_id = self
@@ -548,22 +593,34 @@ impl ConnectorRegistry {
 
     /// Disable a connector: stop the poll task, then revoke its consent grant.
     ///
-    /// # Ordering guarantee (Finding F)
+    /// # Ordering guarantee (Finding F + Finding T)
     ///
     /// The steps are intentionally ordered so that the local poll task is
-    /// stopped **before** the consent journal is contacted:
+    /// stopped **before** the consent journal is contacted.  An intermediate
+    /// [`Disabling`][ConnectorState::Disabling] state is used so that a failed
+    /// `revoke` can be retried without losing the `grant_id`:
     ///
-    /// 1. Capture the current `grant_id` (if any) from the entry state.
-    /// 2. Flip the entry state to [`Disabled`][ConnectorState::Disabled].
+    /// 1. Read the current state.
+    ///    - `Disabled` → no-op, return `Ok` (idempotent).
+    ///    - `Disabling { grant_id }` → the poll task is already stopped; skip
+    ///      to step 5 (retry the `revoke`).
+    ///    - `Enabled { grant_id, .. }` → continue with steps 2–5.
+    /// 2. Extract the `grant_id` and set state to
+    ///    [`Disabling { grant_id }`][ConnectorState::Disabling] so in-flight
+    ///    `process_event` calls see a non-`Enabled` state immediately.
     /// 3. Cancel the per-entry [`CancellationToken`] so the poll task exits at
     ///    its next `select!` branch.
     /// 4. Await the [`JoinHandle`] — the task has actually exited.
-    /// 5. Call [`ConnectorConsentJournal::revoke`] — if this returns an error,
-    ///    surface it to the caller, but the local stop has already succeeded.
+    /// 5. Call [`ConnectorConsentJournal::revoke`].
+    ///    - On success: set state to [`Disabled`][ConnectorState::Disabled] and
+    ///      return `Ok`.
+    ///    - On failure: **leave state as `Disabling`** (the `grant_id` is
+    ///      preserved) and return `Err`. The caller can call `disable` again to
+    ///      retry only the `revoke` step — the task will not be stopped twice.
     ///
     /// This ordering means an operator who calls `disable` on a misbehaving
     /// connector is guaranteed that the task stops even if the consent journal
-    /// is temporarily unavailable. The revoke error is surfaced so the caller
+    /// is temporarily unavailable.  The revoke error is surfaced so the caller
     /// knows the journal entry was not cleaned up and can retry.
     ///
     /// After this call returns (whether `Ok` or `Err` from revoke), no further
@@ -575,50 +632,65 @@ impl ConnectorRegistry {
     /// - The connector name is not registered.
     /// - The poll task panicked (`JoinError`).
     /// - The consent journal fails to revoke the grant (surfaced after the
-    ///   local stop has succeeded).
+    ///   local stop has succeeded; state remains `Disabling` so the call can
+    ///   be retried).
     pub async fn disable(&mut self, name: &str) -> Result<(), ConnectorError> {
         let entry = self
             .entries
             .get_mut(name)
             .ok_or_else(|| ConnectorError::fatal_msg(format!("unknown connector {name}")))?;
 
-        // Step 1: capture the grant_id before mutating state.
+        // Step 1: read the current state and decide what to do.
         let grant_id = match (**entry.state.load()).clone() {
-            ConnectorState::Enabled { grant_id, .. } => Some(grant_id),
-            ConnectorState::Disabled => None,
+            // Already fully disabled — idempotent no-op.
+            ConnectorState::Disabled => return Ok(()),
+            // Partially disabled (revoke failed last time): poll task is already
+            // stopped; skip the cancel/await steps and retry the revoke.
+            ConnectorState::Disabling { grant_id } => grant_id,
+            // Enabled → begin the disable sequence.
+            ConnectorState::Enabled { grant_id, .. } => {
+                // Step 2: transition to Disabling so in-flight process_event
+                // calls see a non-Enabled state and abort before emit.
+                entry.state.store(Arc::new(ConnectorState::Disabling {
+                    grant_id: grant_id.clone(),
+                }));
+
+                // Steps 3 + 4: cancel the per-entry poll task and await its exit.
+                if let Some(token) = entry.poll_token.take() {
+                    token.cancel();
+                }
+                if let Some(handle) = entry.poll_handle.take() {
+                    handle.await.map_err(|e| {
+                        ConnectorError::fatal_msg(format!(
+                            "poll task for {name} panicked during disable: {e}"
+                        ))
+                    })?;
+                }
+
+                grant_id
+            }
         };
-
-        // Step 2: flip state to Disabled immediately so in-flight process_event
-        // calls see the new state and the poll task stops accepting new work.
-        entry.state.store(Arc::new(ConnectorState::Disabled));
-
-        // Steps 3 + 4: cancel the per-entry poll task and await its exit.
-        // This ensures the task has truly stopped before we return — no
-        // further upstream calls can be in flight after this point.
-        if let Some(token) = entry.poll_token.take() {
-            token.cancel();
-        }
-        if let Some(handle) = entry.poll_handle.take() {
-            // A JoinError here means the task panicked — treat as Fatal.
-            handle.await.map_err(|e| {
-                ConnectorError::fatal_msg(format!(
-                    "poll task for {name} panicked during disable: {e}"
-                ))
-            })?;
-        }
 
         // Step 5: revoke the consent grant in the journal. This happens after
         // the local stop so a journal outage never leaves the task running.
-        // Surface any revoke error to the caller so they know the journal
-        // entry was not cleaned up.
-        if let Some(gid) = grant_id {
-            self.consent
-                .revoke(&gid)
-                .await
-                .map_err(ConnectorError::fatal_msg)?;
+        // On success: advance state to Disabled. On failure: leave state as
+        // Disabling so the caller can retry by calling disable() again.
+        match self.consent.revoke(&grant_id).await {
+            Ok(()) => {
+                // Re-acquire the entry (borrow checker) and advance to Disabled.
+                let entry = self
+                    .entries
+                    .get_mut(name)
+                    .expect("invariant: entry must exist — we checked above");
+                entry.state.store(Arc::new(ConnectorState::Disabled));
+                Ok(())
+            }
+            Err(e) => {
+                // Surface the revoke error; state stays Disabling so the
+                // grant_id is preserved for a retry.
+                Err(ConnectorError::fatal_msg(e))
+            }
         }
-
-        Ok(())
     }
 
     /// Build the composed `axum::Router` for all currently-enabled webhook
@@ -668,6 +740,12 @@ impl ConnectorRegistry {
                     byte_limit: Arc::clone(&entry.byte_limit),
                     max_body_bytes: entry.connector.manifest().payload.max_bytes_parsed,
                     signature_header: entry.connector.manifest().webhook.signature_header.clone(),
+                    delivery_id_header: entry
+                        .connector
+                        .manifest()
+                        .webhook
+                        .delivery_id_header
+                        .clone(),
                 },
             );
         }
@@ -1118,12 +1196,19 @@ async fn process_event(
     // 1. Fail fast if the connector is not currently enabled.
     //    We read from the shared ArcSwap (not a stale snapshot) so a
     //    concurrent `disable()` call is visible immediately.
+    //    Both `Disabled` and `Disabling` reject event processing — the
+    //    connector is not in a state where it should emit events.
     let current_state = (**state.load()).clone();
     let grant = match current_state {
-        ConnectorState::Disabled => {
+        ConnectorState::Disabled | ConnectorState::Disabling { .. } => {
             return Err(ConnectorError::fatal_msg(format!(
-                "connector {} is Disabled; cannot process events",
-                event.connector
+                "connector {} is not Enabled (state: {}); cannot process events",
+                event.connector,
+                match current_state {
+                    ConnectorState::Disabled => "Disabled",
+                    ConnectorState::Disabling { .. } => "Disabling",
+                    ConnectorState::Enabled { .. } => "Enabled",
+                }
             )));
         }
         ConnectorState::Enabled { grant, .. } => grant,
@@ -1218,8 +1303,20 @@ async fn process_event(
     //    left an orphaned file on disk. Moving the reservation before the spool
     //    write closes that gap.
     //
+    //    # Finding U — aggregate budget by connector, not by scope
+    //
+    //    The item-rate bucket and daily byte bucket are keyed by the connector
+    //    name, NOT the scope_key. Using the scope_key meant a connector with a
+    //    wildcard scope declaration (`project:*`) could emit N×cap items/bytes
+    //    by using N different scope values — each scope got its own fresh bucket
+    //    with full capacity.
+    //
+    //    Correct model: one bucket per connector for items (hourly), one for
+    //    bytes (daily). The `ensure_scope` call below uses `connector.name()`
+    //    as the bucket key. Per-scope sub-limits are a future refinement (#131).
+    //
     //    Reserve/release pattern:
-    //    - `ensure_scope` lazily registers the per-scope bucket.
+    //    - `ensure_scope` lazily registers the per-connector bucket.
     //    - `try_reserve` atomically deducts one token. Over-budget events are
     //      rejected here — no spool write, no emit.
     //    - If `emit` succeeds the reservation is implicitly committed.
@@ -1227,8 +1324,9 @@ async fn process_event(
     //      the spool file (if already written) is deleted so the event can be
     //      retried on the next tick without permanently reducing budget or
     //      accumulating orphan files.
-    rate_limit.ensure_scope(&scope_key);
-    rate_limit.try_reserve(&scope_key, 1)?;
+    let rate_bucket_key = connector.name();
+    rate_limit.ensure_scope(rate_bucket_key);
+    rate_limit.try_reserve(rate_bucket_key, 1)?;
 
     // 5. Redact PII before the event crosses any boundary (brief §5.2 + §14).
     //    Use the manifest's max_depth limit for the JSON walker.
@@ -1239,7 +1337,7 @@ async fn process_event(
     {
         Ok(r) => r,
         Err(e) => {
-            rate_limit.refund(&scope_key, 1);
+            rate_limit.refund(rate_bucket_key, 1);
             return Err(e);
         }
     };
@@ -1261,11 +1359,11 @@ async fn process_event(
     // apply the path-component sanitiser here as a second line of defence
     // immediately before interpolating both values into the spool path.
     if let Err(e) = sanitize_path_component(event_id) {
-        rate_limit.refund(&scope_key, 1);
+        rate_limit.refund(rate_bucket_key, 1);
         return Err(e);
     }
     if let Err(e) = sanitize_path_component(connector_name) {
-        rate_limit.refund(&scope_key, 1);
+        rate_limit.refund(rate_bucket_key, 1);
         return Err(e);
     }
 
@@ -1274,7 +1372,7 @@ async fn process_event(
     let (bytes, ext) = match payload_to_bytes(&redacted.event.payload) {
         Ok(v) => v,
         Err(e) => {
-            rate_limit.refund(&scope_key, 1);
+            rate_limit.refund(rate_bucket_key, 1);
             return Err(e);
         }
     };
@@ -1290,19 +1388,24 @@ async fn process_event(
     // file and the vault reference.
     let spool_relative = format!("connector/{connector_name}/{event_id}_{hash_short}.{ext}");
 
-    // 6a. Reserve daily byte budget BEFORE writing to spool (Finding R).
+    // 6a. Reserve daily byte budget BEFORE writing to spool (Finding R +
+    //     Finding U).
     //
     //     The byte count is the length of the post-redaction wire bytes that
     //     will be written to spool. Reserving before the write ensures that an
     //     over-day-cap event is rejected without creating a spool file.
     //
+    //     Finding U: the byte bucket is keyed by `rate_bucket_key` (connector
+    //     name) rather than `scope_key`. This makes the daily cap a global
+    //     per-connector limit, not a per-scope limit.
+    //
     //     Reserve/release: on any subsequent failure (spool, build, emit), call
     //     `byte_limit.refund` to restore the reserved bytes so the event can be
     //     retried on the next tick without permanently consuming day budget.
     let bytes_count = bytes.len() as u64;
-    byte_limit.ensure_scope(&scope_key);
-    if let Err(e) = byte_limit.try_reserve(&scope_key, bytes_count) {
-        rate_limit.refund(&scope_key, 1);
+    byte_limit.ensure_scope(rate_bucket_key);
+    if let Err(e) = byte_limit.try_reserve(rate_bucket_key, bytes_count) {
+        rate_limit.refund(rate_bucket_key, 1);
         return Err(e);
     }
 
@@ -1310,18 +1413,16 @@ async fn process_event(
     //
     //     `spool_bytes_to_tmp` writes to `<final>.{pid}.{seq}.tmp` and returns
     //     both the tmp path and the intended final path. The rename from tmp to
-    //     final happens only AFTER emit succeeds (step 9). On any failure between
-    //     here and the successful emit, we delete only the tmp — never the final
-    //     path, which may have been committed by a prior successful attempt for
-    //     the same content-addressed event_id.
+    //     final happens BEFORE emit (Finding S fix). On any failure between
+    //     here and the successful emit, we refund reservations.
     let (spool_tmp_path, spool_final_path) =
         match spool_bytes_to_tmp(spool_root, &spool_relative, &bytes).await {
             Ok(paths) => paths,
             Err(e) => {
                 // Spool write failed; no tmp file exists (atomic write guarantees
                 // either full write or nothing). Refund both reservations.
-                rate_limit.refund(&scope_key, 1);
-                byte_limit.refund(&scope_key, bytes_count);
+                rate_limit.refund(rate_bucket_key, 1);
+                byte_limit.refund(rate_bucket_key, bytes_count);
                 return Err(e);
             }
         };
@@ -1333,8 +1434,8 @@ async fn process_event(
         Err(e) => {
             // Parsing a freshly-formatted "sha256:<64-hex>" string should never
             // fail; if it does, clean up only the tmp staging file and refund.
-            rate_limit.refund(&scope_key, 1);
-            byte_limit.refund(&scope_key, bytes_count);
+            rate_limit.refund(rate_bucket_key, 1);
+            byte_limit.refund(rate_bucket_key, bytes_count);
             let _ = remove_tmp_file_if_exists(&spool_tmp_path).await;
             return Err(ConnectorError::fatal_msg(format!(
                 "payload hash parse error: {e}"
@@ -1344,9 +1445,9 @@ async fn process_event(
 
     // 7. Build a CaptureEvent with the real hash and the final spooled path.
     //    The CaptureEvent references `payload_ref` (the final content-addressed
-    //    path), which does not exist on disk yet. The rename in step 9 makes it
-    //    real after emit succeeds — this is intentional and safe because emit
-    //    only records the reference, not the bytes themselves.
+    //    path), which does not exist on disk yet. The rename in step 9a makes it
+    //    real before emit — this is intentional and safe because emit only
+    //    records the reference, not the bytes themselves.
     let captured = match build_capture_event(
         &redacted.event,
         connector.sensor_identity(),
@@ -1356,8 +1457,8 @@ async fn process_event(
     ) {
         Ok(c) => c,
         Err(e) => {
-            rate_limit.refund(&scope_key, 1);
-            byte_limit.refund(&scope_key, bytes_count);
+            rate_limit.refund(rate_bucket_key, 1);
+            byte_limit.refund(rate_bucket_key, bytes_count);
             let _ = remove_tmp_file_if_exists(&spool_tmp_path).await;
             return Err(e);
         }
@@ -1366,17 +1467,21 @@ async fn process_event(
     // 8. Re-check connector state immediately before emit (Finding P).
     //
     //    A concurrent `disable()` call may have flipped the state to `Disabled`
-    //    after step 1 but before we reach `emit`. This second check closes that
-    //    window: in-flight webhook handlers that passed the initial state check
-    //    will be fast-failed here rather than emitting events for a connector
-    //    the operator has already disabled.
+    //    or `Disabling` after step 1 but before we reach `emit`. This second
+    //    check closes that window: in-flight webhook handlers that passed the
+    //    initial state check will be fast-failed here rather than emitting
+    //    events for a connector the operator has already disabled.
+    //
+    //    Both `Disabled` and `Disabling` are treated as non-Enabled here —
+    //    `Disabling` means the task has been cancelled and revoke is pending,
+    //    so the connector must not emit further events (Finding T).
     //
     //    Note: "fast-fail mid-processing" is the documented semantics for P0.
     //    Strict drain-to-completion (ensuring all in-flight handlers finish
     //    before `disable` returns) is deferred to #131.
     if !matches!(**state.load(), ConnectorState::Enabled { .. }) {
-        rate_limit.refund(&scope_key, 1);
-        byte_limit.refund(&scope_key, bytes_count);
+        rate_limit.refund(rate_bucket_key, 1);
+        byte_limit.refund(rate_bucket_key, bytes_count);
         let _ = remove_tmp_file_if_exists(&spool_tmp_path).await;
         return Err(ConnectorError::fatal_msg(format!(
             "connector {} was disabled mid-processing",
@@ -1384,39 +1489,67 @@ async fn process_event(
         )));
     }
 
-    // 9. Hand the event to the downstream pipeline.
+    // 9. Atomically commit the spool file, then hand the event to the pipeline
+    //    (Finding S fix — rename BEFORE emit).
     //
-    //    On error: refund both reservations and delete only the per-attempt tmp
-    //    file (Finding Q + Finding R). The final content-addressed path, if it
-    //    exists from a prior committed attempt, is left untouched.
+    //    # Ordering
     //
-    //    On success: atomically rename the tmp to the final path (two-phase
-    //    commit, Finding Q). If the final path already exists (prior committed
-    //    attempt with identical content), `tokio::fs::rename` overwrites it
-    //    silently — content-addressed bytes are identical so this is safe.
-    match emit.emit(captured).await {
-        Err(emit_err) => {
-            rate_limit.refund(&scope_key, 1);
-            byte_limit.refund(&scope_key, bytes_count);
-            let _ = remove_tmp_file_if_exists(&spool_tmp_path).await;
-            return Err(emit_err);
-        }
-        Ok(()) => {
-            // Commit: atomically promote the staging file to the final path.
-            // Best-effort — if the rename fails (e.g. cross-device move on an
-            // unusual filesystem), the event is already committed by `emit` and
-            // the tmp file will be cleaned up on the next registry restart.
-            // We log the error but do not surface it as a failure because the
-            // downstream pipeline has already accepted the event.
-            if let Err(e) = tokio::fs::rename(&spool_tmp_path, &spool_final_path).await {
-                tracing::warn!(
-                    tmp = %spool_tmp_path.display(),
-                    final_path = %spool_final_path.display(),
-                    error = %e,
-                    "spool rename failed after successful emit; tmp file left in place",
-                );
-            }
-        }
+    //    Previous rounds ordered: write-tmp → emit → rename-tmp-to-final.
+    //    That left a window where `emit` succeeded but the subsequent rename
+    //    failed: the `CaptureEvent` in the pipeline references
+    //    `sources/<relative>`, but that path does not exist on disk.  The
+    //    replay marker is committed and the cursor advances — corruption that
+    //    cannot be repaired without replaying from the journal.
+    //
+    //    Correct order: write-tmp → rename-tmp-to-final → emit.
+    //
+    //    - Rename failure (before emit): refund both reservations; the tmp
+    //      *may or may not* exist (rename is not atomic at the OS level for
+    //      all failure modes — e.g. ENOSPC may or may not have written the
+    //      destination).  Attempt a best-effort delete of the tmp and return
+    //      `Err`.  The final path is never touched in this branch.
+    //    - Emit failure (after successful rename): leave the final spool file
+    //      in place — it is durable on disk and correctly content-addressed.
+    //      Refund both reservations and return `Err` so the cursor does not
+    //      advance.  The orphaned spool file will be swept up by the
+    //      background maintenance workflow (issue #131).  This tradeoff is
+    //      documented here so operators know orphans are expected under
+    //      transient emit failures.
+    //
+    //    # Orphan tradeoff (emit failure after rename)
+    //
+    //    If `emit` fails after a successful rename, the final spool file
+    //    survives on disk without a corresponding `CaptureEvent` in the
+    //    pipeline.  For P0 this is acceptable: the orphan is harmless
+    //    (content-addressed, no secret data outside the spool subtree) and
+    //    is recovered by the sweep workflow added in #131.  **Do NOT delete
+    //    the final path here** — it would make the bug silent (no file, no
+    //    event, no log) rather than recoverable.
+
+    // Step 9a: rename tmp → final BEFORE calling emit.
+    if let Err(rename_err) = tokio::fs::rename(&spool_tmp_path, &spool_final_path).await {
+        // Rename failed — no CaptureEvent should be emitted.  Refund budgets,
+        // attempt best-effort tmp cleanup, and return Err.
+        rate_limit.refund(rate_bucket_key, 1);
+        byte_limit.refund(rate_bucket_key, bytes_count);
+        // Attempt to delete the tmp file; ignore errors (the file may already
+        // be absent depending on the failure mode that triggered rename_err).
+        let _ = remove_tmp_file_if_exists(&spool_tmp_path).await;
+        return Err(ConnectorError::fatal_msg(format!(
+            "spool rename failed for connector {}: {rename_err}",
+            redacted.event.connector
+        )));
+    }
+
+    // Step 9b: the final spool file is now on disk.  Hand the CaptureEvent to
+    // the downstream pipeline.  On emit failure, leave the final file in place
+    // (documented orphan tradeoff above) and refund both budget reservations.
+    if let Err(emit_err) = emit.emit(captured).await {
+        rate_limit.refund(rate_bucket_key, 1);
+        byte_limit.refund(rate_bucket_key, bytes_count);
+        // Do NOT delete the final spool file here — it is durable and correct.
+        // The sweep workflow (issue #131) will collect it.
+        return Err(emit_err);
     }
 
     Ok(())
@@ -1464,12 +1597,23 @@ async fn handle_webhook(
     use axum::body::Body;
     use axum::http::{Response, StatusCode};
 
-    /// Build a plain-text response.
+    /// Build a plain-text response from a static string.
     fn resp(status: StatusCode, body: &'static str) -> Response<Body> {
         Response::builder()
             .status(status)
             .body(Body::from(body))
             .expect("invariant: static response builder cannot fail")
+    }
+
+    /// Build a plain-text response from an owned `String`.
+    ///
+    /// Used for error messages that include dynamic content (e.g. the missing
+    /// delivery-id header name from Finding V).
+    fn resp_owned(status: StatusCode, body: String) -> Response<Body> {
+        Response::builder()
+            .status(status)
+            .body(Body::from(body))
+            .expect("invariant: owned response builder cannot fail")
     }
 
     // Look up the connector entry.
@@ -1524,17 +1668,32 @@ async fn handle_webhook(
         return resp(StatusCode::UNAUTHORIZED, "signature mismatch");
     };
 
-    // Replay guard — atomic Pending insert (Finding I + Finding L + Finding O).
+    // Replay guard — atomic Pending insert (Finding I + Finding L + Finding O +
+    // Finding V).
     //
     // Finding O fix: atomically insert a `Pending` marker inside a single lock
     // acquisition. This closes the race window from the original "check-then-
     // process-then-commit" approach where two concurrent identical deliveries
     // could both pass the check before either committed the marker.
     //
+    // Finding V fix: when `delivery_id_header` is configured in the manifest,
+    // the replay key is `(connector_name, delivery_id_value)` rather than
+    // `(connector_name, body_MAC_hex)`. This prevents false-positive duplicate
+    // rejection for two legitimate deliveries with identical bodies (e.g.
+    // heartbeat pings) that happen to produce the same HMAC.
+    //
+    // If `delivery_id_header` is `Some` but the header is absent from the
+    // request, return 400 Bad Request — the provider MUST include the header.
+    // HMAC verification (and therefore authentication) is unchanged; this only
+    // affects the replay key.
+    //
+    // Trade-off documented here: if `delivery_id_header` is `None`, fall back
+    // to HMAC body-MAC keying, which can collide on identical bodies.
+    //
     // Protocol:
     //  1. Lock the map.
-    //     - If `(name, sig)` maps to `Pending` or `Committed`: return 409.
-    //     - Otherwise: insert `(name, sig) -> Pending`. Drop lock.
+    //     - If `(name, key)` maps to `Pending` or `Committed`: return 409.
+    //     - Otherwise: insert `(name, key) -> Pending`. Drop lock.
     //  2. Process ingest_webhook + each process_event.
     //  3. On full success: lock map, replace `Pending` with `Committed`, push
     //     the key onto `replay_order` for FIFO eviction. Drop lock.
@@ -1547,8 +1706,28 @@ async fn handle_webhook(
     // be blocked.
     //
     // **Durability**: this map is in-memory only; a process restart forgets
-    // all seen signatures. Issue #131 will persist the replay map.
-    let replay_key = (connector_name.clone(), sig_id.0.clone());
+    // all seen delivery ids. Issue #131 will persist the replay map.
+    let replay_id: String = match &entry.delivery_id_header {
+        None => {
+            // No delivery-id header configured — use HMAC body-MAC (old behavior).
+            // May collide on identical bodies; document the trade-off.
+            sig_id.0.clone()
+        }
+        Some(id_header) => {
+            // Delivery-id header is configured. Read it from the incoming request.
+            // Return 400 if absent — providers must include it when declared.
+            match webhook_req.header(id_header) {
+                Some(v) => v.to_owned(),
+                None => {
+                    return resp_owned(
+                        StatusCode::BAD_REQUEST,
+                        format!("missing delivery-id header `{id_header}`"),
+                    );
+                }
+            }
+        }
+    };
+    let replay_key = (connector_name.clone(), replay_id);
     {
         // SAFETY: we never hold this lock across an `.await` point.
         let mut seen = state

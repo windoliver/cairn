@@ -333,14 +333,172 @@ async fn retry_after_successful_emit_does_not_delete_original() {
     );
 }
 
-/// A failed emit must clean up only its own tmp staging file, not the final
-/// committed path (Finding Q — second scenario).
+// ---------------------------------------------------------------------------
+// Finding S tests — rename BEFORE emit
+// ---------------------------------------------------------------------------
+
+/// When the spool directory doesn't exist (simulates a rename failure before
+/// emit), `process_event` must NOT call emit and must NOT leave a committed
+/// spool file behind.
 ///
-/// This test verifies the simpler case: one registry, one event, emit always
-/// fails. The spool dir must be clean of both committed files AND tmp files
-/// when there was never a prior committed attempt.
+/// Finding S fix: the rename happens BEFORE emit. If the rename fails, we
+/// return Err without calling emit — so no `CaptureEvent` is ever committed.
+///
+/// We simulate a rename failure by pointing the spool root at a path where
+/// the spool dir is a *file* rather than a directory, which forces the
+/// dir-creation to fail (and therefore the tmp write, which precedes rename).
+/// This tests the "no commit without a durable file" half of Finding S.
 #[tokio::test]
-async fn failed_emit_cleans_up_only_its_tmp_no_committed_file() {
+async fn rename_failure_before_emit_does_not_commit_capture() {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+
+    // Track how many times emit is called.
+    #[derive(Default)]
+    struct CountEmit(AtomicUsize);
+    #[async_trait::async_trait]
+    impl PipelineEmit for CountEmit {
+        async fn emit(&self, _: CaptureEvent) -> Result<(), ConnectorError> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    let counter = Arc::new(CountEmit::default());
+    let tmp = tempfile::tempdir().expect("tempdir");
+
+    // Place a *file* at the path where the spool dir would be created.
+    // This causes `create_dir_all` (called by `spool_bytes_to_tmp`) to fail
+    // because a file already exists at that location, which in turn means
+    // no tmp is written and thus no rename can occur.
+    let blocker = tmp.path().join("connector");
+    std::fs::write(&blocker, b"blocker").expect("create blocker file");
+
+    let mut reg = ConnectorRegistry::builder()
+        .credentials(Arc::new(InMemoryCredentialStore::default()))
+        .consent(Arc::new(AcceptAllConsent::default()))
+        .emit(counter.clone() as Arc<dyn PipelineEmit>)
+        .spool_root(tmp.path().to_path_buf())
+        .build();
+
+    reg.register(SingleEventConnector::new("01ARZ3NDEKTSV4RRFFQ69G5FAC"))
+        .expect("register must succeed");
+    reg.enable("spool-test", spool_grant())
+        .await
+        .expect("enable must succeed");
+
+    // poll_now must return an error (spool write fails → no rename → no emit).
+    let err = reg
+        .poll_now("spool-test")
+        .await
+        .expect_err("poll_now must fail when spool dir is blocked");
+    assert!(
+        matches!(err, ConnectorError::Fatal(_)),
+        "expected Fatal from spool failure, got {err:?}",
+    );
+
+    // emit must NOT have been called — no CaptureEvent committed.
+    let emit_count = counter.0.load(Ordering::SeqCst);
+    assert_eq!(
+        emit_count, 0,
+        "emit must NOT be called when spool write fails (Finding S)",
+    );
+
+    // The blocker file must still exist (we only placed it; we didn't try to
+    // delete it on this path).
+    assert!(blocker.is_file(), "blocker file must still exist");
+
+    reg.shutdown().await;
+}
+
+/// When emit fails after a successful rename, the final spool file MUST
+/// survive on disk (documented orphan tradeoff), and no further commits occur.
+///
+/// Finding S fix: rename BEFORE emit. Emit failure after a successful rename
+/// leaves an orphan file — that is intentional and recoverable by the sweep
+/// workflow (#131). What must NOT happen is silently deleting the file (that
+/// would make the bug undetectable) or not returning Err (that would advance
+/// the cursor).
+#[tokio::test]
+async fn emit_failure_after_rename_leaves_orphan_file_but_does_not_commit_capture() {
+    let event_id = "01ARZ3NDEKTSV4RRFFQ69G5FAD";
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let spool_root = tmp.path().to_path_buf();
+
+    let mut reg = ConnectorRegistry::builder()
+        .credentials(Arc::new(InMemoryCredentialStore::default()))
+        .consent(Arc::new(AcceptAllConsent::default()))
+        .emit(Arc::new(AlwaysFailEmit) as Arc<dyn PipelineEmit>)
+        .spool_root(spool_root.clone())
+        .build();
+
+    reg.register(SingleEventConnector::new(event_id))
+        .expect("register must succeed");
+    reg.enable("spool-test", spool_grant())
+        .await
+        .expect("enable must succeed");
+
+    // poll_now must return an error because emit always fails.
+    let err = reg
+        .poll_now("spool-test")
+        .await
+        .expect_err("poll_now must fail when emit always fails");
+    assert!(
+        matches!(err, ConnectorError::Transient(_)),
+        "expected Transient from AlwaysFailEmit, got {err:?}",
+    );
+
+    reg.shutdown().await;
+
+    // (a) process_event returned Err — verified above.
+
+    // (b) The final spool file DOES exist (orphan — documented tradeoff).
+    //     After a successful rename the bytes are on disk; emit failure must
+    //     NOT delete them. This is the key invariant Finding S preserves:
+    //     the file is durable even though no CaptureEvent was committed.
+    let spool_dir = spool_root.join("connector").join("spool-test");
+    let committed_files: Vec<_> = std::fs::read_dir(&spool_dir)
+        .expect("spool dir must exist after rename succeeded")
+        .filter_map(std::result::Result::ok)
+        .filter(|e| !e.file_name().to_string_lossy().ends_with(".tmp"))
+        .collect();
+    assert_eq!(
+        committed_files.len(),
+        1,
+        "exactly 1 orphan spool file must exist after emit failure (Finding S documented tradeoff); \
+         found {committed_files:?}",
+    );
+
+    // (c) No further commits occurred — there must be no .tmp files (the
+    //     rename promoted tmp → final, so no tmp should remain).
+    let tmp_files: Vec<_> = std::fs::read_dir(&spool_dir)
+        .expect("spool dir must still exist")
+        .filter_map(std::result::Result::ok)
+        .filter(|e| e.file_name().to_string_lossy().ends_with(".tmp"))
+        .collect();
+    assert_eq!(
+        tmp_files.len(),
+        0,
+        "no .tmp files must remain after rename succeeded (tmp was promoted to final); \
+         found {tmp_files:?}",
+    );
+}
+
+/// A failed emit must leave exactly one committed file (the orphan from the
+/// rename-before-emit fix) and zero `.tmp` files (Finding Q updated for
+/// Finding S).
+///
+/// Finding S reorders the sequence to: write-tmp → rename-tmp-to-final →
+/// emit. When emit fails the final content-addressed file is already on disk
+/// (the rename succeeded). Finding Q's invariant still holds: only the tmp is
+/// affected; the final path survives and no new tmp remains. The spool dir
+/// therefore has exactly 1 committed (orphan) file and 0 tmp files.
+///
+/// The orphan is recoverable by the sweep workflow (issue #131).
+#[tokio::test]
+async fn failed_emit_leaves_one_orphan_no_tmp_files() {
     let event_id = "01ARZ3NDEKTSV4RRFFQ69G5FAB";
     let tmp = tempfile::tempdir().expect("tempdir");
     let spool_root = tmp.path().to_path_buf();
@@ -370,17 +528,35 @@ async fn failed_emit_cleans_up_only_its_tmp_no_committed_file() {
 
     reg.shutdown().await;
 
-    // After a failed-emit with no prior committed file, the spool dir should
-    // have zero committed files AND zero .tmp files.
-    let all_files: Vec<_> = match std::fs::read_dir(&spool_dir) {
-        Ok(entries) => entries.filter_map(std::result::Result::ok).collect(),
+    // Finding S: rename happens BEFORE emit. Emit failure leaves the final
+    // file in place (orphan) — exactly 1 committed file, 0 tmp files.
+    let committed_files: Vec<_> = match std::fs::read_dir(&spool_dir) {
+        Ok(entries) => entries
+            .filter_map(std::result::Result::ok)
+            .filter(|e| !e.file_name().to_string_lossy().ends_with(".tmp"))
+            .collect(),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => vec![],
         Err(e) => panic!("unexpected read_dir error: {e}"),
     };
     assert_eq!(
-        all_files.len(),
+        committed_files.len(),
+        1,
+        "exactly 1 orphan committed file must exist after a failed emit \
+         (Finding S rename-before-emit tradeoff); found {committed_files:?}",
+    );
+
+    let tmp_files: Vec<_> = match std::fs::read_dir(&spool_dir) {
+        Ok(entries) => entries
+            .filter_map(std::result::Result::ok)
+            .filter(|e| e.file_name().to_string_lossy().ends_with(".tmp"))
+            .collect(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => vec![],
+        Err(e) => panic!("unexpected read_dir error on tmp check: {e}"),
+    };
+    assert_eq!(
+        tmp_files.len(),
         0,
-        "spool dir must be empty (no committed files, no tmp files) after a failed emit \
-         with no prior committed attempt; found {all_files:?}",
+        "no .tmp files must remain after a failed emit (tmp was renamed to final \
+         before emit was called); found {tmp_files:?}",
     );
 }

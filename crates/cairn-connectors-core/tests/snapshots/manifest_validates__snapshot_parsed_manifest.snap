@@ -32,6 +32,7 @@ webhook:
   signature.header: X-Fixture-Signature
   allowed_mimes:
     - application/json
+  delivery_id_header: ~
 poll:
   cursor_kind: opaque-string
   min_interval: 30s

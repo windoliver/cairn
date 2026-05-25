@@ -1026,18 +1026,18 @@ async fn over_budget_event_leaves_no_spool_file() {
     reg.shutdown().await;
 }
 
-/// A failed emit must delete the spool file that was already written (Finding M).
+/// After a failed emit the spool directory must contain exactly one committed
+/// (orphan) file and zero `.tmp` files (Finding M updated for Finding S).
 ///
-/// Setup: connector with budget = 1 (large enough for one event).
-///        `AlwaysFailEmit` always returns `Err(Transient)`.
+/// Finding S reorders to: write-tmp → rename-tmp-to-final → emit. When emit
+/// fails the final file is already on disk; the framework intentionally leaves
+/// it there (documented orphan tradeoff — sweep workflow handles it in #131).
+/// Only the tmp file, which was renamed to the final path, should be gone.
 ///
-/// After `poll_now`: the spool directory must be empty — the spool file written
-/// for the event was cleaned up when `emit` failed.
-///
-/// This verifies that `process_event` calls `remove_spool_file_if_exists`
-/// after `emit` returns an error, preventing orphaned spool objects on disk.
+/// The key Finding M invariant that still holds: budget tokens ARE refunded on
+/// emit failure so the event can be retried without permanently consuming budget.
 #[tokio::test]
-async fn failed_emit_cleans_up_spool_file() {
+async fn failed_emit_leaves_orphan_file_no_tmp() {
     /// `PipelineEmit` that always returns `Err(Transient)`.
     struct AlwaysFailEmit;
 
@@ -1080,22 +1080,36 @@ async fn failed_emit_cleans_up_spool_file() {
         "expected Transient from failing emit, got {err:?}",
     );
 
-    // The spool directory must be empty — the file written for the event
-    // must have been deleted when `emit` returned an error (Finding M).
-    //
-    // The spool dir may not exist at all if the cleanup deleted the only file
-    // and no other file was ever created. Handle both cases.
-    let file_count = match std::fs::read_dir(&spool_dir) {
-        Ok(entries) => entries.filter_map(std::result::Result::ok).count(),
+    reg.shutdown().await;
+
+    // Finding S: rename happens before emit. Emit failure leaves the final file
+    // on disk (orphan). Exactly 1 committed file, 0 .tmp files.
+    let committed = match std::fs::read_dir(&spool_dir) {
+        Ok(entries) => entries
+            .filter_map(std::result::Result::ok)
+            .filter(|e| !e.file_name().to_string_lossy().ends_with(".tmp"))
+            .count(),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => 0,
         Err(e) => panic!("unexpected read_dir error: {e}"),
     };
     assert_eq!(
-        file_count, 0,
-        "spool directory must be empty after a failed emit — orphan file was not cleaned up",
+        committed, 1,
+        "exactly 1 orphan committed file must exist after a failed emit \
+         (Finding S rename-before-emit tradeoff); got {committed}",
     );
 
-    reg.shutdown().await;
+    let tmps = match std::fs::read_dir(&spool_dir) {
+        Ok(entries) => entries
+            .filter_map(std::result::Result::ok)
+            .filter(|e| e.file_name().to_string_lossy().ends_with(".tmp"))
+            .count(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => 0,
+        Err(e) => panic!("unexpected read_dir error on tmp check: {e}"),
+    };
+    assert_eq!(
+        tmps, 0,
+        "no .tmp files must remain after a failed emit (tmp was renamed to final); got {tmps}",
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1314,6 +1328,301 @@ async fn daily_byte_budget_blocks_oversize_total() {
     assert_eq!(
         count, 1,
         "over-byte-budget event must not reach emit; count must remain 1 (got {count})",
+    );
+
+    reg.shutdown().await;
+}
+
+// ---------------------------------------------------------------------------
+// Finding U — aggregate budget by connector, not by scope
+// ---------------------------------------------------------------------------
+
+/// The daily byte budget must aggregate across all scopes (Finding U).
+///
+/// Before the fix, each distinct scope key got its own full-capacity byte
+/// bucket. A connector with a wildcard scope declaration (`project:*`) could
+/// emit N×cap bytes by emitting events from N different scopes. This test
+/// verifies the fix: the byte budget is keyed by connector name, so two events
+/// from different scopes (`project:foo` and `project:bar`) share one budget.
+///
+/// Setup:
+/// - `max_bytes_per_day = 1024` (1 KiB), `max_items_per_hour = 1000`.
+/// - Event 1: scope `project:foo`, ~600 bytes → accepted.
+/// - Event 2: scope `project:bar`, ~600 bytes → total would be ~1200 > 1024 →
+///   rejected with `BudgetExceeded`.
+#[allow(clippy::items_after_statements, clippy::too_many_lines)]
+#[tokio::test]
+async fn aggregate_byte_budget_across_scopes() {
+    let filler_600: String = "x".repeat(600);
+
+    // A connector that emits alternating scopes on each poll_now call.
+    struct ScopedConnector {
+        manifest: ConnectorManifest,
+        sensor: Identity,
+        call: std::sync::Mutex<u32>,
+        filler: String,
+    }
+
+    #[async_trait]
+    impl Connector for ScopedConnector {
+        fn name(&self) -> &'static str {
+            "budget-test"
+        }
+        fn manifest(&self) -> &ConnectorManifest {
+            &self.manifest
+        }
+        fn capabilities(&self) -> &ConnectorCapabilities {
+            static C: ConnectorCapabilities = ConnectorCapabilities {
+                poll: true,
+                webhook: false,
+                backfill: false,
+            };
+            &C
+        }
+        fn sensor_identity(&self) -> &Identity {
+            &self.sensor
+        }
+        fn supported_contract_versions(&self) -> VersionRange {
+            VersionRange::new(ContractVersion::new(0, 1, 0), ContractVersion::new(0, 2, 0))
+        }
+        async fn poll(&self, _: &PollContext) -> Result<PollOutcome, ConnectorError> {
+            let mut call = self.call.lock().expect("call mutex");
+            *call += 1;
+            let (id, scope) = if *call == 1 {
+                ("01ARZ3NDEKTSV4RRFFQ69G5FE1", ConnectorScope::project("foo"))
+            } else {
+                ("01ARZ3NDEKTSV4RRFFQ69G5FE2", ConnectorScope::project("bar"))
+            };
+            Ok(PollOutcome {
+                events: vec![ConnectorEvent::new(
+                    ConnectorEventId::new(id),
+                    "budget-test",
+                    SourceRef::new("issue", id, None),
+                    0,
+                    BTreeSet::from(["note".to_string()]),
+                    scope,
+                    ConnectorPayload::Json {
+                        mime: "application/json".into(),
+                        body: serde_json::json!({"data": self.filler}),
+                    },
+                    DeliveryMode::Poll { cursor: None },
+                )],
+                next_cursor: None,
+                rate_limit_hint: None,
+            })
+        }
+        async fn ingest_webhook(
+            &self,
+            _: &WebhookRequest,
+            _: &WebhookContext,
+        ) -> Result<Vec<ConnectorEvent>, ConnectorError> {
+            Ok(vec![])
+        }
+    }
+
+    impl ConnectorPlugin for ScopedConnector {
+        const NAME: &'static str = "budget-test";
+        const SUPPORTED_VERSIONS: VersionRange =
+            VersionRange::new(ContractVersion::new(0, 1, 0), ContractVersion::new(0, 2, 0));
+    }
+
+    let emit = Arc::new(CountEmit::default());
+    let tmp = tempfile::tempdir().expect("tempdir");
+
+    let mut reg = ConnectorRegistry::builder()
+        .credentials(Arc::new(InMemoryCredentialStore::default()))
+        .consent(Arc::new(AcceptAllConsent::default()))
+        .emit(emit.clone() as Arc<dyn PipelineEmit>)
+        .spool_root(tmp.path().to_path_buf())
+        .build();
+
+    reg.register(ScopedConnector {
+        manifest: byte_budget_manifest(),
+        sensor: Identity::parse("snr:local:connector:budget-test:v1")
+            .expect("sensor identity must parse"),
+        call: std::sync::Mutex::new(0),
+        filler: filler_600,
+    })
+    .expect("register must succeed");
+    reg.enable("budget-test", byte_budget_grant())
+        .await
+        .expect("enable must succeed");
+
+    // First poll (scope = project:foo) — budget available, accepted.
+    reg.poll_now("budget-test")
+        .await
+        .expect("first poll_now (project:foo) must succeed");
+
+    {
+        let count = *emit.0.lock().expect("mutex");
+        assert_eq!(count, 1, "first event (project:foo) must be emitted");
+    }
+
+    // Second poll (scope = project:bar) — byte budget shared across scopes;
+    // total would exceed 1 KiB, so this must be rejected.
+    let err = reg
+        .poll_now("budget-test")
+        .await
+        .expect_err("second poll_now (project:bar) must fail — shared byte budget exceeded");
+
+    assert!(
+        matches!(err, ConnectorError::BudgetExceeded { .. }),
+        "expected BudgetExceeded when aggregate byte cap is exceeded (Finding U), got {err:?}",
+    );
+
+    // Emit count must remain 1 — the second event was blocked before emit.
+    let count = *emit.0.lock().expect("mutex");
+    assert_eq!(
+        count, 1,
+        "second event (project:bar) must not reach emit; aggregate byte cap exceeded (got {count})",
+    );
+
+    reg.shutdown().await;
+}
+
+/// The hourly item budget must aggregate across all scopes (Finding U).
+///
+/// Before the fix, each distinct scope key got its own full-capacity item
+/// bucket. This test verifies that three events across three different scopes
+/// share one connector-level item budget.
+///
+/// Setup:
+/// - `max_items_per_hour = 2`, `max_bytes_per_day = 50MiB` (not limiting).
+/// - Events from scopes `project:alpha`, `project:beta`, `project:gamma`.
+/// - First two succeed; third returns `BudgetExceeded`.
+#[allow(clippy::items_after_statements, clippy::too_many_lines)]
+#[tokio::test]
+async fn aggregate_item_budget_across_scopes() {
+    // A connector that cycles through three scopes on successive poll calls.
+    struct ThreeScopeConnector {
+        manifest: ConnectorManifest,
+        sensor: Identity,
+        call: std::sync::Mutex<u32>,
+    }
+
+    #[async_trait]
+    impl Connector for ThreeScopeConnector {
+        fn name(&self) -> &'static str {
+            "budget-test"
+        }
+        fn manifest(&self) -> &ConnectorManifest {
+            &self.manifest
+        }
+        fn capabilities(&self) -> &ConnectorCapabilities {
+            static C: ConnectorCapabilities = ConnectorCapabilities {
+                poll: true,
+                webhook: false,
+                backfill: false,
+            };
+            &C
+        }
+        fn sensor_identity(&self) -> &Identity {
+            &self.sensor
+        }
+        fn supported_contract_versions(&self) -> VersionRange {
+            VersionRange::new(ContractVersion::new(0, 1, 0), ContractVersion::new(0, 2, 0))
+        }
+        async fn poll(&self, _: &PollContext) -> Result<PollOutcome, ConnectorError> {
+            let mut call = self.call.lock().expect("call mutex");
+            *call += 1;
+            let (id, scope) = match *call {
+                1 => (
+                    "01ARZ3NDEKTSV4RRFFQ69G5FF1",
+                    ConnectorScope::project("alpha"),
+                ),
+                2 => (
+                    "01ARZ3NDEKTSV4RRFFQ69G5FF2",
+                    ConnectorScope::project("beta"),
+                ),
+                _ => (
+                    "01ARZ3NDEKTSV4RRFFQ69G5FF3",
+                    ConnectorScope::project("gamma"),
+                ),
+            };
+            Ok(PollOutcome {
+                events: vec![ConnectorEvent::new(
+                    ConnectorEventId::new(id),
+                    "budget-test",
+                    SourceRef::new("issue", id, None),
+                    0,
+                    BTreeSet::from(["note".to_string()]),
+                    scope,
+                    ConnectorPayload::Json {
+                        mime: "application/json".into(),
+                        body: serde_json::json!({"id": id}),
+                    },
+                    DeliveryMode::Poll { cursor: None },
+                )],
+                next_cursor: None,
+                rate_limit_hint: None,
+            })
+        }
+        async fn ingest_webhook(
+            &self,
+            _: &WebhookRequest,
+            _: &WebhookContext,
+        ) -> Result<Vec<ConnectorEvent>, ConnectorError> {
+            Ok(vec![])
+        }
+    }
+
+    impl ConnectorPlugin for ThreeScopeConnector {
+        const NAME: &'static str = "budget-test";
+        const SUPPORTED_VERSIONS: VersionRange =
+            VersionRange::new(ContractVersion::new(0, 1, 0), ContractVersion::new(0, 2, 0));
+    }
+
+    let emit = Arc::new(CountEmit::default());
+    let tmp = tempfile::tempdir().expect("tempdir");
+
+    let mut reg = ConnectorRegistry::builder()
+        .credentials(Arc::new(InMemoryCredentialStore::default()))
+        .consent(Arc::new(AcceptAllConsent::default()))
+        .emit(emit.clone() as Arc<dyn PipelineEmit>)
+        .spool_root(tmp.path().to_path_buf())
+        .build();
+
+    reg.register(ThreeScopeConnector {
+        manifest: budget_manifest(), // max_items_per_hour = 2
+        sensor: Identity::parse("snr:local:connector:budget-test:v1")
+            .expect("sensor identity must parse"),
+        call: std::sync::Mutex::new(0),
+    })
+    .expect("register must succeed");
+    reg.enable("budget-test", budget_grant())
+        .await
+        .expect("enable must succeed");
+
+    // First poll (project:alpha) — budget available.
+    reg.poll_now("budget-test")
+        .await
+        .expect("first poll_now (alpha) must succeed");
+
+    // Second poll (project:beta) — budget has 1 token remaining.
+    reg.poll_now("budget-test")
+        .await
+        .expect("second poll_now (beta) must succeed");
+
+    {
+        let count = *emit.0.lock().expect("mutex");
+        assert_eq!(count, 2, "first two events must be emitted");
+    }
+
+    // Third poll (project:gamma) — item budget exhausted; must be rejected.
+    let err = reg
+        .poll_now("budget-test")
+        .await
+        .expect_err("third poll_now (gamma) must fail — shared item budget exhausted");
+
+    assert!(
+        matches!(err, ConnectorError::BudgetExceeded { .. }),
+        "expected BudgetExceeded on third event across three scopes (Finding U), got {err:?}",
+    );
+
+    let count = *emit.0.lock().expect("mutex");
+    assert_eq!(
+        count, 2,
+        "third event must not reach emit; aggregate item budget exceeded (got {count})",
     );
 
     reg.shutdown().await;
