@@ -9,7 +9,6 @@ use crate::error::GhError;
 
 /// Per-resource cursor within the connector-level cursor.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(deny_unknown_fields)]
 pub struct ResourceCursor {
     /// REST `since=` timestamp. Issues + PRs use this.
     pub since: Option<DateTime<Utc>>,
@@ -23,7 +22,6 @@ pub struct ResourceCursor {
 
 /// Connector-level cursor: per-resource map.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(deny_unknown_fields)]
 pub struct CursorState {
     /// Schema version. Always 1 for v0; bumped on breaking changes.
     #[serde(default = "default_version")]
@@ -101,9 +99,11 @@ mod tests {
     }
 
     #[test]
-    fn rejects_unknown_top_level_fields() {
-        let bad = r#"{"v":1,"issues":{},"prs":{},"commits":{},"extra":true}"#;
-        assert!(CursorState::decode(Some(bad)).is_err());
+    fn accepts_unknown_top_level_fields_for_forward_compat() {
+        let future =
+            r#"{"v":2,"issues":{},"prs":{},"commits":{},"unknown_field":42,"another":"x"}"#;
+        let c = CursorState::decode(Some(future)).expect("unknown fields tolerated");
+        assert_eq!(c.v, 2);
     }
 
     use proptest::prelude::*;
