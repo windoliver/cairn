@@ -1,0 +1,19 @@
+{
+  "action": "opened",
+  "pull_request": {
+    "id": 1001,
+    "number": 99,
+    "title": "Webhook PR",
+    "body": null,
+    "state": "open",
+    "user": {"login": "dave"},
+    "created_at": "2026-05-25T15:00:00Z",
+    "updated_at": "2026-05-25T15:00:00Z",
+    "html_url": "https://github.com/o/r/pull/99",
+    "head": {"sha": "abc999", "ref": "feat/y"},
+    "base": {"sha": "main001", "ref": "main"},
+    "merged": false,
+    "draft": false
+  },
+  "repository": {"full_name": "o/r"}
+}
