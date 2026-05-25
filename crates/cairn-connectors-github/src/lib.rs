@@ -4,8 +4,6 @@
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
-// Allowed during scaffold; removed by Task 17.
-#![allow(dead_code)]
 
 mod auth;
 mod client;

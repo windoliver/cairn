@@ -49,6 +49,9 @@ pub(crate) struct ResourcePoll {
 #[async_trait]
 pub(crate) trait GhResource: Send + Sync {
     /// Short identifier for this resource (e.g. `"issues"`, `"prs"`, `"commits"`).
+    // Called by the orchestrator for tracing/debugging; not yet wired to a
+    // callsite in P0, so suppress the false-positive dead-code lint here.
+    #[allow(dead_code)]
     fn kind(&self) -> &'static str;
 
     /// Poll for new events since the cursor. `budget` is the maximum number of

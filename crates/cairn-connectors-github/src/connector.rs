@@ -134,6 +134,8 @@ impl Connector for GitHubConnector {
                         max_hint = Some(max_hint.map_or(h, |m| m.max(h)));
                     }
                 }
+                // Events from completed resources are intentionally discarded; the
+                // substrate retries from the prior cursor on any Err return.
                 Err(e) => return Err(e.into()),
             }
         }

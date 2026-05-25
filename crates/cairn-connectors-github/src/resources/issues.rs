@@ -26,6 +26,10 @@ struct IssueDto {
     body: Option<String>,
     state: String,
     user: UserDto,
+    // Captured from the API response for completeness; the event timestamp
+    // uses `updated_at`, so `created_at` is consumed by serde but not read
+    // by Rust code in this slice.
+    #[allow(dead_code)]
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
     html_url: String,
