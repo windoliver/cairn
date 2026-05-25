@@ -22,3 +22,8 @@ pub use error::GhError;
 
 /// Embedded `connector.toml` bytes, parsed at `GitHubConnector::new` time.
 pub(crate) const MANIFEST_TOML: &str = include_str!("../connector.toml");
+
+/// Test-only helpers exposed for integration tests. Cfg-gated; not part of
+/// the public API.
+#[cfg(any(test, feature = "testkit"))]
+pub mod testkit;

@@ -1,1 +1,232 @@
-//! `IssuesResource` — GitHub issues poll + webhook adapter. Implemented in Task 8.
+//! Issues + `issue_comment` resource.
+
+use std::collections::BTreeSet;
+
+use async_trait::async_trait;
+use cairn_connectors_core::{
+    ConnectorEvent, ConnectorEventId, ConnectorPayload, ConnectorScope, DeliveryMode, SourceRef,
+};
+use chrono::{DateTime, Utc};
+use serde::Deserialize;
+use ulid::Ulid;
+
+use crate::client::GhClient;
+use crate::cursor::ResourceCursor;
+use crate::error::GhError;
+use crate::resources::{GhResource, Repo, ResourcePoll};
+
+pub(crate) struct IssuesResource;
+
+#[derive(Debug, Deserialize)]
+struct IssueDto {
+    id: u64,
+    number: u64,
+    title: String,
+    #[serde(default)]
+    body: Option<String>,
+    state: String,
+    user: UserDto,
+    created_at: DateTime<Utc>,
+    updated_at: DateTime<Utc>,
+    html_url: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct UserDto {
+    login: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct WebhookIssueEnvelope {
+    action: String,
+    issue: IssueDto,
+    repository: RepositoryDto,
+}
+
+#[derive(Debug, Deserialize)]
+struct RepositoryDto {
+    full_name: String,
+}
+
+#[async_trait]
+impl GhResource for IssuesResource {
+    fn kind(&self) -> &'static str {
+        "issue"
+    }
+
+    async fn poll(
+        &self,
+        client: &GhClient,
+        repo: &Repo,
+        sub_cursor: &ResourceCursor,
+        budget: u32,
+    ) -> Result<ResourcePoll, GhError> {
+        let per_page: u32 = 50.min(budget);
+        let page = sub_cursor.page.unwrap_or(1);
+        let mut query: Vec<(&str, String)> = vec![
+            ("state", "all".into()),
+            ("sort", "updated".into()),
+            ("direction", "asc".into()),
+            ("per_page", per_page.to_string()),
+            ("page", page.to_string()),
+        ];
+        if let Some(since) = sub_cursor.since {
+            query.push(("since", since.to_rfc3339()));
+        }
+
+        let path = format!("/repos/{}/{}/issues", repo.owner, repo.name);
+        let issues: Vec<IssueDto> = client.get_json(&path, &query).await?;
+
+        let mut events: Vec<ConnectorEvent> = Vec::with_capacity(issues.len());
+        let mut max_updated = sub_cursor.since;
+        for dto in &issues {
+            if max_updated.is_none_or(|t| dto.updated_at > t) {
+                max_updated = Some(dto.updated_at);
+            }
+            events.push(issue_to_event(dto, repo, None));
+        }
+
+        let exhausted = u32::try_from(issues.len()).unwrap_or(u32::MAX) < per_page;
+        let next_cursor = ResourceCursor {
+            since: max_updated.or(sub_cursor.since),
+            page: if exhausted { Some(1) } else { Some(page + 1) },
+            ..ResourceCursor::default()
+        };
+
+        let rate_limit_hint = client.rate_state().hint_if_low(50);
+
+        Ok(ResourcePoll {
+            events,
+            next_cursor,
+            rate_limit_hint,
+        })
+    }
+
+    fn parse_webhook(
+        &self,
+        event_type: &str,
+        delivery_id: &str,
+        signature_id: &str,
+        body: &[u8],
+        repo: &Repo,
+    ) -> Result<Vec<ConnectorEvent>, GhError> {
+        match event_type {
+            "issues" => {
+                let env: WebhookIssueEnvelope = serde_json::from_slice(body)?;
+                let expected = repo.scope_value();
+                if env.repository.full_name != expected {
+                    return Err(GhError::Malformed(format!(
+                        "webhook for {} does not match configured repo {expected}",
+                        env.repository.full_name
+                    )));
+                }
+                Ok(vec![issue_to_event(
+                    &env.issue,
+                    repo,
+                    Some((delivery_id, signature_id, &env.action)),
+                )])
+            }
+            "issue_comment" => {
+                // Out of scope for this slice; substrate logs at debug.
+                Ok(vec![])
+            }
+            _ => Ok(vec![]),
+        }
+    }
+}
+
+fn issue_to_event(
+    dto: &IssueDto,
+    repo: &Repo,
+    webhook_meta: Option<(&str, &str, &str)>,
+) -> ConnectorEvent {
+    let event_id = ConnectorEventId::new(Ulid::new().to_string());
+    let source_ref = SourceRef::new(
+        "issue",
+        format!("gh:{}/{}#{}", repo.owner, repo.name, dto.number),
+        None,
+    );
+    let mut labels: BTreeSet<String> = BTreeSet::new();
+    labels.insert("source:github".into());
+    labels.insert("kind:issue".into());
+
+    let payload = ConnectorPayload::Json {
+        mime: "application/json".into(),
+        body: serde_json::json!({
+            "id": dto.id,
+            "number": dto.number,
+            "title": dto.title,
+            "body": dto.body,
+            "state": dto.state,
+            "user": dto.user.login,
+            "html_url": dto.html_url,
+        }),
+    };
+
+    let delivery = match webhook_meta {
+        None => DeliveryMode::Poll { cursor: None },
+        Some((delivery_id, signature_id, _action)) => DeliveryMode::Webhook {
+            signature_id: format!("{signature_id}:{delivery_id}"),
+        },
+    };
+
+    ConnectorEvent::new(
+        event_id,
+        "github",
+        source_ref,
+        dto.updated_at.timestamp(),
+        labels,
+        ConnectorScope::project(repo.scope_value()),
+        payload,
+        delivery,
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn webhook_parse_extracts_issue_event() {
+        let body = include_bytes!("../../tests/fixtures/webhook_issues_opened.json");
+        let r = IssuesResource;
+        let repo = Repo {
+            owner: "o".into(),
+            name: "r".into(),
+        };
+        let events = r
+            .parse_webhook("issues", "deliver-abc", "sigid-1", body, &repo)
+            .expect("parse");
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].source_ref.kind, "issue");
+        assert!(events[0].labels.contains("kind:issue"));
+        assert!(matches!(events[0].delivery, DeliveryMode::Webhook { .. }));
+    }
+
+    #[test]
+    fn webhook_parse_rejects_mismatched_repo() {
+        let body = include_bytes!("../../tests/fixtures/webhook_issues_opened.json");
+        let r = IssuesResource;
+        let repo = Repo {
+            owner: "x".into(),
+            name: "y".into(),
+        };
+        let err = r
+            .parse_webhook("issues", "d", "s", body, &repo)
+            .expect_err("must reject");
+        assert!(matches!(err, GhError::Malformed(_)));
+    }
+
+    #[test]
+    fn webhook_unknown_event_returns_empty() {
+        let r = IssuesResource;
+        let repo = Repo {
+            owner: "o".into(),
+            name: "r".into(),
+        };
+        let events = r
+            .parse_webhook("ping", "d", "s", b"{}", &repo)
+            .expect("ping returns empty");
+        assert!(events.is_empty());
+    }
+}
