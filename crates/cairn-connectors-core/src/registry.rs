@@ -925,6 +925,38 @@ fn scope_pattern_matches(pattern: &str, scope_key: &str) -> bool {
 }
 
 // ---------------------------------------------------------------------------
+// Path-safety helper
+// ---------------------------------------------------------------------------
+
+/// Validate that `component` is safe to use as a single path component.
+///
+/// Rejects any string containing `/`, `\`, `..` (in any position), or a null
+/// byte. These are the characters that enable path-traversal attacks when a
+/// connector-supplied value is interpolated into a spool path.
+///
+/// This is the defense-in-depth layer: `event_id` must already have been
+/// validated as a ULID by [`crate::event::ConnectorEventId::parse`] before
+/// reaching this point. Together the two checks ensure that even a future
+/// regression in ULID parsing cannot silently enable path traversal.
+///
+/// # Errors
+///
+/// Returns [`ConnectorError::MalformedPayload`] if `component` contains any
+/// path-unsafe character.
+fn sanitize_path_component(component: &str) -> Result<&str, ConnectorError> {
+    if component.contains('/')
+        || component.contains('\\')
+        || component.contains("..")
+        || component.contains('\0')
+    {
+        return Err(ConnectorError::MalformedPayload(format!(
+            "unsafe path component: {component:?} (contains path-traversal characters)"
+        )));
+    }
+    Ok(component)
+}
+
+// ---------------------------------------------------------------------------
 // Shared event-processing helper
 // ---------------------------------------------------------------------------
 
@@ -937,6 +969,12 @@ fn scope_pattern_matches(pattern: &str, scope_key: &str) -> bool {
 ///
 /// # Steps
 ///
+/// -1. **Path-safety check (Finding J):** validate `event.event_id` as a ULID
+///    via [`crate::event::ConnectorEventId::parse`]. Reject with
+///    [`ConnectorError::MalformedPayload`] before any side effect if the id
+///    is not a valid 26-char Crockford base32 ULID. This prevents a connector
+///    supplying `event_id = "../../etc/passwd"` from writing outside the spool
+///    subtree.
 /// 0. **Integrity check:** verify `event.connector == connector.name()`.
 ///    Return [`ConnectorError::Fatal`] if the names differ — a misbehaving
 ///    connector must not be able to spoof another connector's name to bypass
@@ -971,6 +1009,17 @@ async fn process_event(
     rate_limit: &Arc<RateLimit>,
     spool_root: &std::path::Path,
 ) -> Result<(), ConnectorError> {
+    // -1. Path-safety check (Finding J): validate event_id as a ULID before
+    //     any side effect. This must be the VERY FIRST check so that a
+    //     malicious connector supplying event_id = "../../etc/passwd" cannot
+    //     reach the spool write path.
+    crate::event::ConnectorEventId::parse(event.event_id.as_str()).map_err(|_| {
+        ConnectorError::MalformedPayload(format!(
+            "invalid event_id: {:?} (must be a 26-char Crockford base32 ULID)",
+            event.event_id.as_str()
+        ))
+    })?;
+
     // 0. Connector-name integrity: a misbehaving connector must not be able
     //    to forge another connector's name and bypass the consent gate.
     if event.connector != connector.name() {
@@ -1086,6 +1135,13 @@ async fn process_event(
     //      locate the content.
     let connector_name = &redacted.event.connector;
     let event_id = redacted.event.event_id.as_str();
+
+    // Defense-in-depth (Finding J): even though event_id was already validated
+    // as a ULID above and connector_name comes from the registry (trusted),
+    // apply the path-component sanitiser here as a second line of defence
+    // immediately before interpolating both values into the spool path.
+    sanitize_path_component(event_id)?;
+    sanitize_path_component(connector_name)?;
 
     let (payload_ref, payload_hash) = match &redacted.event.payload {
         ConnectorPayload::Binary {

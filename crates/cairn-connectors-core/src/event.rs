@@ -17,10 +17,56 @@ use crate::manifest::ConnectorManifest;
 pub struct ConnectorEventId(String);
 
 impl ConnectorEventId {
-    /// Wrap a string value as a [`ConnectorEventId`].
+    /// Wrap a string value as a [`ConnectorEventId`] without validation.
+    ///
+    /// This constructor accepts arbitrary strings and is intended for internal
+    /// use (e.g. deserialization from trusted JSON). Callers that will
+    /// interpolate the `event_id` into a filesystem path **must** use
+    /// [`ConnectorEventId::parse`] instead to prevent path-traversal attacks.
     #[must_use]
     pub fn new(value: impl Into<String>) -> Self {
         Self(value.into())
+    }
+
+    /// Parse and validate a ULID string, returning a [`ConnectorEventId`].
+    ///
+    /// Accepts any string that is a valid 26-character Crockford base32 ULID
+    /// (case-insensitive, as defined by the ULID specification). Rejects:
+    ///
+    /// - Strings that are not valid ULIDs (wrong length, illegal characters,
+    ///   overflow of the timestamp field, etc.).
+    /// - Strings containing `/`, `\`, `..`, or null bytes (defense in depth
+    ///   against path-traversal even if the ULID check is somehow bypassed).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConnectorError::MalformedPayload`] with the offending value
+    /// included in the message.
+    ///
+    /// # Usage
+    ///
+    /// Call this at every entry-point that will later write the `event_id` into
+    /// a filesystem path (e.g. the spool helper). Use [`Self::new`] only when
+    /// the source is already trusted (deserialization from a controlled
+    /// datastore, internal construction in tests).
+    pub fn parse(value: impl Into<String>) -> Result<Self, ConnectorError> {
+        let raw: String = value.into();
+        // Defense-in-depth: reject obvious path-traversal characters before
+        // delegating to the ULID parser. This catches inputs like
+        // "../../etc/passwd" or "foo\0bar" that the ULID parser would also
+        // reject but whose intent is specifically adversarial.
+        if raw.contains('/') || raw.contains('\\') || raw.contains("..") || raw.contains('\0') {
+            return Err(ConnectorError::MalformedPayload(format!(
+                "invalid event_id: {raw:?} (contains path-traversal characters)"
+            )));
+        }
+        // Primary check: must be a valid ULID.
+        ulid::Ulid::from_string(&raw).map_err(|_| {
+            ConnectorError::MalformedPayload(format!(
+                "invalid event_id: {raw:?} (must be a 26-char Crockford base32 ULID)"
+            ))
+        })?;
+        Ok(Self(raw))
     }
 
     /// Borrow the inner string slice.

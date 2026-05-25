@@ -795,6 +795,7 @@ dependencies = [
  "toml 0.8.23",
  "tower",
  "tracing",
+ "ulid",
 ]
 
 [[package]]
@@ -6193,11 +6194,11 @@ dependencies = [
 
 [[package]]
 name = "ulid"
-version = "1.2.1"
+version = "1.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "470dbf6591da1b39d43c14523b2b469c86879a53e8b758c8e090a470fe7b1fbe"
+checksum = "f294bff79170ed1c5633812aff1e565c35d993a36e757f9bc0accf5eec4e6045"
 dependencies = [
- "rand 0.9.4",
+ "rand 0.8.6",
  "web-time",
 ]
 
