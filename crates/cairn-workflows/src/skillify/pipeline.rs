@@ -171,15 +171,29 @@ impl SkillifyPipeline {
 
         let payload_source_refs = payload.source_record_ids.clone();
 
-        // Round 7 hardening: if a previous run left a candidate directory
-        // with a non-passing gate report, purge it before materializing the
-        // newly authored bundle. Otherwise `materialize_bundle` returns the
-        // existing (stale) on-disk bundle and the new gates would run
-        // against the OLD scripts/tests, leaving the candidate permanently
-        // stuck or — worse — promoting a spec that doesn't describe the
-        // actual installed artifacts. `candidate_ready` returned false at
-        // the handler's replay guard so we know the on-disk copy is stale.
+        // Round 7 hardening (with round-13 refinement): purge stale
+        // candidate dirs before re-materializing, BUT preserve install-
+        // only candidates (those without a `skill-spec.draft.json`)
+        // because those represent bytes a SkillPack installed and which
+        // need re-gating, NOT re-authoring. Without this carve-out,
+        // installing a pack then running the pipeline would discard the
+        // installed bytes and replace them with fresh LLM output, making
+        // SkillPack install effectively useless.
+        //
+        // The install path strips skill-spec.draft.json (round-7), so its
+        // absence is a reliable signal of "this came from install, not
+        // from a prior pipeline author stage".
         if candidate_dir.exists() {
+            let was_install_only = candidate_dir.join("manifest.json").exists()
+                && !candidate_dir.join("skill-spec.draft.json").exists();
+            if was_install_only {
+                let msg = format!(
+                    "candidate `{candidate_id}` was installed via skillpack and needs explicit re-gating; refusing to overwrite with re-authored bundle"
+                );
+                errors.push(msg.clone());
+                let _ = state.fail(msg);
+                return Ok(Self::build_result(&state, errors, start));
+            }
             std::fs::remove_dir_all(&candidate_dir)?;
         }
 

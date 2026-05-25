@@ -4,9 +4,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use cairn_core::contract::llm_provider::LLMProvider;
-use cairn_core::pipeline::skillify::{
-    SkillArtifactBundle, SkillLintSnapshot, SkillifyGateReport, SkillifyGateStatus,
-};
+use cairn_core::pipeline::skillify::{SkillArtifactBundle, SkillifyGateReport, SkillifyGateStatus};
 
 use super::gate_registry::GateRunnerRegistry;
 use super::gate_runner::GateRunContext;
@@ -60,7 +58,12 @@ impl HealthCheckRunner {
             serde_json::from_slice(&std::fs::read(candidate_dir.join("manifest.json"))?)?;
 
         let authored = reconstruct_authored(&candidate_dir, &bundle)?;
-        let snapshot = SkillLintSnapshot { skills: vec![] };
+
+        // Round-13 hardening: use the REAL vault snapshot so health checks
+        // catch collisions with skills added since the last gate run.
+        // Previously the empty snapshot let a candidate report "healthy"
+        // even after another skill installed a colliding trigger.
+        let snapshot = super::snapshot::build_vault_snapshot(&self.vault_root, Some(candidate_id))?;
 
         let ctx = GateRunContext {
             vault_root: &self.vault_root,

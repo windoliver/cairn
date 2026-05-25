@@ -1178,3 +1178,65 @@ async fn resolver_trigger_rejects_substring_shadowing() {
         "expected overlap rejection"
     );
 }
+
+#[tokio::test]
+async fn skill_contract_fails_when_uses_mismatches_slug() {
+    let temp = TempDir::new().unwrap();
+    let mut a = authored("deploy-hotfix");
+    // Frontmatter declares a different script than the slug points at.
+    a.skill_markdown = "---\nlane: deploy.hotfix\ntriggers:\n  - deploy hotfix\nuses: scripts/wrong.sh\nfiles_to: wiki/summaries/\n---\nBody.".to_owned();
+    let b = bundle("deploy-hotfix");
+    let ctx = GateRunContext {
+        vault_root: temp.path(),
+        candidate_id: "skc_test",
+        candidate_dir: temp.path().to_path_buf(),
+        bundle: &b,
+        authored: &a,
+        llm: None,
+        snapshot: &empty_snapshot(),
+    };
+    let result = SkillContractRunner.run(&ctx).await;
+    assert_eq!(result.status, SkillifyGateStatus::Failed);
+    assert!(result.message.unwrap_or_default().contains("uses"));
+}
+
+#[tokio::test]
+async fn skill_contract_fails_when_files_to_mismatches_filing_rules() {
+    let temp = TempDir::new().unwrap();
+    let mut a = authored("deploy-hotfix");
+    a.skill_markdown = "---\nlane: deploy.hotfix\ntriggers:\n  - deploy hotfix\nuses: scripts/deploy-hotfix.sh\nfiles_to: wiki/different/\n---\nBody.".to_owned();
+    let b = bundle("deploy-hotfix");
+    let ctx = GateRunContext {
+        vault_root: temp.path(),
+        candidate_id: "skc_test",
+        candidate_dir: temp.path().to_path_buf(),
+        bundle: &b,
+        authored: &a,
+        llm: None,
+        snapshot: &empty_snapshot(),
+    };
+    let result = SkillContractRunner.run(&ctx).await;
+    assert_eq!(result.status, SkillifyGateStatus::Failed);
+    assert!(result.message.unwrap_or_default().contains("files_to"));
+}
+
+#[tokio::test]
+async fn skill_contract_fails_when_trigger_not_in_resolver_triggers() {
+    let temp = TempDir::new().unwrap();
+    let mut a = authored("deploy-hotfix");
+    // Frontmatter trigger is not in authored resolver_triggers
+    a.skill_markdown = "---\nlane: deploy.hotfix\ntriggers:\n  - unrelated phrase\nuses: scripts/deploy-hotfix.sh\nfiles_to: wiki/summaries/\n---\nBody.".to_owned();
+    let b = bundle("deploy-hotfix");
+    let ctx = GateRunContext {
+        vault_root: temp.path(),
+        candidate_id: "skc_test",
+        candidate_dir: temp.path().to_path_buf(),
+        bundle: &b,
+        authored: &a,
+        llm: None,
+        snapshot: &empty_snapshot(),
+    };
+    let result = SkillContractRunner.run(&ctx).await;
+    assert_eq!(result.status, SkillifyGateStatus::Failed);
+    assert!(result.message.unwrap_or_default().contains("trigger"));
+}

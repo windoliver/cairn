@@ -205,9 +205,15 @@ impl GateRunner for SkillContractRunner {
             );
         }
 
-        // Cross-check that the frontmatter agrees with the authored fields
-        // the rest of the pipeline uses. A mismatch means the contract
-        // markdown doesn't describe the actual artifacts.
+        // Round-13 hardening: cross-check the contract frontmatter
+        // against ALL of the authored-bundle fields the rest of the
+        // pipeline uses for execution, not just `lane`. Previously a
+        // contract could declare `uses: scripts/missing.sh` and ship
+        // different `triggers` / `files_to` than the actual gates
+        // exercised; promotion would record a contract that doesn't
+        // describe the artifact a consumer actually runs.
+
+        // 1. lane
         if let Some(lane_in_md) = top_level_scalar(frontmatter, "lane")
             && lane_in_md != ctx.authored.lane
         {
@@ -220,6 +226,73 @@ impl GateRunner for SkillContractRunner {
                 timer.elapsed_ms(),
             );
         }
+
+        // 2. uses — must point at the actual script path the pipeline
+        //    runs (scripts/<slug>.sh).
+        let expected_uses = format!("scripts/{}.sh", ctx.authored.slug);
+        if let Some(uses_in_md) = top_level_scalar(frontmatter, "uses")
+            && uses_in_md != expected_uses
+        {
+            return GateRunResult::failed(
+                self.artifact_kind(),
+                format!(
+                    "skill contract uses `{uses_in_md}` does not match authored script path `{expected_uses}`"
+                ),
+                timer.elapsed_ms(),
+            );
+        }
+
+        // 3. files_to — must match the authored filing_rules.files_to.
+        let authored_files_to = ctx
+            .authored
+            .filing_rules
+            .get("files_to")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("");
+        if let Some(files_to_in_md) = top_level_scalar(frontmatter, "files_to")
+            && !authored_files_to.is_empty()
+            && files_to_in_md != authored_files_to
+        {
+            return GateRunResult::failed(
+                self.artifact_kind(),
+                format!(
+                    "skill contract files_to `{files_to_in_md}` does not match authored filing_rules `{authored_files_to}`"
+                ),
+                timer.elapsed_ms(),
+            );
+        }
+
+        // 4. triggers — frontmatter list must be a subset of (or equal to)
+        //    the authored resolver_triggers. Use case-insensitive trim
+        //    semantics matching the resolver. If lengths or members
+        //    differ, the contract advertises capabilities the gates
+        //    didn't exercise.
+        if let Some(md_triggers) = top_level_list(frontmatter, "triggers") {
+            let authored_triggers: Vec<String> = ctx
+                .authored
+                .resolver_triggers
+                .as_array()
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(serde_json::Value::as_str)
+                        .map(|s| s.trim().to_lowercase())
+                        .collect()
+                })
+                .unwrap_or_default();
+            for t in &md_triggers {
+                let t_norm = t.trim().to_lowercase();
+                if !authored_triggers.contains(&t_norm) {
+                    return GateRunResult::failed(
+                        self.artifact_kind(),
+                        format!(
+                            "skill contract trigger `{t}` is not in authored resolver_triggers"
+                        ),
+                        timer.elapsed_ms(),
+                    );
+                }
+            }
+        }
+
         GateRunResult::passed(self.artifact_kind(), timer.elapsed_ms())
     }
 }

@@ -118,6 +118,17 @@ impl SkillPackBuilder {
             std::collections::BTreeSet::new();
 
         for cid in &self.candidate_ids {
+            // Round-13 hardening: validate every caller-supplied candidate
+            // id with the same safe-token rules used by install. Without
+            // this a CLI caller passing `--candidates ../escape` could
+            // make build read or scan outside the skillify directory
+            // before any later check trips.
+            super::materialize::validate_path_token("candidate id", cid).map_err(|e| {
+                SkillPackBuildError::Pack(SkillPackError::InvalidName {
+                    reason: format!("candidate id `{cid}` is not a safe path token: {e}"),
+                })
+            })?;
+
             let cand_dir = vault_root.join(".cairn/evolution/skillify").join(cid);
 
             let manifest_path = cand_dir.join("manifest.json");
