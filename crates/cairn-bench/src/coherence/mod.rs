@@ -96,6 +96,23 @@ pub enum GateError {
     },
 }
 
+impl GateError {
+    /// Map an error to its sysexits-style process exit code.
+    ///
+    /// - `78` (`EX_CONFIG`) — bad manifest, baseline, or cassette content.
+    /// - `1` — runtime error (trend I/O, score invariant, etc.).
+    #[must_use]
+    pub const fn exit_code(&self) -> u8 {
+        match self {
+            Self::Replay(_)
+            | Self::Threshold(_)
+            | Self::BaselineIo { .. }
+            | Self::BaselineJson { .. } => 78,
+            Self::Score(_) | Self::Trend(_) => 1,
+        }
+    }
+}
+
 /// Drive every included cassette through the replay engine, score per
 /// category, evaluate the gate, render the report, optionally write the
 /// trend line, and optionally rewrite the baseline.
@@ -247,16 +264,19 @@ fn default_includes() -> Vec<String> {
 
 /// Dispatch the `coherence` subcommand. Returns the process exit code.
 ///
-/// # Errors
-/// Returns any orchestrator error (replay, score, threshold, trend, baseline I/O).
-pub async fn dispatch(args: CoherenceArgs) -> Result<u8, GateError> {
+/// Maps orchestrator errors to their sysexits-style exit codes
+/// (see [`GateError::exit_code`]) and writes a one-line diagnostic to
+/// stderr instead of bubbling the error up to `main`, which would print
+/// the chain and exit with code 1.
+pub async fn dispatch(args: CoherenceArgs) -> u8 {
     match args.cmd {
         CoherenceCmd::Run(run) => dispatch_run(run).await,
     }
 }
 
-async fn dispatch_run(run: CoherenceRunArgs) -> Result<u8, GateError> {
+async fn dispatch_run(run: CoherenceRunArgs) -> u8 {
     let trend_path = run.trend.clone();
+    let json = run.json;
     let opts = GateOptions {
         mode: run.gate.into(),
         cassettes_dir: run.cassettes,
@@ -272,8 +292,14 @@ async fn dispatch_run(run: CoherenceRunArgs) -> Result<u8, GateError> {
         run_id: ulid_like(),
     };
     let run_id = opts.run_id.clone();
-    let outcome = run_coherence_gate(opts).await?;
-    if run.json {
+    let outcome = match run_coherence_gate(opts).await {
+        Ok(o) => o,
+        Err(e) => {
+            eprintln!("coherence: {e}");
+            return e.exit_code();
+        }
+    };
+    if json {
         let value = render_json(&outcome.report, &trend_path.display().to_string(), &run_id);
         println!(
             "{}",
@@ -282,7 +308,7 @@ async fn dispatch_run(run: CoherenceRunArgs) -> Result<u8, GateError> {
     } else {
         print!("{}", outcome.human);
     }
-    Ok(if outcome.gate_passed { 0 } else { 69 })
+    if outcome.gate_passed { 0 } else { 69 }
 }
 
 fn ulid_like() -> String {
@@ -319,4 +345,47 @@ fn write_baseline(path: &std::path::Path, baseline: &Baseline) -> Result<(), Gat
         source,
     })?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn exit_code_maps_config_errors_to_78() {
+        let cases = [
+            GateError::Threshold(ThresholdError::UnsupportedManifestVersion { version: 99 }),
+            GateError::BaselineIo {
+                path: "p".to_owned(),
+                source: std::io::Error::from(std::io::ErrorKind::NotFound),
+            },
+            GateError::BaselineJson {
+                path: "p".to_owned(),
+                source: serde_json::from_str::<serde_json::Value>("not json").unwrap_err(),
+            },
+            GateError::Replay(cairn_test_fixtures::replay::ReplayError::InvalidManifest(
+                "bad".to_owned(),
+            )),
+        ];
+        for err in cases {
+            assert_eq!(err.exit_code(), 78, "{err:?} should map to 78");
+        }
+    }
+
+    #[test]
+    fn exit_code_maps_runtime_errors_to_1() {
+        let cases = [
+            GateError::Score(ScoreError::LengthMismatch {
+                actions: 1,
+                reports: 0,
+            }),
+            GateError::Trend(TrendError::MissingSchemaVersion {
+                path: "p".to_owned(),
+                line: 1,
+            }),
+        ];
+        for err in cases {
+            assert_eq!(err.exit_code(), 1, "{err:?} should map to 1");
+        }
+    }
 }

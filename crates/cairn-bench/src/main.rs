@@ -57,7 +57,7 @@ async fn main() -> anyhow::Result<()> {
             std::process::exit(outcome.exit_code().into());
         }
         Cmd::Coherence(args) => {
-            let code = cairn_bench::coherence::dispatch(args).await?;
+            let code = cairn_bench::coherence::dispatch(args).await;
             std::process::exit(code.into());
         }
         Cmd::All { skip } => {
