@@ -234,18 +234,30 @@ jobs:
             git fetch --depth=1 origin "$trusted_sha"
             git show "$trusted_sha:crates/cairn-bench/manifests/coherence.toml" > .ci-trusted/coherence.toml
             git show "$trusted_sha:crates/cairn-bench/baselines/coherence.json" > .ci-trusted/coherence.json
+            # Also pull the trusted cassette corpus. The default cassette
+            # dir lives at fixtures/v0/replay; a PR could otherwise keep
+            # one easy action per category to satisfy the coverage guard
+            # and silently drop hard cases. We materialise the three
+            # extended-domain cassettes at the base SHA.
+            mkdir -p .ci-trusted/replay
+            for cassette in research_domain engineering_domain support_domain; do
+              git show "$trusted_sha:fixtures/v0/replay/${cassette}.json" > ".ci-trusted/replay/${cassette}.json"
+            done
             echo "manifest=.ci-trusted/coherence.toml" >> "$GITHUB_OUTPUT"
             echo "baseline=.ci-trusted/coherence.json" >> "$GITHUB_OUTPUT"
+            echo "cassettes=.ci-trusted/replay" >> "$GITHUB_OUTPUT"
           else
             echo "manifest=crates/cairn-bench/manifests/coherence.toml" >> "$GITHUB_OUTPUT"
             echo "baseline=crates/cairn-bench/baselines/coherence.json" >> "$GITHUB_OUTPUT"
+            echo "cassettes=fixtures/v0/replay" >> "$GITHUB_OUTPUT"
           fi
       - name: Run coherence gate
         run: |
           ./target/release/cairn-bench coherence run \
             --gate ${{ steps.gate.outputs.mode }} \
             --manifest ${{ steps.gate.outputs.manifest }} \
-            --baseline ${{ steps.gate.outputs.baseline }}
+            --baseline ${{ steps.gate.outputs.baseline }} \
+            --cassettes ${{ steps.gate.outputs.cassettes }}
         env:
           CAIRN_MOCK_EMBEDDER: "1"
           CAIRN_KEYSTORE: "file"

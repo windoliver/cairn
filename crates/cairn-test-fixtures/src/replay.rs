@@ -833,6 +833,23 @@ async fn run_search_action(
 ) -> ReplayCheckReport {
     let expected = expected_search_value(&action.expected);
     let actual = run_search(store, scenario, action).await;
+    // Stale-avoidance search actions use a broader `limit` so the
+    // disjointness check sees lower-ranked leaks. They assert only the
+    // top-K hits in `expected.record_ids` AND no stale id anywhere in
+    // the returned list. A plain exact-match would force the cassette
+    // author to predict every result the BM25 ranker may emit, which is
+    // brittle. So when `stale_record_ids` is non-empty we use a prefix
+    // comparison plus an explicit disjointness assertion.
+    if !action.stale_record_ids.is_empty() {
+        return stale_search_check(
+            &action.query,
+            &action.story,
+            scenario,
+            &action.expected,
+            &action.stale_record_ids,
+            &actual,
+        );
+    }
     report_check(
         &scenario.id,
         &action.story,
@@ -841,6 +858,74 @@ async fn run_search_action(
         expected,
         actual,
     )
+}
+
+fn stale_search_check(
+    query: &str,
+    story_label: &str,
+    scenario: &ReplayScenario,
+    expectation: &ReplayExpectation,
+    stale_ids: &[String],
+    actual: &Value,
+) -> ReplayCheckReport {
+    let expected_prefix = match expectation {
+        ReplayExpectation::Hits { record_ids } => record_ids.clone(),
+        ReplayExpectation::CapabilityUnavailable { .. } => Vec::new(),
+    };
+    let prefix_ok = actual_prefix_matches(actual, &expected_prefix);
+    let stale_absent = !actual_contains_any(actual, stale_ids);
+    let passed = matches!(actual.get("status").and_then(Value::as_str), Some("hits"))
+        && prefix_ok
+        && stale_absent;
+    let expected_view = json!({
+        "status": "hits",
+        "record_ids_prefix": expected_prefix,
+        "stale_record_ids_absent": stale_ids,
+    });
+    let actual_view = json!({
+        "status": actual.get("status").cloned().unwrap_or(Value::Null),
+        "record_ids": actual.get("record_ids").cloned().unwrap_or(Value::Null),
+    });
+    ReplayCheckReport {
+        scenario_id: scenario.id.clone(),
+        story: story_label.to_owned(),
+        verb: "search".to_owned(),
+        query: Some(query.to_owned()),
+        message: if passed {
+            None
+        } else if !prefix_ok {
+            Some("stale search: expected prefix did not match top hits".to_owned())
+        } else if !stale_absent {
+            Some("stale search: stale record id appeared in results".to_owned())
+        } else {
+            Some("stale search: response was not status=hits".to_owned())
+        },
+        expected: expected_view,
+        actual: actual_view,
+        passed,
+    }
+}
+
+fn actual_prefix_matches(actual: &Value, expected_prefix: &[String]) -> bool {
+    let Some(arr) = actual.get("record_ids").and_then(Value::as_array) else {
+        return false;
+    };
+    if arr.len() < expected_prefix.len() {
+        return false;
+    }
+    expected_prefix
+        .iter()
+        .zip(arr.iter())
+        .all(|(want, got)| got.as_str() == Some(want.as_str()))
+}
+
+fn actual_contains_any(actual: &Value, candidates: &[String]) -> bool {
+    let Some(arr) = actual.get("record_ids").and_then(Value::as_array) else {
+        return false;
+    };
+    arr.iter()
+        .filter_map(Value::as_str)
+        .any(|id| candidates.iter().any(|c| c == id))
 }
 
 async fn assemble_hot_replay(store: &SqliteMemoryStore) -> Result<Value, ReplayError> {

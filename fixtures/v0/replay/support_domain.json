@@ -130,7 +130,7 @@
       "story": "SUPPORT_STALE_AVOIDANCE",
       "mode": "keyword",
       "query": "invoice webhook queue",
-      "limit": 1,
+      "limit": 5,
       "expected": {
         "status": "hits",
         "record_ids": ["01HQZX9F5N00000000000000S5"]

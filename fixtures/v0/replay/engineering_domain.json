@@ -130,7 +130,7 @@
       "story": "ENGINEERING_STALE_AVOIDANCE",
       "mode": "keyword",
       "query": "playbook acquire ledger writer",
-      "limit": 1,
+      "limit": 5,
       "expected": {
         "status": "hits",
         "record_ids": ["01HQZX9F5N00000000000000E5"]
