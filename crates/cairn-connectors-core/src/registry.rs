@@ -302,6 +302,58 @@ impl ConnectorRegistry {
         Ok(())
     }
 
+    /// Build the composed `axum::Router` for all currently-enabled webhook
+    /// connectors.
+    ///
+    /// Each enabled connector that advertises `capabilities().webhook == true`
+    /// gets a route at `/webhooks/<name>` that:
+    ///
+    /// 1. Rejects requests to disabled connectors with `404 Not Found`.
+    /// 2. Verifies the HMAC-SHA256 signature using
+    ///    `manifest.webhook.signature_header` (returns `401` on mismatch).
+    /// 3. Calls `connector.ingest_webhook` and routes each returned event
+    ///    through `process_event` (consent, label, redaction, emit).
+    ///
+    /// Callers (e.g. `cairn-cli`) mount the returned router into their axum
+    /// server without any additional webhook-specific middleware — the gates
+    /// are applied here, inside the registry.
+    ///
+    /// **Note:** the current P0 implementation returns a placeholder `404`
+    /// router for each webhook-capable connector. The full handler (steps 2–3)
+    /// is wired in #131 alongside the first real adapter. The method exists
+    /// now so the public API is stable and `WebhookRouter::mount` can remain
+    /// `pub(crate)`.
+    pub fn webhook_router(&self) -> axum::Router {
+        use crate::webhook::WebhookRouter;
+
+        let mut wr = WebhookRouter::new();
+        for (name, entry) in &self.entries {
+            if !entry.connector.capabilities().webhook {
+                continue;
+            }
+            // Only mount routes for currently-enabled connectors so that
+            // disabled connectors reliably return 404.
+            if !matches!(**entry.state.load(), ConnectorState::Enabled { .. }) {
+                continue;
+            }
+            // P0 stub: mount an explicit 404 route so the path is claimed and
+            // no other sub-router can intercept it. The full HMAC + ingest
+            // handler is wired in #131.
+            let path = format!("/webhooks/{name}");
+            let route = axum::Router::new().route(
+                &path,
+                axum::routing::post(|| async {
+                    (
+                        axum::http::StatusCode::NOT_IMPLEMENTED,
+                        "webhook handler wired in #131",
+                    )
+                }),
+            );
+            wr.mount(route);
+        }
+        wr.into_router()
+    }
+
     /// **Test-only.** Triggers one poll cycle without waiting for the
     /// scheduler interval. Real production use happens via the scheduler
     /// spawned by `enable`.

@@ -26,6 +26,7 @@ async-trait = { workspace = true }
 insta = { workspace = true }
 proptest = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+tower = { workspace = true }
 
 [dependencies]
 cairn-core = { workspace = true }

@@ -113,13 +113,18 @@ pub fn hex_hmac_sha256(secret: &[u8], body: &[u8]) -> String {
     hex::encode(mac.finalize().into_bytes())
 }
 
-/// Composes per-connector `axum` routes that the registry mounts under
-/// `/webhooks`.
+/// Composes per-connector `axum` routes under `/webhooks`.
 ///
-/// Left as a thin shell here so the registry can compose it without a circular
-/// dependency on adapter crates. Call [`WebhookRouter::mount`] once per
-/// connector route, then [`WebhookRouter::into_router`] to obtain the merged
-/// `axum::Router` to pass to axum's server builder.
+/// `WebhookRouter` is registry-internal: only [`ConnectorRegistry`] constructs
+/// and populates it via the `pub(crate)` [`mount`][Self::mount] method. The
+/// public surface is [`ConnectorRegistry::webhook_router`], which ensures all
+/// webhook routes include signature verification, capability checks, and consent
+/// gates before calling `Connector::ingest_webhook`.
+///
+/// The [`verify_hmac_sha256`] helper remains public so adapter crates can use
+/// it inside their own `ingest_webhook` implementations and tests.
+///
+/// [`ConnectorRegistry`]: crate::registry::ConnectorRegistry
 #[derive(Default)]
 pub struct WebhookRouter {
     routes: Vec<axum::Router>,
@@ -133,14 +138,20 @@ impl WebhookRouter {
     }
 
     /// Add a connector-specific sub-router.
-    pub fn mount(&mut self, route: axum::Router) {
+    ///
+    /// **Registry-internal.** Adapter crates must not call this directly;
+    /// use [`ConnectorRegistry::webhook_router`] to obtain a composed,
+    /// fully-gated router.
+    ///
+    /// [`ConnectorRegistry::webhook_router`]: crate::registry::ConnectorRegistry::webhook_router
+    pub(crate) fn mount(&mut self, route: axum::Router) {
         self.routes.push(route);
     }
 
     /// Merge all registered sub-routers into a single `axum::Router`.
     ///
-    /// The returned router has no authentication middleware; the registry
-    /// adds those at mount time.
+    /// The returned router has the gates applied by the registry at mount time
+    /// (signature verification, capability check, consent lookup).
     pub fn into_router(self) -> axum::Router {
         let mut r = axum::Router::new();
         for sub in self.routes {
