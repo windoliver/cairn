@@ -48,7 +48,7 @@ use crate::credential::CredentialStore;
 use crate::emit::{PipelineEmit, build_capture_event};
 use crate::error::ConnectorError;
 use crate::event::ConnectorPayload;
-use crate::rate_limit::RateLimit;
+use crate::rate_limit::{ByteRateLimit, RateLimit};
 use crate::redact::RedactionPipeline;
 use crate::webhook::{WebhookRequest, verify_hmac_sha256};
 
@@ -95,10 +95,13 @@ struct Entry {
     ///
     /// `Arc` so the poll-task closure can hold a clone. Scopes are added
     /// lazily the first time an event is seen for that scope.
-    ///
-    /// TODO(#130-followup): wire `max_bytes_per_day` budget once the
-    /// byte-budget tracker is implemented.
     rate_limit: Arc<RateLimit>,
+    /// Per-connector daily byte budget, initialized from
+    /// `manifest.budget.max_bytes_per_day` when the connector is enabled.
+    ///
+    /// Tracks cumulative bytes spooled within each 24-hour window. Refills
+    /// every 24 h. `Arc` so the poll-task closure can hold a clone.
+    byte_limit: Arc<ByteRateLimit>,
     /// Opaque cursor returned by the most recent successful poll tick.
     ///
     /// The cursor is only advanced AFTER all events in the poll outcome have
@@ -124,6 +127,8 @@ struct WebhookEntryState {
     state: Arc<ArcSwap<ConnectorState>>,
     /// Per-connector item-rate bucket (shared with poll-task if any).
     rate_limit: Arc<RateLimit>,
+    /// Per-connector daily byte-volume budget (shared with poll-task if any).
+    byte_limit: Arc<ByteRateLimit>,
     /// Pre-parsed maximum body byte count from `manifest.payload.max_bytes_parsed`.
     max_body_bytes: u64,
     /// HTTP header name that carries the HMAC-SHA256 signature, from
@@ -343,10 +348,13 @@ impl ConnectorRegistry {
         }
         // --- End sensor-identity binding ------------------------------------
 
-        // Initialize the per-connector rate limit from the manifest budget.
-        // Scopes are added lazily on first event via `RateLimit::ensure_scope`.
+        // Initialize the per-connector item-rate limit and daily byte budget
+        // from the manifest budget fields. Scopes are added lazily on first
+        // event via `ensure_scope`.
         let budget_capacity = plugin.manifest().budget.max_items_per_hour;
         let rate_limit = Arc::new(RateLimit::empty_per_hour(budget_capacity));
+        let byte_capacity = plugin.manifest().budget.max_bytes_per_day_parsed;
+        let byte_limit = Arc::new(ByteRateLimit::new(byte_capacity));
         self.entries.insert(
             name,
             Entry {
@@ -355,6 +363,7 @@ impl ConnectorRegistry {
                 poll_token: None,
                 poll_handle: None,
                 rate_limit,
+                byte_limit,
                 cursor: Arc::new(TokioMutex::new(None)),
             },
         );
@@ -410,6 +419,7 @@ impl ConnectorRegistry {
             let consent = self.consent.clone();
             let state = Arc::clone(&entry.state);
             let rate_limit = Arc::clone(&entry.rate_limit);
+            let byte_limit = Arc::clone(&entry.byte_limit);
             let cursor_ref = Arc::clone(&entry.cursor);
             let spool_root = self.spool_root.clone();
             let name_owned = name.to_owned();
@@ -498,7 +508,7 @@ impl ConnectorRegistry {
                                     for event in outcome.events {
                                         if let Err(err) = process_event(
                                             event, &connector, &state, &consent, &emit,
-                                            &rate_limit, &spool_root,
+                                            &rate_limit, &byte_limit, &spool_root,
                                         ).await {
                                             tracing::warn!(
                                                 connector = %name_owned,
@@ -655,6 +665,7 @@ impl ConnectorRegistry {
                     connector: Arc::clone(&entry.connector),
                     state: Arc::clone(&entry.state),
                     rate_limit: Arc::clone(&entry.rate_limit),
+                    byte_limit: Arc::clone(&entry.byte_limit),
                     max_body_bytes: entry.connector.manifest().payload.max_bytes_parsed,
                     signature_header: entry.connector.manifest().webhook.signature_header.clone(),
                 },
@@ -755,6 +766,7 @@ impl ConnectorRegistry {
                 &self.consent,
                 &self.emit,
                 &entry.rate_limit,
+                &entry.byte_limit,
                 &self.spool_root,
             )
             .await?;
@@ -844,22 +856,37 @@ fn payload_to_bytes(payload: &ConnectorPayload) -> Result<(Vec<u8>, &'static str
     }
 }
 
-/// Write `bytes` to `{spool_root}/{relative_path}` atomically.
+/// Write `bytes` to a unique per-attempt staging file under the same directory
+/// as `{spool_root}/{relative_path}` and return the staging (`.tmp`) path
+/// alongside the intended final path.
 ///
-/// Uses a write-to-temp-then-rename pattern so readers never observe a
-/// partially-written file. The temp file is placed in the same directory as
-/// the final path (same filesystem for rename) with a unique per-invocation
-/// suffix to prevent races when multiple writers target the same path.
+/// # Two-phase commit (Finding Q)
+///
+/// The spool write is deliberately split into two phases to protect committed
+/// files from accidental deletion under at-least-once retry:
+///
+/// 1. **Stage** (`spool_bytes_to_tmp`): write bytes to a unique per-attempt
+///    `.tmp.<pid>.<seq>.tmp` sibling. Returns both the tmp path and the final
+///    path so the caller can act on each independently.
+/// 2. **Commit** (caller's responsibility): after `emit` succeeds, call
+///    `tokio::fs::rename(tmp_path, final_path)` to atomically promote the
+///    staging file to the final content-addressed name. Rename overwrites
+///    silently — content is content-addressed via the SHA-256 hash, so
+///    identical bytes colliding is safe.
+///
+/// On emit failure the caller must delete **only the tmp path** — never the
+/// final path, which may belong to a prior committed attempt for the same
+/// `event_id`.
 ///
 /// # Errors
 ///
-/// Returns [`ConnectorError::Fatal`] if directory creation, the write, or the
-/// rename fails.
-async fn spool_bytes(
+/// Returns [`ConnectorError::Fatal`] if directory creation or the write fails.
+/// The rename step is left to the caller.
+async fn spool_bytes_to_tmp(
     spool_root: &std::path::Path,
     relative_path: &str,
     bytes: &[u8],
-) -> Result<(), ConnectorError> {
+) -> Result<(std::path::PathBuf, std::path::PathBuf), ConnectorError> {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     // Per-process monotonic counter, combined with the PID, gives a unique
@@ -879,13 +906,9 @@ async fn spool_bytes(
             parent.display()
         ))
     })?;
-    // Use a per-invocation unique suffix to avoid races between concurrent
-    // writers that share a target path (e.g. parallel integration tests run
-    // in separate processes via nextest).
-    //
-    // The suffix combines the OS process ID (unique per-process) with a
-    // process-local atomic counter (unique within a process), giving a suffix
-    // that is unique across all concurrent writers regardless of scheduling.
+    // Unique suffix: PID (per-process) + monotonic counter (per-invocation).
+    // Together they guarantee uniqueness across concurrent writers in the same
+    // directory, including parallel integration tests running via nextest.
     let seq = SPOOL_SEQ.fetch_add(1, Ordering::Relaxed);
     let pid = std::process::id();
     let tmp_name = format!(
@@ -899,34 +922,24 @@ async fn spool_bytes(
             tmp_path.display()
         ))
     })?;
-    tokio::fs::rename(&tmp_path, &final_path)
-        .await
-        .map_err(|e| {
-            ConnectorError::fatal_msg(format!(
-                "failed to rename spool temp {} → {}: {e}",
-                tmp_path.display(),
-                final_path.display()
-            ))
-        })?;
-    Ok(())
+    Ok((tmp_path, final_path))
 }
 
-/// Remove the spool file at `{spool_root}/{relative_path}` if it exists.
+/// Remove a spool staging file at `path` if it exists.
 ///
-/// Used by `process_event` to clean up orphaned spool files when the emit
-/// or budget reservation fails after the spool write has already completed
-/// (Finding M). Ignores `NotFound` errors — if the file was never created
-/// (e.g. the spool write itself failed) this is a safe no-op.
+/// Used by `process_event` to clean up per-attempt `.tmp.*` staging files when
+/// emit or an intermediate step fails (Finding Q + Finding M). Ignores
+/// `NotFound` — if the file was never created this is a safe no-op.
+///
+/// **Never pass the final content-addressed path here.** Only pass the
+/// per-attempt tmp path returned by [`spool_bytes_to_tmp`]. The final path
+/// may belong to a prior committed attempt and must not be deleted.
 ///
 /// Returns `Ok(())` on success or `NotFound`; propagates other I/O errors
 /// (permissions, filesystem errors) to the caller, which logs and discards
 /// them — cleanup is best-effort and must not shadow the primary error.
-async fn remove_spool_file_if_exists(
-    spool_root: &std::path::Path,
-    relative_path: &str,
-) -> Result<(), std::io::Error> {
-    let path = spool_root.join(relative_path);
-    match tokio::fs::remove_file(&path).await {
+async fn remove_tmp_file_if_exists(path: &std::path::Path) -> Result<(), std::io::Error> {
+    match tokio::fs::remove_file(path).await {
         Ok(()) => Ok(()),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(e) => Err(e),
@@ -1067,8 +1080,10 @@ fn sanitize_path_component(component: &str) -> Result<&str, ConnectorError> {
 /// [`ConnectorEvent`]: crate::event::ConnectorEvent
 // The validation + redaction + spool + emit pipeline has many sequential
 // steps; splitting it would break the logical narrative without improving
-// readability.
+// readability. The 8th argument (`byte_limit`) was added by Finding R;
+// bundling into a struct would add indirection without clarity gain.
 #[allow(clippy::too_many_lines)]
+#[allow(clippy::too_many_arguments)]
 async fn process_event(
     event: crate::event::ConnectorEvent,
     connector: &Arc<dyn Connector>,
@@ -1076,6 +1091,7 @@ async fn process_event(
     consent: &Arc<dyn ConnectorConsentJournal>,
     emit: &Arc<dyn PipelineEmit>,
     rate_limit: &Arc<RateLimit>,
+    byte_limit: &Arc<ByteRateLimit>,
     spool_root: &std::path::Path,
 ) -> Result<(), ConnectorError> {
     // -1. Path-safety check (Finding J): validate event_id as a ULID before
@@ -1274,14 +1290,41 @@ async fn process_event(
     // file and the vault reference.
     let spool_relative = format!("connector/{connector_name}/{event_id}_{hash_short}.{ext}");
 
-    // Atomically write to spool so the hash invariant holds: a reader that
-    // observes the file sees exactly the bytes we hashed.
-    // On spool failure: refund the reservation (no orphan file; the atomic
-    // write either completes fully or leaves nothing).
-    if let Err(e) = spool_bytes(spool_root, &spool_relative, &bytes).await {
+    // 6a. Reserve daily byte budget BEFORE writing to spool (Finding R).
+    //
+    //     The byte count is the length of the post-redaction wire bytes that
+    //     will be written to spool. Reserving before the write ensures that an
+    //     over-day-cap event is rejected without creating a spool file.
+    //
+    //     Reserve/release: on any subsequent failure (spool, build, emit), call
+    //     `byte_limit.refund` to restore the reserved bytes so the event can be
+    //     retried on the next tick without permanently consuming day budget.
+    let bytes_count = bytes.len() as u64;
+    byte_limit.ensure_scope(&scope_key);
+    if let Err(e) = byte_limit.try_reserve(&scope_key, bytes_count) {
         rate_limit.refund(&scope_key, 1);
         return Err(e);
     }
+
+    // 6b. Stage bytes to a per-attempt tmp file (Finding Q — two-phase commit).
+    //
+    //     `spool_bytes_to_tmp` writes to `<final>.{pid}.{seq}.tmp` and returns
+    //     both the tmp path and the intended final path. The rename from tmp to
+    //     final happens only AFTER emit succeeds (step 9). On any failure between
+    //     here and the successful emit, we delete only the tmp — never the final
+    //     path, which may have been committed by a prior successful attempt for
+    //     the same content-addressed event_id.
+    let (spool_tmp_path, spool_final_path) =
+        match spool_bytes_to_tmp(spool_root, &spool_relative, &bytes).await {
+            Ok(paths) => paths,
+            Err(e) => {
+                // Spool write failed; no tmp file exists (atomic write guarantees
+                // either full write or nothing). Refund both reservations.
+                rate_limit.refund(&scope_key, 1);
+                byte_limit.refund(&scope_key, bytes_count);
+                return Err(e);
+            }
+        };
 
     // Vault-relative path starts with `sources/` (brief §3 trust boundary).
     let payload_ref = format!("sources/{spool_relative}");
@@ -1289,16 +1332,21 @@ async fn process_event(
         Ok(h) => h,
         Err(e) => {
             // Parsing a freshly-formatted "sha256:<64-hex>" string should never
-            // fail; if it does, clean up the spool file and refund.
+            // fail; if it does, clean up only the tmp staging file and refund.
             rate_limit.refund(&scope_key, 1);
-            let _ = remove_spool_file_if_exists(spool_root, &spool_relative).await;
+            byte_limit.refund(&scope_key, bytes_count);
+            let _ = remove_tmp_file_if_exists(&spool_tmp_path).await;
             return Err(ConnectorError::fatal_msg(format!(
                 "payload hash parse error: {e}"
             )));
         }
     };
 
-    // 7. Build a CaptureEvent with the real hash and spooled path.
+    // 7. Build a CaptureEvent with the real hash and the final spooled path.
+    //    The CaptureEvent references `payload_ref` (the final content-addressed
+    //    path), which does not exist on disk yet. The rename in step 9 makes it
+    //    real after emit succeeds — this is intentional and safe because emit
+    //    only records the reference, not the bytes themselves.
     let captured = match build_capture_event(
         &redacted.event,
         connector.sensor_identity(),
@@ -1309,7 +1357,8 @@ async fn process_event(
         Ok(c) => c,
         Err(e) => {
             rate_limit.refund(&scope_key, 1);
-            let _ = remove_spool_file_if_exists(spool_root, &spool_relative).await;
+            byte_limit.refund(&scope_key, bytes_count);
+            let _ = remove_tmp_file_if_exists(&spool_tmp_path).await;
             return Err(e);
         }
     };
@@ -1327,7 +1376,8 @@ async fn process_event(
     //    before `disable` returns) is deferred to #131.
     if !matches!(**state.load(), ConnectorState::Enabled { .. }) {
         rate_limit.refund(&scope_key, 1);
-        let _ = remove_spool_file_if_exists(spool_root, &spool_relative).await;
+        byte_limit.refund(&scope_key, bytes_count);
+        let _ = remove_tmp_file_if_exists(&spool_tmp_path).await;
         return Err(ConnectorError::fatal_msg(format!(
             "connector {} was disabled mid-processing",
             redacted.event.connector
@@ -1335,13 +1385,38 @@ async fn process_event(
     }
 
     // 9. Hand the event to the downstream pipeline.
-    //    On error, refund the reservation AND delete the spool file so the
-    //    event can be retried on the next poll tick without permanently
-    //    reducing budget or accumulating orphan files (Finding M + Finding K).
-    if let Err(emit_err) = emit.emit(captured).await {
-        rate_limit.refund(&scope_key, 1);
-        let _ = remove_spool_file_if_exists(spool_root, &spool_relative).await;
-        return Err(emit_err);
+    //
+    //    On error: refund both reservations and delete only the per-attempt tmp
+    //    file (Finding Q + Finding R). The final content-addressed path, if it
+    //    exists from a prior committed attempt, is left untouched.
+    //
+    //    On success: atomically rename the tmp to the final path (two-phase
+    //    commit, Finding Q). If the final path already exists (prior committed
+    //    attempt with identical content), `tokio::fs::rename` overwrites it
+    //    silently — content-addressed bytes are identical so this is safe.
+    match emit.emit(captured).await {
+        Err(emit_err) => {
+            rate_limit.refund(&scope_key, 1);
+            byte_limit.refund(&scope_key, bytes_count);
+            let _ = remove_tmp_file_if_exists(&spool_tmp_path).await;
+            return Err(emit_err);
+        }
+        Ok(()) => {
+            // Commit: atomically promote the staging file to the final path.
+            // Best-effort — if the rename fails (e.g. cross-device move on an
+            // unusual filesystem), the event is already committed by `emit` and
+            // the tmp file will be cleaned up on the next registry restart.
+            // We log the error but do not surface it as a failure because the
+            // downstream pipeline has already accepted the event.
+            if let Err(e) = tokio::fs::rename(&spool_tmp_path, &spool_final_path).await {
+                tracing::warn!(
+                    tmp = %spool_tmp_path.display(),
+                    final_path = %spool_final_path.display(),
+                    error = %e,
+                    "spool rename failed after successful emit; tmp file left in place",
+                );
+            }
+        }
     }
 
     Ok(())
@@ -1547,6 +1622,7 @@ async fn handle_webhook(
             &state.consent,
             &state.emit,
             &entry.rate_limit,
+            &entry.byte_limit,
             &state.spool_root,
         )
         .await
@@ -1960,6 +2036,7 @@ max_depth = 10
 
         let tmp = tempfile::tempdir().expect("tempdir");
         let rate_limit = Arc::new(RateLimit::empty_per_hour(u32::MAX));
+        let byte_limit = Arc::new(ByteRateLimit::new(u64::MAX));
         let err = process_event(
             stub_event(),
             &connector,
@@ -1967,6 +2044,7 @@ max_depth = 10
             &consent,
             &emit,
             &rate_limit,
+            &byte_limit,
             tmp.path(),
         )
         .await
@@ -2000,6 +2078,7 @@ max_depth = 10
 
         let tmp = tempfile::tempdir().expect("tempdir");
         let rate_limit = Arc::new(RateLimit::empty_per_hour(u32::MAX));
+        let byte_limit = Arc::new(ByteRateLimit::new(u64::MAX));
         let err = process_event(
             spoofed,
             &connector,
@@ -2007,6 +2086,7 @@ max_depth = 10
             &consent,
             &emit,
             &rate_limit,
+            &byte_limit,
             tmp.path(),
         )
         .await

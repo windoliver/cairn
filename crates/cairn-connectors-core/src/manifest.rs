@@ -95,6 +95,13 @@ pub struct BudgetBlock {
     pub max_items_per_hour: u32,
     /// Maximum byte volume per day as a human-readable string (e.g. `"50MiB"`).
     pub max_bytes_per_day: String,
+    /// Parsed `max_bytes_per_day` value in bytes.
+    ///
+    /// Set by [`ConnectorManifest::parse_toml`] from the `max_bytes_per_day`
+    /// string; avoids re-parsing on every emitted event. This field is skipped
+    /// during TOML serialisation so the manifest round-trips cleanly.
+    #[serde(skip)]
+    pub max_bytes_per_day_parsed: u64,
 }
 
 /// Label allow-list — every emitted event must carry only declared labels.
@@ -213,6 +220,12 @@ impl ConnectorManifest {
         // not need to re-parse the string on every emitted event.
         parsed.payload.max_bytes_parsed = parse_byte_size(&parsed.payload.max_bytes)
             .map_err(|e| ConnectorError::MalformedPayload(format!("payload.max_bytes: {e}")))?;
+        // Parse max_bytes_per_day once at manifest-load time (Finding R).
+        // Enforced by the daily byte-budget tracker in `process_event`.
+        parsed.budget.max_bytes_per_day_parsed = parse_byte_size(&parsed.budget.max_bytes_per_day)
+            .map_err(|e| {
+                ConnectorError::MalformedPayload(format!("budget.max_bytes_per_day: {e}"))
+            })?;
         parsed.validate()?;
         Ok(parsed)
     }

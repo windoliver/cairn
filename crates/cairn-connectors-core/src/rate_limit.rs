@@ -216,6 +216,125 @@ impl RateLimit {
     }
 }
 
+// ---------------------------------------------------------------------------
+// ByteRateLimit — daily byte-volume cap (Finding R)
+// ---------------------------------------------------------------------------
+
+/// Per-scope byte-volume token bucket that limits how many bytes a connector
+/// may emit within one 24-hour window (Finding R).
+///
+/// A new bucket starts with `capacity_bytes` available and drains by the number
+/// of bytes in each accepted event. When the 24-hour interval has elapsed the
+/// bucket is refilled to `capacity_bytes` on the next reservation attempt.
+///
+/// # Usage
+///
+/// - Construct with [`ByteRateLimit::new`] at connector-enable time, passing
+///   `manifest.budget.max_bytes_per_day` as `capacity_bytes`.
+/// - Call [`ByteRateLimit::ensure_scope`] the first time a scope is seen.
+/// - Call [`ByteRateLimit::try_reserve`] before writing to spool.
+/// - Call [`ByteRateLimit::refund`] if a subsequent step (spool, emit) fails.
+#[derive(Debug)]
+pub struct ByteRateLimit {
+    inner: Mutex<HashMap<String, ByteBucket>>,
+    /// Per-scope capacity in bytes, used when registering a scope lazily.
+    capacity_bytes: u64,
+}
+
+#[derive(Debug)]
+struct ByteBucket {
+    remaining: u64,
+    capacity: u64,
+    last_refill: std::time::Instant,
+}
+
+impl ByteRateLimit {
+    /// Create a new `ByteRateLimit` with no initial scopes and a 24-hour
+    /// refill window.
+    ///
+    /// `capacity_bytes` is the maximum number of bytes the connector may emit
+    /// in any 24-hour period. Derived from `manifest.budget.max_bytes_per_day`.
+    #[must_use]
+    pub fn new(capacity_bytes: u64) -> Self {
+        Self {
+            inner: Mutex::new(HashMap::new()),
+            capacity_bytes,
+        }
+    }
+
+    /// Lazily register a scope using the stored per-connector capacity.
+    ///
+    /// If the scope is already registered this is a no-op (the existing bucket
+    /// is not reset). Call this before [`try_reserve`][Self::try_reserve] on
+    /// the first event for each scope.
+    pub fn ensure_scope(&self, scope: &str) {
+        let mut map = self.inner.lock().unwrap_or_else(|poisoned| {
+            // Discard partial mutations from a panicking thread — safe because
+            // bucket state is fully derived from `self.capacity_bytes`.
+            poisoned.into_inner()
+        });
+        let capacity = self.capacity_bytes;
+        map.entry(scope.to_owned()).or_insert_with(|| ByteBucket {
+            remaining: capacity,
+            capacity,
+            last_refill: std::time::Instant::now(),
+        });
+    }
+
+    /// Attempt to reserve `bytes` from the named `scope`'s bucket.
+    ///
+    /// Refills the bucket to capacity if 24 hours have elapsed since the
+    /// last refill. Returns [`ConnectorError::BudgetExceeded`] if the scope
+    /// is unknown or the bucket does not have enough bytes remaining.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConnectorError::BudgetExceeded`] if the scope is unregistered
+    /// or the daily byte cap has been reached.
+    pub fn try_reserve(&self, scope: &str, bytes: u64) -> Result<(), ConnectorError> {
+        let mut map = self
+            .inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        let bucket = map
+            .get_mut(scope)
+            .ok_or_else(|| ConnectorError::BudgetExceeded {
+                scope: scope.into(),
+            })?;
+
+        // Refill on 24-hour wall-clock interval.
+        if bucket.last_refill.elapsed() >= Duration::from_hours(24) {
+            bucket.remaining = bucket.capacity;
+            bucket.last_refill = std::time::Instant::now();
+        }
+
+        if bucket.remaining < bytes {
+            return Err(ConnectorError::BudgetExceeded {
+                scope: scope.into(),
+            });
+        }
+        bucket.remaining -= bytes;
+        Ok(())
+    }
+
+    /// Refund `bytes` to the named `scope`'s bucket.
+    ///
+    /// Call this when an operation that previously succeeded
+    /// [`try_reserve`][Self::try_reserve] later fails (e.g. emit returns an
+    /// error). The refund is clamped at the bucket capacity. Unknown scopes
+    /// are silently ignored.
+    pub fn refund(&self, scope: &str, bytes: u64) {
+        let mut map = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(bucket) = map.get_mut(scope) {
+            bucket.remaining = bucket.remaining.saturating_add(bytes).min(bucket.capacity);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
