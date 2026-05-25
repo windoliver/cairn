@@ -170,11 +170,15 @@ The following changes are **breaking** and trigger a v2 cut:
    `mcp-semver-policy.md` under "Currently deprecated".
 3. **Window.** Minimum two minor releases between announcement and v2 cutover.
 4. **Cut.** `cairn.mcp.v2` ships in a separate `crates/cairn-idl/schema-v2/`
-   directory with its own manifest; `cairn mcp` advertises both contracts in
-   `status.contract` (becomes an array) during the deprecation window; clients
-   pin via the `contract` field on every envelope.
-5. **Retire.** After the deprecation window plus one full release cycle past
-   v2 cutover, `cairn.mcp.v1` shutdown ships as a separate major Cairn release.
+   directory with its own manifest. The v1 `status.contract` field stays a
+   scalar `cairn.mcp.v1` and the v1 `prelude/status.json` schema
+   (`additionalProperties: false`) stays as-is — mutating it would itself be
+   breaking. v2 negotiation rides on the MCP `serverCapabilities.experimental`
+   map (already in use for `experimental["cairn.status"]`); v2-capable servers
+   add a sibling key `experimental["cairn.contracts"]`. Alternative: a separate
+   `cairn mcp --contract v2` endpoint that v1 clients never connect to.
+5. **Retire.** After the deprecation window plus one full minor release past
+   v2 cutover, `cairn.mcp.v1` retirement ships as a separate major Cairn release.
 
 ### §8. Extension-namespace policy
 - Each extension lives in its own `cairn.<name>.vN` namespace with **independent**
@@ -182,9 +186,11 @@ The following changes are **breaking** and trigger a v2 cut:
 - Extensions MUST NOT define a verb ID already used by core or by another
   extension. Collisions are a contract bug; the policy commits to a CI lint
   here when a second extension lands.
-- Extensions MAY ship inside the same Cairn release as core but advertise their
-  freeze status separately (`status.extensions[].stability`: `stable | beta`).
-  At v1.0, only `cairn.admin.v1` is `stable`.
+- Each extension's freeze status (stable / beta / reserved) is tracked in this
+  ADR + maintainer page, NOT on the wire — v1 `status.extensions[]` is closed
+  (`additionalProperties: false`). At v1.0, `cairn.admin.v1` is reserved
+  (dispatch deferred); the other four extensions ship under their own
+  independent `<namespace>.v1` semver.
 - An extension's breaking change does **not** trigger `cairn.mcp.v2`. It triggers
   `cairn.<name>.v2` on its own cadence.
 

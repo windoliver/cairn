@@ -70,32 +70,34 @@ full gates ON. Stability: frozen v1.0.
 
 ### Phase-gated under v0.2
 
-Advertised once the runtime reports `contract_phase: V0_2`. Stability:
-frozen v1.0 (identifier reserved at v0.1).
+Advertised once the runtime reports `contract_phase: V0_2` (gated on
+`llm_configured` and `FORGET_SESSION_WIRED` per
+`capability_matrix_v1::phase_v02_adds_summarize_narrative_and_forget_session`).
+Stability: frozen v1.0 (identifier reserved at v0.1).
 
 | Capability code |
 |-----------------|
 | `cairn.mcp.v1.summarize.narrative` |
 | `cairn.mcp.v1.forget.session` |
-| `cairn.mcp.v1.extension.aggregate` |
 
-### Phase-gated under v0.3
+### Phase-gated under v0.3 (today: empty)
 
-Advertised once the runtime reports `contract_phase: V0_3`. Stability:
-frozen v1.0 (identifier reserved at v0.1).
+At `Phase::V0_3`, today's `advertise()` returns the same set as `V0_2`
+(per `capability_matrix_v1::phase_v03_matches_v02_until_v03_wiring_lands`):
+`FORGET_SCOPE_WIRED=false` and every `COORD_*_WIRED=false`. The reserved
+codes below move out of the deferred-wiring bucket when the matching
+wiring constant flips.
 
-| Capability code |
-|-----------------|
-| `cairn.mcp.v1.forget.scope` |
-| `cairn.mcp.v1.extension.federation` |
-| `cairn.mcp.v1.extension.sessiontree` |
-| `cairn.mcp.v1.extension.coord` |
+| Capability code | Held back by |
+|-----------------|--------------|
+| `cairn.mcp.v1.forget.scope` | `FORGET_SCOPE_WIRED=false` |
+| `cairn.mcp.v1.extension.coord` | `coord_extension_ready()=false` |
 
 ### Deferred wiring (reserved v1; not advertised today)
 
 Identifier is frozen — the name belongs to v1 and can't be reassigned.
 The dispatch path is not yet wired, so `advertise()` does **not** emit
-these codes; Gate 9 must not expect to see them.
+these codes at any phase; Gate 9 must not expect to see them.
 
 | Capability code |
 |-----------------|
@@ -107,6 +109,9 @@ these codes; Gate 9 must not expect to see them.
 | `cairn.mcp.v1.replay.sequence` |
 | `cairn.mcp.v1.replay.challenge` |
 | `cairn.mcp.v1.extension.admin` |
+| `cairn.mcp.v1.extension.aggregate` |
+| `cairn.mcp.v1.extension.federation` |
+| `cairn.mcp.v1.extension.sessiontree` |
 | `cairn.sensor.v1.screen.ocr.vision` |
 
 ### Non-default platform (cfg / feature / OS-gated)
