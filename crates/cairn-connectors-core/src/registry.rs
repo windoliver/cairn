@@ -402,8 +402,14 @@ async fn process_event(
         });
     }
 
+    // 3b. Payload validation — scope, MIME, size (brief §130 Fix 4).
+    event.validate_against_manifest(connector.manifest())?;
+
     // 4. Redact PII before the event crosses any boundary (brief §5.2 + §14).
-    let redacted = RedactionPipeline::new().redact(event)?;
+    //    Use the manifest's max_depth limit for the JSON walker.
+    let redacted = RedactionPipeline::new()
+        .with_max_depth(connector.manifest().payload.max_depth)
+        .redact(event)?;
 
     // 5. Build a CaptureEvent with placeholder spool references.
     //    Real spool path + hash are written by the spool layer in #131.

@@ -55,24 +55,48 @@ pub struct Redacted {
 // Pipeline
 // ---------------------------------------------------------------------------
 
+/// Default maximum JSON nesting depth. Applied when no explicit limit is set
+/// via [`RedactionPipeline::with_max_depth`]. Chosen conservatively to prevent
+/// stack exhaustion on pathological input while accommodating realistic payloads.
+pub const DEFAULT_MAX_DEPTH: u32 = 128;
+
 /// Stateless pipeline that redacts PII / secrets from [`ConnectorEvent`]
 /// payloads before they cross the consent gate.
 ///
 /// Construct with [`RedactionPipeline::new`] or via the [`Default`] impl;
-/// configuration slots are reserved for future extension (e.g. custom
-/// detector sets, allow-lists) without breaking callers.
-#[derive(Debug, Default)]
+/// use [`RedactionPipeline::with_max_depth`] to set a connector-manifest-
+/// specified depth limit before calling [`RedactionPipeline::redact`].
+#[derive(Debug)]
 pub struct RedactionPipeline {
-    // Reserved for future configuration (custom detectors, allow-lists, etc.).
-    // Using a zero-size struct today keeps the `::new()` API stable.
-    _reserved: (),
+    /// Maximum JSON nesting depth before the redactor returns an error.
+    max_depth: u32,
+}
+
+impl Default for RedactionPipeline {
+    fn default() -> Self {
+        Self {
+            max_depth: DEFAULT_MAX_DEPTH,
+        }
+    }
 }
 
 impl RedactionPipeline {
     /// Create a new [`RedactionPipeline`] with default settings.
     #[must_use]
     pub fn new() -> Self {
-        Self { _reserved: () }
+        Self::default()
+    }
+
+    /// Set the maximum JSON nesting depth.
+    ///
+    /// If a JSON payload exceeds this depth, [`RedactionPipeline::redact`]
+    /// returns [`ConnectorError::MalformedPayload`].  Use
+    /// [`DEFAULT_MAX_DEPTH`] when the connector manifest does not declare an
+    /// explicit limit.
+    #[must_use]
+    pub fn with_max_depth(mut self, max_depth: u32) -> Self {
+        self.max_depth = max_depth;
+        self
     }
 
     /// Redact PII and secrets from the event's payload and return the
@@ -81,14 +105,18 @@ impl RedactionPipeline {
     /// - [`ConnectorPayload::Text`]: the body string is passed through
     ///   [`cairn_core::pipeline::filter::redact::redact`] once.
     /// - [`ConnectorPayload::Json`]: every string leaf of the JSON value is
-    ///   walked recursively and redacted individually.
+    ///   walked with a bounded-depth iterator and redacted individually.
+    ///   If the JSON exceeds [`Self::max_depth`] (set by
+    ///   [`with_max_depth`][Self::with_max_depth]) the method returns
+    ///   [`ConnectorError::MalformedPayload`].
     /// - [`ConnectorPayload::Binary`]: bytes reside in the spool; the
     ///   envelope carries only metadata and passes through unchanged with
     ///   zero spans.
     ///
-    /// This function is infallible at P0 (the underlying redact function
-    /// never fails). The `Result` wrapper is kept so future variants can
-    /// return errors without changing the signature.
+    /// # Errors
+    ///
+    /// Returns [`ConnectorError::MalformedPayload`] if a JSON payload
+    /// exceeds the configured nesting depth limit.
     pub fn redact(&self, mut event: ConnectorEvent) -> Result<Redacted, ConnectorError> {
         let mut spans: Vec<RedactionSpan> = Vec::new();
 
@@ -99,7 +127,7 @@ impl RedactionPipeline {
                 *body = result.text;
             }
             ConnectorPayload::Json { body, .. } => {
-                Self::walk_json(body, &mut spans);
+                walk_json_bounded(body, &mut spans, self.max_depth, 0)?;
             }
             ConnectorPayload::Binary { .. } => {
                 // Bytes are spooled outside the envelope; nothing to redact here.
@@ -108,36 +136,64 @@ impl RedactionPipeline {
 
         Ok(Redacted { event, spans })
     }
+}
 
-    // -----------------------------------------------------------------------
-    // Private helpers
-    // -----------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// Depth-bounded JSON walker (module-level private function)
+// ---------------------------------------------------------------------------
 
-    /// Recursively walk a [`serde_json::Value`], calling
-    /// [`cairn_core::pipeline::filter::redact::redact`] on every `String`
-    /// leaf and accumulating spans. Non-string scalars (`Number`, `Bool`,
-    /// `Null`) are no-ops.
-    fn walk_json(value: &mut Value, spans: &mut Vec<RedactionSpan>) {
-        match value {
-            Value::String(s) => {
-                let result = redact::redact(s);
-                spans.extend(result.spans);
-                *s = result.text;
-            }
-            Value::Array(items) => {
-                for item in items.iter_mut() {
-                    Self::walk_json(item, spans);
-                }
-            }
-            Value::Object(map) => {
-                for v in map.values_mut() {
-                    Self::walk_json(v, spans);
-                }
-            }
-            // Number, Bool, Null — no string content to redact.
-            _ => {}
+/// Walk `value` recursively, calling `redact` on every `String` leaf and
+/// accumulating spans. Returns an error if the nesting depth exceeds
+/// `max_depth`.
+///
+/// **Depth semantics:** `current_depth` is the number of container
+/// (Object / Array) boundaries entered so far. The root call passes `0`.
+/// Entering an Object or Array increments the depth *before* recursing into
+/// its children and the incremented depth is checked against `max_depth`.
+/// A plain string at depth 0 is always allowed; a string inside a flat
+/// `{"k": "v"}` object is at depth 1; a string inside `{"a": {"b": "v"}}`
+/// is at depth 2. So `max_depth = 1` allows a single-level flat object.
+///
+/// Using an explicit depth counter (rather than Rust stack depth) prevents
+/// stack exhaustion on pathological input.
+fn walk_json_bounded(
+    value: &mut Value,
+    spans: &mut Vec<RedactionSpan>,
+    max_depth: u32,
+    current_depth: u32,
+) -> Result<(), ConnectorError> {
+    match value {
+        Value::String(s) => {
+            let result = redact::redact(s);
+            spans.extend(result.spans);
+            *s = result.text;
         }
+        Value::Array(items) => {
+            let child_depth = current_depth + 1;
+            if child_depth > max_depth {
+                return Err(ConnectorError::MalformedPayload(format!(
+                    "JSON nesting depth {child_depth} exceeds manifest limit {max_depth}",
+                )));
+            }
+            for item in items.iter_mut() {
+                walk_json_bounded(item, spans, max_depth, child_depth)?;
+            }
+        }
+        Value::Object(map) => {
+            let child_depth = current_depth + 1;
+            if child_depth > max_depth {
+                return Err(ConnectorError::MalformedPayload(format!(
+                    "JSON nesting depth {child_depth} exceeds manifest limit {max_depth}",
+                )));
+            }
+            for v in map.values_mut() {
+                walk_json_bounded(v, spans, max_depth, child_depth)?;
+            }
+        }
+        // Number, Bool, Null — no string content to redact.
+        _ => {}
     }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------

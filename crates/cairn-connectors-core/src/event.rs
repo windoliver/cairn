@@ -8,6 +8,9 @@ use std::collections::BTreeSet;
 
 use serde::{Deserialize, Serialize};
 
+use crate::error::ConnectorError;
+use crate::manifest::ConnectorManifest;
+
 /// ULID identifying one envelope. Minted by the connector; must be globally
 /// unique and monotonically ordered within a single connector instance.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -215,6 +218,64 @@ pub struct ConnectorEvent {
 }
 
 impl ConnectorEvent {
+    /// Validate this event against the connector's manifest.
+    ///
+    /// Checks performed (in order):
+    ///
+    /// 1. `event.connector == manifest.name()` — name integrity.
+    /// 2. `event.scope` matches a declared scope pattern.
+    /// 3. `event.payload.mime()` is in the manifest's `webhook.allowed_mimes`.
+    /// 4. `event.payload.size_hint()` is within `manifest.payload.max_bytes_parsed`.
+    ///
+    /// Label checks are performed earlier in `process_event` (against both the
+    /// grant and the manifest), so they are not repeated here.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConnectorError::Fatal`] for name mismatch (indicates a
+    /// programming error), [`ConnectorError::MalformedPayload`] for scope /
+    /// MIME / size violations.
+    pub fn validate_against_manifest(
+        &self,
+        manifest: &ConnectorManifest,
+    ) -> Result<(), ConnectorError> {
+        // 1. Connector-name integrity.
+        if self.connector != manifest.name() {
+            return Err(ConnectorError::fatal_msg(format!(
+                "event connector \"{}\" does not match manifest name \"{}\"",
+                self.connector,
+                manifest.name()
+            )));
+        }
+
+        // 2. Scope must match a declared pattern.
+        if !manifest.scope_matches(&self.scope.kind, &self.scope.value) {
+            return Err(ConnectorError::MalformedPayload(format!(
+                "scope \"{}:{}\" does not match any declared scope pattern",
+                self.scope.kind, self.scope.value,
+            )));
+        }
+
+        // 3. MIME type must be in the allowed list.
+        let mime = self.payload.mime();
+        if !manifest.allowed_mime(mime) {
+            return Err(ConnectorError::MalformedPayload(format!(
+                "payload MIME type \"{mime}\" is not in manifest allowed_mimes",
+            )));
+        }
+
+        // 4. Payload size must be within the limit.
+        let size = self.payload.size_hint() as u64;
+        let max = manifest.payload.max_bytes_parsed;
+        if size > max {
+            return Err(ConnectorError::MalformedPayload(format!(
+                "payload size {size} bytes exceeds manifest limit {max} bytes",
+            )));
+        }
+
+        Ok(())
+    }
+
     /// Construct a new [`ConnectorEvent`].
     ///
     /// Use this constructor in external code where `#[non_exhaustive]` blocks

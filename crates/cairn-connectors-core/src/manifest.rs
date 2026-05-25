@@ -158,8 +158,46 @@ pub struct PollBlock {
 pub struct PayloadBlock {
     /// Maximum payload size as a human-readable string (e.g. `"256KiB"`).
     pub max_bytes: String,
+    /// Parsed `max_bytes` value in bytes.
+    ///
+    /// Set by [`ConnectorManifest::parse_toml`] from the `max_bytes` string;
+    /// avoids re-parsing on every emitted event (brief §130 Fix 4).
+    #[serde(skip)]
+    pub max_bytes_parsed: u64,
     /// Maximum JSON nesting depth before the payload is rejected.
     pub max_depth: u32,
+}
+
+/// Parse a human-readable byte-size string into a `u64` byte count.
+///
+/// Accepts only the binary suffixes used in connector manifests:
+/// `KiB` (1 024), `MiB` (1 048 576), `GiB` (1 073 741 824) and the
+/// suffix-free form (plain bytes). Fails closed on any unrecognised suffix.
+///
+/// # Errors
+///
+/// Returns `Err` with a descriptive message on unrecognised format.
+pub fn parse_byte_size(s: &str) -> Result<u64, String> {
+    let s = s.trim();
+    if let Some(n) = s.strip_suffix("GiB") {
+        n.trim()
+            .parse::<u64>()
+            .map(|v| v * 1_073_741_824)
+            .map_err(|e| format!("invalid GiB value \"{s}\": {e}"))
+    } else if let Some(n) = s.strip_suffix("MiB") {
+        n.trim()
+            .parse::<u64>()
+            .map(|v| v * 1_048_576)
+            .map_err(|e| format!("invalid MiB value \"{s}\": {e}"))
+    } else if let Some(n) = s.strip_suffix("KiB") {
+        n.trim()
+            .parse::<u64>()
+            .map(|v| v * 1_024)
+            .map_err(|e| format!("invalid KiB value \"{s}\": {e}"))
+    } else {
+        s.parse::<u64>()
+            .map_err(|e| format!("invalid byte size \"{s}\": {e}"))
+    }
 }
 
 impl ConnectorManifest {
@@ -169,8 +207,14 @@ impl ConnectorManifest {
     /// validation failure. This is a configuration-time concern — no transient
     /// or fatal paths are used.
     pub fn parse_toml(src: &str) -> Result<Self, ConnectorError> {
-        let parsed: Self = toml::from_str(src)
+        let mut parsed: Self = toml::from_str(src)
             .map_err(|e| ConnectorError::MalformedPayload(format!("manifest: {e}")))?;
+        // Parse max_bytes once at manifest-load time so event processing does
+        // not need to re-parse the string on every emitted event.
+        parsed.payload.max_bytes_parsed =
+            parse_byte_size(&parsed.payload.max_bytes).map_err(|e| {
+                ConnectorError::MalformedPayload(format!("payload.max_bytes: {e}"))
+            })?;
         parsed.validate()?;
         Ok(parsed)
     }
@@ -218,6 +262,25 @@ impl ConnectorManifest {
     #[must_use]
     pub fn allowed_label(&self, label: &str) -> bool {
         self.labels.allowed.iter().any(|l| l == label)
+    }
+
+    /// Return `true` if the `(scope_kind, scope_value)` pair matches at least
+    /// one entry in `scopes.declared`.
+    ///
+    /// Pattern matching is intentionally simple: a pattern of `"*"` matches any
+    /// value within the same `kind`; any other pattern requires an exact match.
+    /// This matches the design spec's "keep it simple" guidance for P0.
+    #[must_use]
+    pub fn scope_matches(&self, scope_kind: &str, scope_value: &str) -> bool {
+        self.scopes.declared.iter().any(|p| {
+            p.kind == scope_kind && (p.pattern == "*" || p.pattern == scope_value)
+        })
+    }
+
+    /// Return `true` if `mime` appears in the webhook's `allowed_mimes` list.
+    #[must_use]
+    pub fn allowed_mime(&self, mime: &str) -> bool {
+        self.webhook.allowed_mimes.iter().any(|m| m == mime)
     }
 
     /// Compute a stable SHA-256 hash of this manifest for use in the consent

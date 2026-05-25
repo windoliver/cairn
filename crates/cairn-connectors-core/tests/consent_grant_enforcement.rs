@@ -40,7 +40,7 @@ use cairn_core::domain::capture::CaptureEvent;
 // Shared helpers
 // ---------------------------------------------------------------------------
 
-/// PanicEmit — asserts that the pipeline is never reached in error paths.
+/// `PanicEmit` — asserts that the pipeline is never reached in error paths.
 struct PanicEmit;
 
 #[async_trait]
@@ -204,7 +204,7 @@ impl TwoManifestConnector {
 
 #[async_trait]
 impl Connector for TwoManifestConnector {
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "drifter"
     }
 
@@ -335,7 +335,7 @@ impl NarrowGrantConnector {
 
 #[async_trait]
 impl Connector for NarrowGrantConnector {
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "narrow"
     }
 
