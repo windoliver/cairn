@@ -38,6 +38,7 @@ use cairn_connectors_core::{
 use cairn_core::contract::version::{ContractVersion, VersionRange};
 use cairn_core::domain::Identity;
 use cairn_core::domain::capture::CaptureEvent;
+use sha2::Digest as _;
 
 // ---------------------------------------------------------------------------
 // Shared manifest (budget = 100 — not the limiting factor in these tests)
@@ -558,5 +559,232 @@ async fn failed_emit_leaves_one_orphan_no_tmp_files() {
         0,
         "no .tmp files must remain after a failed emit (tmp was renamed to final \
          before emit was called); found {tmp_files:?}",
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Finding X — full SHA-256 in spool filename + collision detection
+// ---------------------------------------------------------------------------
+
+/// The spool filename must contain exactly 64 hex characters (the full
+/// SHA-256 digest) between the event_id separator and the file extension
+/// (Finding X).
+///
+/// Setup: emit one fixture event; scan the spool dir; assert the committed
+/// filename has the form `<event_id>_<64-hex-chars>.json`.
+#[tokio::test]
+async fn spool_uses_full_sha256_in_filename() {
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Default)]
+    struct SucceedEmit(Mutex<Vec<cairn_core::domain::capture::CaptureEvent>>);
+    #[async_trait::async_trait]
+    impl PipelineEmit for SucceedEmit {
+        async fn emit(
+            &self,
+            ev: cairn_core::domain::capture::CaptureEvent,
+        ) -> Result<(), ConnectorError> {
+            self.0.lock().expect("mutex").push(ev);
+            Ok(())
+        }
+    }
+
+    let event_id = "01ARZ3NDEKTSV4RRFFQ69G5FAE";
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let spool_root = tmp.path().to_path_buf();
+
+    let emit = Arc::new(SucceedEmit::default());
+
+    {
+        let mut reg = ConnectorRegistry::builder()
+            .credentials(Arc::new(InMemoryCredentialStore::default()))
+            .consent(Arc::new(AcceptAllConsent::default()))
+            .emit(emit.clone() as Arc<dyn PipelineEmit>)
+            .spool_root(spool_root.clone())
+            .build();
+
+        reg.register(SingleEventConnector::new(event_id))
+            .expect("register must succeed");
+        reg.enable("spool-test", spool_grant())
+            .await
+            .expect("enable must succeed");
+
+        reg.poll_now("spool-test")
+            .await
+            .expect("poll_now must succeed");
+
+        reg.shutdown().await;
+    }
+
+    // Scan the spool directory for committed (non-tmp) files.
+    let spool_dir = spool_root.join("connector").join("spool-test");
+    let committed_files: Vec<_> = std::fs::read_dir(&spool_dir)
+        .expect("spool dir must exist after poll")
+        .filter_map(std::result::Result::ok)
+        .filter(|e| !e.file_name().to_string_lossy().ends_with(".tmp"))
+        .collect();
+
+    assert_eq!(
+        committed_files.len(),
+        1,
+        "exactly 1 committed spool file must exist; found {committed_files:?}",
+    );
+
+    let filename = committed_files[0].file_name().to_string_lossy().to_string();
+
+    // Filename form: `<event_id>_<hex>.<ext>`.
+    // Strip the event_id prefix and the extension, then verify the hex part.
+    let after_id = filename
+        .strip_prefix(&format!("{event_id}_"))
+        .unwrap_or_else(|| panic!("filename {filename:?} must start with event_id {event_id:?}"));
+    let (hex_part, _ext) = after_id
+        .rsplit_once('.')
+        .unwrap_or_else(|| panic!("filename {filename:?} must have an extension"));
+
+    assert_eq!(
+        hex_part.len(),
+        64,
+        "spool filename must contain exactly 64 hex chars (full SHA-256); \
+         got {} chars in {filename:?}",
+        hex_part.len(),
+    );
+    assert!(
+        hex_part.chars().all(|c| c.is_ascii_hexdigit()),
+        "spool filename hex part must contain only hex chars; got {hex_part:?} in {filename:?}",
+    );
+}
+
+/// When the spool path already exists with DIFFERENT content, `poll_now` must
+/// return a `Fatal` error and leave the existing file unmodified (Finding X).
+///
+/// Setup: pre-place a file at the would-be spool path with different content.
+/// Drive `poll_now`; assert Fatal is returned; assert the pre-placed file is
+/// unchanged.
+#[tokio::test]
+async fn spool_collision_with_different_content_rejected() {
+    let event_id = "01ARZ3NDEKTSV4RRFFQ69G5FAF";
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let spool_root = tmp.path().to_path_buf();
+
+    // Compute the SHA-256 of the body that SingleEventConnector will produce
+    // so we can compute the expected spool path.
+    let connector_body = serde_json::json!({"id": event_id, "data": "fixed-content"});
+    let connector_bytes = serde_json::to_vec(&connector_body).expect("serialize");
+    let hash_hex = hex::encode(sha2::Sha256::digest(&connector_bytes));
+
+    // Pre-create the spool directory and place a file at the would-be path
+    // with DIFFERENT content (so the SHA-256 check fails).
+    let spool_dir = spool_root.join("connector").join("spool-test");
+    std::fs::create_dir_all(&spool_dir).expect("create spool dir");
+    let spool_path = spool_dir.join(format!("{event_id}_{hash_hex}.json"));
+    let different_content = b"this is different content that does not match";
+    std::fs::write(&spool_path, different_content).expect("write pre-placed file");
+
+    let mut reg = ConnectorRegistry::builder()
+        .credentials(Arc::new(InMemoryCredentialStore::default()))
+        .consent(Arc::new(AcceptAllConsent::default()))
+        .emit(Arc::new(AlwaysFailEmit) as Arc<dyn PipelineEmit>)
+        .spool_root(spool_root.clone())
+        .build();
+
+    reg.register(SingleEventConnector::new(event_id))
+        .expect("register must succeed");
+    reg.enable("spool-test", spool_grant())
+        .await
+        .expect("enable must succeed");
+
+    // poll_now must return a Fatal error (spool collision detected).
+    let err = reg
+        .poll_now("spool-test")
+        .await
+        .expect_err("poll_now must fail on spool collision");
+    assert!(
+        matches!(err, ConnectorError::Fatal(_)),
+        "expected Fatal from spool collision, got {err:?}",
+    );
+
+    reg.shutdown().await;
+
+    // The pre-placed file must be unmodified (content is unchanged).
+    let actual_content = std::fs::read(&spool_path).expect("read pre-placed file");
+    assert_eq!(
+        actual_content, different_content,
+        "pre-placed spool file must be unmodified after collision detection",
+    );
+}
+
+/// When the spool path already exists with IDENTICAL content, `poll_now` must
+/// succeed (idempotent retry) and leave the existing file in place (Finding X).
+///
+/// Setup: pre-place a file at the would-be spool path with the EXACT same
+/// content the connector will produce. Drive `poll_now`; assert success; assert
+/// the file is still present and unchanged.
+#[tokio::test]
+async fn spool_idempotent_for_identical_content() {
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Default)]
+    struct SucceedEmit2(Mutex<usize>);
+    #[async_trait::async_trait]
+    impl PipelineEmit for SucceedEmit2 {
+        async fn emit(
+            &self,
+            _: cairn_core::domain::capture::CaptureEvent,
+        ) -> Result<(), ConnectorError> {
+            *self.0.lock().expect("mutex") += 1;
+            Ok(())
+        }
+    }
+
+    let event_id = "01ARZ3NDEKTSV4RRFFQ69G5FAG";
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let spool_root = tmp.path().to_path_buf();
+
+    // Compute the SHA-256 of the body that SingleEventConnector will produce.
+    let connector_body = serde_json::json!({"id": event_id, "data": "fixed-content"});
+    let connector_bytes = serde_json::to_vec(&connector_body).expect("serialize");
+    let hash_hex = hex::encode(sha2::Sha256::digest(&connector_bytes));
+
+    // Pre-create the spool directory and place a file at the would-be path
+    // with IDENTICAL content.
+    let spool_dir = spool_root.join("connector").join("spool-test");
+    std::fs::create_dir_all(&spool_dir).expect("create spool dir");
+    let spool_path = spool_dir.join(format!("{event_id}_{hash_hex}.json"));
+    std::fs::write(&spool_path, &connector_bytes).expect("write pre-placed file");
+
+    let emit = Arc::new(SucceedEmit2::default());
+
+    let mut reg = ConnectorRegistry::builder()
+        .credentials(Arc::new(InMemoryCredentialStore::default()))
+        .consent(Arc::new(AcceptAllConsent::default()))
+        .emit(emit.clone() as Arc<dyn PipelineEmit>)
+        .spool_root(spool_root.clone())
+        .build();
+
+    reg.register(SingleEventConnector::new(event_id))
+        .expect("register must succeed");
+    reg.enable("spool-test", spool_grant())
+        .await
+        .expect("enable must succeed");
+
+    // poll_now must succeed (idempotent: identical content already present).
+    reg.poll_now("spool-test")
+        .await
+        .expect("poll_now must succeed for idempotent retry with identical content");
+
+    reg.shutdown().await;
+
+    // The file must still exist and be unchanged.
+    let actual_content = std::fs::read(&spool_path).expect("read pre-placed file");
+    assert_eq!(
+        actual_content, connector_bytes,
+        "pre-placed spool file must be unchanged after idempotent retry",
+    );
+
+    // Exactly one event must have been emitted.
+    assert_eq!(
+        *emit.0.lock().expect("mutex"),
+        1,
+        "exactly 1 event must be emitted on idempotent retry",
     );
 }

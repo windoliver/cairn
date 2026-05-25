@@ -163,11 +163,6 @@ struct WebhookEntryState {
     /// HTTP header name that carries the HMAC-SHA256 signature, from
     /// `manifest.webhook.signature_header`.
     signature_header: String,
-    /// Optional HTTP header that carries a provider-assigned delivery identifier
-    /// (Finding V). When `Some`, the replay key is `(connector_name, delivery_id)`
-    /// rather than `(connector_name, body_MAC_hex)`. When `None`, the body-MAC
-    /// keying is used (backwards-compatible default).
-    delivery_id_header: Option<String>,
 }
 
 /// Maximum number of `(connector_name, signature_id)` pairs held in the
@@ -740,12 +735,6 @@ impl ConnectorRegistry {
                     byte_limit: Arc::clone(&entry.byte_limit),
                     max_body_bytes: entry.connector.manifest().payload.max_bytes_parsed,
                     signature_header: entry.connector.manifest().webhook.signature_header.clone(),
-                    delivery_id_header: entry
-                        .connector
-                        .manifest()
-                        .webhook
-                        .delivery_id_header
-                        .clone(),
                 },
             );
         }
@@ -1379,14 +1368,26 @@ async fn process_event(
     let digest = Sha256::digest(&bytes);
     let hash_hex = hex::encode(digest);
     let hash_str = format!("sha256:{hash_hex}");
-    // Use the first 8 hex chars in the spool filename for fast duplicate
-    // detection by name (without parsing the hash field).
-    let hash_short = &hash_hex[..8];
+    // Finding X fix: use the full 64-hex-char SHA-256 in the spool filename.
+    //
+    // The previous implementation used only the first 8 hex chars (32 bits)
+    // of the hash, which makes filename collisions plausible when a connector
+    // reuses an event_id with different content. A 32-bit prefix collision
+    // would silently overwrite the prior spool file while `CaptureEvent` still
+    // records the full hash — a mismatch between the filename and the recorded
+    // hash.
+    //
+    // Using all 64 hex chars (256 bits) makes accidental collisions effectively
+    // impossible.  Before the rename, check whether the target path already
+    // exists: if it does, compare the full SHA-256.  Matching hash → idempotent
+    // retry (leave the existing file, delete the tmp).  Mismatching hash →
+    // fatal error so the caller learns immediately rather than silently losing
+    // the prior file.
 
     // Relative path inside the spool root; mirrors `payload_ref` without the
     // leading `sources/` so the same relative path works for both the spool
     // file and the vault reference.
-    let spool_relative = format!("connector/{connector_name}/{event_id}_{hash_short}.{ext}");
+    let spool_relative = format!("connector/{connector_name}/{event_id}_{hash_hex}.{ext}");
 
     // 6a. Reserve daily byte budget BEFORE writing to spool (Finding R +
     //     Finding U).
@@ -1526,19 +1527,71 @@ async fn process_event(
     //    the final path here** — it would make the bug silent (no file, no
     //    event, no log) rather than recoverable.
 
-    // Step 9a: rename tmp → final BEFORE calling emit.
-    if let Err(rename_err) = tokio::fs::rename(&spool_tmp_path, &spool_final_path).await {
-        // Rename failed — no CaptureEvent should be emitted.  Refund budgets,
-        // attempt best-effort tmp cleanup, and return Err.
-        rate_limit.refund(rate_bucket_key, 1);
-        byte_limit.refund(rate_bucket_key, bytes_count);
-        // Attempt to delete the tmp file; ignore errors (the file may already
-        // be absent depending on the failure mode that triggered rename_err).
-        let _ = remove_tmp_file_if_exists(&spool_tmp_path).await;
-        return Err(ConnectorError::fatal_msg(format!(
-            "spool rename failed for connector {}: {rename_err}",
-            redacted.event.connector
-        )));
+    // Step 9a: collision check then rename tmp → final BEFORE calling emit
+    //          (Finding X fix).
+    //
+    // Before renaming, check whether the target path already exists.
+    //
+    //   Case A — path does not exist: proceed with rename as usual.
+    //   Case B — path exists, full SHA-256 matches: idempotent retry.
+    //            The prior committed file is identical in content; delete the
+    //            tmp and continue as if the rename succeeded.
+    //   Case C — path exists, SHA-256 mismatches: two distinct payloads
+    //            share the same (connector_name, event_id) and the same 256-bit
+    //            hash prefix is astronomically unlikely — treat this as a fatal
+    //            programming error.  Return Fatal so the caller learns
+    //            immediately rather than silently overwriting the prior file.
+    match tokio::fs::read(&spool_final_path).await {
+        Ok(existing_bytes) => {
+            // Final path already exists — compare full SHA-256.
+            let existing_digest = hex::encode(Sha256::digest(&existing_bytes));
+            if existing_digest == hash_hex {
+                // Case B: idempotent retry — same content already committed.
+                // Delete the tmp staging file; the final path is valid.
+                let _ = remove_tmp_file_if_exists(&spool_tmp_path).await;
+                // Fall through: spool_final_path already exists and is correct.
+                // Skip the rename below by taking no further action here; the
+                // code after this block uses spool_final_path directly.
+            } else {
+                // Case C: content mismatch — spool collision.
+                rate_limit.refund(rate_bucket_key, 1);
+                byte_limit.refund(rate_bucket_key, bytes_count);
+                let _ = remove_tmp_file_if_exists(&spool_tmp_path).await;
+                return Err(ConnectorError::fatal_msg(format!(
+                    "spool collision: existing file at {} has a different \
+                     SHA-256 (expected {hash_hex}, found {existing_digest}); \
+                     connector {} reused event_id with different content",
+                    spool_final_path.display(),
+                    redacted.event.connector,
+                )));
+            }
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            // Case A: target does not exist — rename as normal.
+            if let Err(rename_err) = tokio::fs::rename(&spool_tmp_path, &spool_final_path).await {
+                // Rename failed — no CaptureEvent should be emitted. Refund
+                // budgets, attempt best-effort tmp cleanup, and return Err.
+                rate_limit.refund(rate_bucket_key, 1);
+                byte_limit.refund(rate_bucket_key, bytes_count);
+                // Attempt to delete the tmp file; ignore errors (the file may
+                // already be absent depending on the failure mode).
+                let _ = remove_tmp_file_if_exists(&spool_tmp_path).await;
+                return Err(ConnectorError::fatal_msg(format!(
+                    "spool rename failed for connector {}: {rename_err}",
+                    redacted.event.connector
+                )));
+            }
+        }
+        Err(io_err) => {
+            // Unexpected I/O error reading the existing file.
+            rate_limit.refund(rate_bucket_key, 1);
+            byte_limit.refund(rate_bucket_key, bytes_count);
+            let _ = remove_tmp_file_if_exists(&spool_tmp_path).await;
+            return Err(ConnectorError::fatal_msg(format!(
+                "spool collision check failed for connector {}: {io_err}",
+                redacted.event.connector
+            )));
+        }
     }
 
     // Step 9b: the final spool file is now on disk.  Hand the CaptureEvent to
@@ -1605,17 +1658,6 @@ async fn handle_webhook(
             .expect("invariant: static response builder cannot fail")
     }
 
-    /// Build a plain-text response from an owned `String`.
-    ///
-    /// Used for error messages that include dynamic content (e.g. the missing
-    /// delivery-id header name from Finding V).
-    fn resp_owned(status: StatusCode, body: String) -> Response<Body> {
-        Response::builder()
-            .status(status)
-            .body(Body::from(body))
-            .expect("invariant: owned response builder cannot fail")
-    }
-
     // Look up the connector entry.
     let Some(entry) = state.entries.get(&connector_name) else {
         return resp(StatusCode::NOT_FOUND, "connector not found");
@@ -1668,32 +1710,33 @@ async fn handle_webhook(
         return resp(StatusCode::UNAUTHORIZED, "signature mismatch");
     };
 
-    // Replay guard — atomic Pending insert (Finding I + Finding L + Finding O +
-    // Finding V).
+    // Replay guard — atomic Pending insert (Finding I + Finding L + Finding O).
     //
     // Finding O fix: atomically insert a `Pending` marker inside a single lock
     // acquisition. This closes the race window from the original "check-then-
     // process-then-commit" approach where two concurrent identical deliveries
     // could both pass the check before either committed the marker.
     //
-    // Finding V fix: when `delivery_id_header` is configured in the manifest,
-    // the replay key is `(connector_name, delivery_id_value)` rather than
-    // `(connector_name, body_MAC_hex)`. This prevents false-positive duplicate
-    // rejection for two legitimate deliveries with identical bodies (e.g.
-    // heartbeat pings) that happen to produce the same HMAC.
+    // Finding W fix: the replay key is ALWAYS `(connector_name, sig_id)`.
+    // `sig_id` is the HMAC-SHA256 of the request body under the provisioned
+    // secret, which is authenticated. Using an unauthenticated header such as
+    // `delivery_id_header` as the replay key would allow an attacker to replay
+    // the same authenticated body+signature with a fresh delivery-id value and
+    // bypass the replay guard (the header is not covered by the HMAC).
     //
-    // If `delivery_id_header` is `Some` but the header is absent from the
-    // request, return 400 Bad Request — the provider MUST include the header.
-    // HMAC verification (and therefore authentication) is unchanged; this only
-    // affects the replay key.
+    // Trade-off: identical-body deliveries (e.g. heartbeat pings) collide on
+    // the replay key because they produce the same HMAC-SHA256, and the second
+    // is dropped as a duplicate. Providers with repeating-body payloads must
+    // implement per-adapter dedup inside `ingest_webhook` — deferred to #131.
     //
-    // Trade-off documented here: if `delivery_id_header` is `None`, fall back
-    // to HMAC body-MAC keying, which can collide on identical bodies.
+    // The `delivery_id_header` manifest field is retained as adapter-facing
+    // metadata (adapters may read it via `manifest()`), but the framework does
+    // NOT use it for replay protection.
     //
     // Protocol:
     //  1. Lock the map.
-    //     - If `(name, key)` maps to `Pending` or `Committed`: return 409.
-    //     - Otherwise: insert `(name, key) -> Pending`. Drop lock.
+    //     - If `(name, sig_id)` maps to `Pending` or `Committed`: return 409.
+    //     - Otherwise: insert `(name, sig_id) -> Pending`. Drop lock.
     //  2. Process ingest_webhook + each process_event.
     //  3. On full success: lock map, replace `Pending` with `Committed`, push
     //     the key onto `replay_order` for FIFO eviction. Drop lock.
@@ -1707,27 +1750,7 @@ async fn handle_webhook(
     //
     // **Durability**: this map is in-memory only; a process restart forgets
     // all seen delivery ids. Issue #131 will persist the replay map.
-    let replay_id: String = match &entry.delivery_id_header {
-        None => {
-            // No delivery-id header configured — use HMAC body-MAC (old behavior).
-            // May collide on identical bodies; document the trade-off.
-            sig_id.0.clone()
-        }
-        Some(id_header) => {
-            // Delivery-id header is configured. Read it from the incoming request.
-            // Return 400 if absent — providers must include it when declared.
-            match webhook_req.header(id_header) {
-                Some(v) => v.to_owned(),
-                None => {
-                    return resp_owned(
-                        StatusCode::BAD_REQUEST,
-                        format!("missing delivery-id header `{id_header}`"),
-                    );
-                }
-            }
-        }
-    };
-    let replay_key = (connector_name.clone(), replay_id);
+    let replay_key = (connector_name.clone(), sig_id.0.clone());
     {
         // SAFETY: we never hold this lock across an `.await` point.
         let mut seen = state
