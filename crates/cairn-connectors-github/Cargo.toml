@@ -18,7 +18,6 @@ testkit = []
 
 [dependencies]
 cairn-connectors-core = { workspace = true }
-cairn-core = { workspace = true }
 arc-swap = { workspace = true }
 async-trait = { workspace = true }
 chrono = { workspace = true }

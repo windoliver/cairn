@@ -6,10 +6,9 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use cairn_connectors_core::{
     CONTRACT_VERSION, Connector, ConnectorCapabilities, ConnectorError, ConnectorEvent,
-    ConnectorManifest, ConnectorPlugin, PollContext, PollOutcome, WebhookContext, WebhookRequest,
+    ConnectorManifest, ConnectorPlugin, ContractVersion, Identity, PollContext, PollOutcome,
+    VersionRange, WebhookContext, WebhookRequest,
 };
-use cairn_core::contract::version::{ContractVersion, VersionRange};
-use cairn_core::domain::Identity;
 use url::Url;
 
 use crate::MANIFEST_TOML;

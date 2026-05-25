@@ -821,7 +821,6 @@ dependencies = [
  "async-trait",
  "base64 0.22.1",
  "cairn-connectors-core",
- "cairn-core",
  "chrono",
  "insta",
  "jsonwebtoken",
