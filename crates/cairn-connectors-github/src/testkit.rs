@@ -9,7 +9,9 @@ use crate::auth::GitHubAuth;
 use crate::client::GhClient;
 use crate::cursor::ResourceCursor;
 use crate::error::GhError;
-use crate::resources::{GhResource, Repo, issues::IssuesResource, prs::PrsResource};
+use crate::resources::{
+    GhResource, Repo, commits::CommitsResource, issues::IssuesResource, prs::PrsResource,
+};
 
 /// Run `IssuesResource::poll` once and return the produced events + new cursor.
 pub async fn run_issues_poll(
@@ -54,5 +56,30 @@ pub async fn run_prs_poll(
         ..Default::default()
     };
     let outcome = PrsResource.poll(&client, &repo, &sub, budget).await?;
+    Ok((outcome.events, outcome.next_cursor))
+}
+
+/// Run `CommitsResource::poll` once and return the produced events + new cursor.
+pub async fn run_commits_poll(
+    handle: &CredentialHandle,
+    base_url: &Url,
+    owner: &str,
+    name: &str,
+    last_sha: Option<String>,
+    branch: Option<String>,
+    budget: u32,
+) -> Result<(Vec<ConnectorEvent>, ResourceCursor), GhError> {
+    let auth = Arc::new(GitHubAuth::from_handle(handle)?);
+    let client = GhClient::new(auth, base_url.clone());
+    let repo = Repo {
+        owner: owner.into(),
+        name: name.into(),
+    };
+    let sub = ResourceCursor {
+        last_sha,
+        branch,
+        ..Default::default()
+    };
+    let outcome = CommitsResource.poll(&client, &repo, &sub, budget).await?;
     Ok((outcome.events, outcome.next_cursor))
 }

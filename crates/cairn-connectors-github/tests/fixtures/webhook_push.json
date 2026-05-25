@@ -1,0 +1,15 @@
+{
+  "ref": "refs/heads/main",
+  "before": "old111",
+  "after": "new222",
+  "repository": {"full_name": "o/r"},
+  "commits": [
+    {
+      "id": "new222",
+      "message": "feat: push event",
+      "author": {"name": "Carol", "email": "carol@example.com"},
+      "timestamp": "2026-05-25T16:00:00Z",
+      "url": "https://github.com/o/r/commit/new222"
+    }
+  ]
+}
