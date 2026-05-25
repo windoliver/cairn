@@ -23,6 +23,7 @@ pub enum GateMode {
 
 /// Per-category threshold row.
 #[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CategoryThreshold {
     /// Minimum score required to pass `--gate beta`.
     pub beta_min: f64,
@@ -35,6 +36,7 @@ pub struct CategoryThreshold {
 
 /// Threshold manifest (matches `manifests/coherence.toml`).
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ThresholdManifest {
     /// Schema version. Currently only `1` is supported.
     pub schema_version: u32,
@@ -158,6 +160,15 @@ pub enum ThresholdError {
         /// The unsupported version number.
         version: u32,
     },
+    /// Manifest parsed but violated a content invariant (non-finite
+    /// threshold, out-of-range floor or drop, `beta_min > rc_min`, etc.).
+    #[error("manifest {path}: {reason}")]
+    Invalid {
+        /// Path that failed.
+        path: String,
+        /// Human-readable invariant that was violated.
+        reason: String,
+    },
 }
 
 /// Load a `coherence.toml` manifest from disk.
@@ -166,6 +177,10 @@ pub enum ThresholdError {
 /// - `Io` if the file cannot be read.
 /// - `Toml` if the file is malformed.
 /// - `UnsupportedManifestVersion` if `schema_version` is not 1.
+/// - `Invalid` if any threshold value violates a runtime invariant
+///   (non-finite, out of range, or `beta_min > rc_min`). These checks
+///   complement the JSON schema, which can't catch NaN/infinity from
+///   TOML and isn't enforced at runtime.
 pub fn load_manifest(path: &Path) -> Result<ThresholdManifest, ThresholdError> {
     let raw = fs::read_to_string(path).map_err(|source| ThresholdError::Io {
         path: path.display().to_string(),
@@ -181,7 +196,58 @@ pub fn load_manifest(path: &Path) -> Result<ThresholdManifest, ThresholdError> {
             version: manifest.schema_version,
         });
     }
+    validate_manifest(&manifest).map_err(|reason| ThresholdError::Invalid {
+        path: path.display().to_string(),
+        reason,
+    })?;
     Ok(manifest)
+}
+
+/// Reject thresholds that would silently weaken the gate.
+///
+/// TOML supports `nan`/`inf` literals; if those land in `beta_min` or
+/// `rc_min`, the floor check (`score < floor`) is always false because
+/// every NaN comparison is false. Same hazard for negative floors or
+/// huge `max_drop_pct`. Each violation maps to `ThresholdError::Invalid`
+/// (exit 78).
+fn validate_manifest(manifest: &ThresholdManifest) -> Result<(), String> {
+    let rows: [(&str, CategoryThreshold); 5] = [
+        ("recall_precision", manifest.recall_precision),
+        ("stale_avoidance", manifest.stale_avoidance),
+        ("summary_quality", manifest.summary_quality),
+        ("search_usefulness", manifest.search_usefulness),
+        ("forget_completeness", manifest.forget_completeness),
+    ];
+    for (name, t) in rows {
+        check_floor(name, "beta_min", t.beta_min)?;
+        check_floor(name, "rc_min", t.rc_min)?;
+        check_drop(name, t.max_drop_pct)?;
+        if t.beta_min > t.rc_min {
+            return Err(format!(
+                "{name}: beta_min ({}) > rc_min ({}) (rc gate must be at least as strict as beta)",
+                t.beta_min, t.rc_min
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn check_floor(metric: &str, field: &str, value: f64) -> Result<(), String> {
+    if !value.is_finite() || !(0.0..=1.0).contains(&value) {
+        return Err(format!(
+            "{metric}: {field} {value} out of [0, 1] or non-finite"
+        ));
+    }
+    Ok(())
+}
+
+fn check_drop(metric: &str, value: f64) -> Result<(), String> {
+    if !value.is_finite() || !(0.0..=100.0).contains(&value) {
+        return Err(format!(
+            "{metric}: max_drop_pct {value} out of [0, 100] or non-finite"
+        ));
+    }
+    Ok(())
 }
 
 /// Evaluate the gate for all five categories.
@@ -310,5 +376,69 @@ mod tests {
             evaluate_one(GateMode::Rc, 0.999, t, None),
             MetricOutcome::BelowFloor { .. }
         ));
+    }
+
+    fn good_manifest() -> ThresholdManifest {
+        ThresholdManifest {
+            schema_version: 1,
+            recall_precision: threshold(0.9, 0.95, 2.0),
+            stale_avoidance: threshold(0.95, 0.98, 2.0),
+            summary_quality: threshold(0.85, 0.9, 2.0),
+            search_usefulness: threshold(0.85, 0.9, 2.0),
+            forget_completeness: threshold(1.0, 1.0, 0.0),
+        }
+    }
+
+    #[test]
+    fn validate_manifest_accepts_canonical_shape() {
+        assert!(validate_manifest(&good_manifest()).is_ok());
+    }
+
+    #[test]
+    fn validate_manifest_rejects_nan_floor() {
+        let mut m = good_manifest();
+        m.recall_precision.beta_min = f64::NAN;
+        let err = validate_manifest(&m).unwrap_err();
+        assert!(err.contains("beta_min"), "{err}");
+    }
+
+    #[test]
+    fn validate_manifest_rejects_inf_drop() {
+        let mut m = good_manifest();
+        m.stale_avoidance.max_drop_pct = f64::INFINITY;
+        let err = validate_manifest(&m).unwrap_err();
+        assert!(err.contains("max_drop_pct"), "{err}");
+    }
+
+    #[test]
+    fn validate_manifest_rejects_negative_floor() {
+        let mut m = good_manifest();
+        m.summary_quality.rc_min = -0.1;
+        let err = validate_manifest(&m).unwrap_err();
+        assert!(err.contains("rc_min"), "{err}");
+    }
+
+    #[test]
+    fn validate_manifest_rejects_floor_above_one() {
+        let mut m = good_manifest();
+        m.summary_quality.beta_min = 1.5;
+        let err = validate_manifest(&m).unwrap_err();
+        assert!(err.contains("beta_min"), "{err}");
+    }
+
+    #[test]
+    fn validate_manifest_rejects_drop_above_100() {
+        let mut m = good_manifest();
+        m.search_usefulness.max_drop_pct = 101.0;
+        let err = validate_manifest(&m).unwrap_err();
+        assert!(err.contains("max_drop_pct"), "{err}");
+    }
+
+    #[test]
+    fn validate_manifest_rejects_beta_greater_than_rc() {
+        let mut m = good_manifest();
+        m.recall_precision = threshold(0.95, 0.90, 2.0);
+        let err = validate_manifest(&m).unwrap_err();
+        assert!(err.contains("beta_min") && err.contains("rc_min"), "{err}");
     }
 }

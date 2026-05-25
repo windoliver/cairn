@@ -403,6 +403,22 @@ fn validate_baseline(baseline: &Baseline) -> Result<(), String> {
                 score.passed, score.total
             ));
         }
+        // Score must be consistent with passed/total. Without this check a
+        // malicious or buggy baseline can claim passed=3,total=3,score=0.0
+        // — the validator would have accepted it before, and the delta
+        // gate would compare against the false 0.0, making a real
+        // regression invisible if the current score stays above the floor.
+        let expected_score = if score.total == 0 {
+            1.0
+        } else {
+            f64::from(score.passed) / f64::from(score.total)
+        };
+        if (score.score - expected_score).abs() > 1e-9 {
+            return Err(format!(
+                "metric {name}: score {} disagrees with passed/total = {}",
+                score.score, expected_score
+            ));
+        }
     }
     Ok(())
 }
@@ -561,5 +577,53 @@ mod tests {
         );
         let err = validate_baseline(&b).unwrap_err();
         assert!(err.contains("passed"), "{err}");
+    }
+
+    #[test]
+    fn validate_baseline_rejects_score_inconsistent_with_counts() {
+        let mut b = good_baseline();
+        // passed=3,total=3 should mean score=1.0; claiming 0.0 would hide
+        // a real regression vs. the prior baseline.
+        b.metrics.insert(
+            "recall_precision".to_owned(),
+            CategoryScore {
+                passed: 3,
+                total: 3,
+                score: 0.0,
+            },
+        );
+        let err = validate_baseline(&b).unwrap_err();
+        assert!(err.contains("disagrees"), "{err}");
+    }
+
+    #[test]
+    fn validate_baseline_rejects_nonempty_with_vacuous_score() {
+        let mut b = good_baseline();
+        // passed=1,total=2 should mean score=0.5; the vacuous 1.0 only
+        // applies to total==0.
+        b.metrics.insert(
+            "recall_precision".to_owned(),
+            CategoryScore {
+                passed: 1,
+                total: 2,
+                score: 1.0,
+            },
+        );
+        let err = validate_baseline(&b).unwrap_err();
+        assert!(err.contains("disagrees"), "{err}");
+    }
+
+    #[test]
+    fn validate_baseline_accepts_total_zero_with_vacuous_score() {
+        let mut b = good_baseline();
+        b.metrics.insert(
+            "recall_precision".to_owned(),
+            CategoryScore {
+                passed: 0,
+                total: 0,
+                score: 1.0,
+            },
+        );
+        assert!(validate_baseline(&b).is_ok());
     }
 }

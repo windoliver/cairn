@@ -146,39 +146,63 @@ async fn trend_line_validates_against_schema() {
         .expect("trend line schema validation");
 }
 
+/// Manifest whose `summary_quality` floor is just above the failing
+/// synthetic cassette's score (0.0). All other categories accept the
+/// vacuous-pass score of 1.0. Valid per the round-2 manifest validator.
+fn failing_manifest_toml() -> &'static str {
+    "schema_version = 1\n\
+[recall_precision]\nbeta_min = 0.0\nrc_min = 0.0\nmax_drop_pct = 100.0\n\
+[stale_avoidance]\nbeta_min = 0.0\nrc_min = 0.0\nmax_drop_pct = 100.0\n\
+[summary_quality]\nbeta_min = 0.5\nrc_min = 0.5\nmax_drop_pct = 100.0\n\
+[search_usefulness]\nbeta_min = 0.0\nrc_min = 0.0\nmax_drop_pct = 100.0\n\
+[forget_completeness]\nbeta_min = 0.0\nrc_min = 0.0\nmax_drop_pct = 100.0\n"
+}
+
+/// Synthetic cassette with one summarize action that intentionally
+/// asserts a `record_id` that does not match the seeded summary record,
+/// so the cassette's golden check fails and the coherence
+/// `summary_quality` score lands at 0/1 = 0.0.
+fn failing_cassette_json() -> &'static str {
+    r#"{
+  "id": "force_fail",
+  "description": "synthetic cassette whose summary expectation never matches",
+  "config": { "local_embeddings": false },
+  "records": [
+    {
+      "id": "01HQZX9F5N00000000000000ZZ",
+      "kind": "reasoning",
+      "class": "semantic",
+      "visibility": "private",
+      "body": "fail body",
+      "session_id": "force-fail",
+      "turn_id": "summary",
+      "sequence": 1,
+      "trace_event": "turn_summary"
+    }
+  ],
+  "actions": [
+    {
+      "verb": "summarize",
+      "story": "FORCE_FAIL_SUMMARY",
+      "session_id": "force-fail",
+      "expected_record_ids": ["01HQZX9F5N0000000000000XYZ"],
+      "metric_category": "summary_quality"
+    }
+  ]
+}"#
+}
+
 #[tokio::test]
 async fn gate_outcome_69_on_failing_gate() {
     let dir = tempdir().unwrap();
     let fake_manifest = dir.path().join("coherence.toml");
-    std::fs::write(
-        &fake_manifest,
-        "schema_version = 1\n\
-[recall_precision]\n\
-beta_min = 1.001\n\
-rc_min = 1.001\n\
-max_drop_pct = 0.0\n\
-[stale_avoidance]\n\
-beta_min = 0.0\n\
-rc_min = 0.0\n\
-max_drop_pct = 100.0\n\
-[summary_quality]\n\
-beta_min = 0.0\n\
-rc_min = 0.0\n\
-max_drop_pct = 100.0\n\
-[search_usefulness]\n\
-beta_min = 0.0\n\
-rc_min = 0.0\n\
-max_drop_pct = 100.0\n\
-[forget_completeness]\n\
-beta_min = 0.0\n\
-rc_min = 0.0\n\
-max_drop_pct = 100.0\n",
-    )
-    .unwrap();
+    std::fs::write(&fake_manifest, failing_manifest_toml()).unwrap();
+    let cassettes_dir = dir.path().to_path_buf();
+    std::fs::write(cassettes_dir.join("force_fail.json"), failing_cassette_json()).unwrap();
     let opts = GateOptions {
         mode: GateMode::Beta,
-        cassettes_dir: workspace_root().join("fixtures/v0/replay"),
-        include: vec!["research_domain".to_owned()],
+        cassettes_dir,
+        include: vec!["force_fail".to_owned()],
         manifest_path: fake_manifest,
         baseline_path: None,
         trend_path: dir.path().join("trend.jsonl"),
@@ -191,7 +215,7 @@ max_drop_pct = 100.0\n",
     };
     let outcome = run_coherence_gate(opts).await.expect("gate run");
     assert!(!outcome.gate_passed, "gate should have failed");
-    assert!(outcome.report.failures.contains(&"recall_precision"));
+    assert!(outcome.report.failures.contains(&"summary_quality"));
 }
 
 #[tokio::test]
@@ -229,24 +253,17 @@ async fn failed_gate_does_not_update_baseline() {
     // gate actually passes (or when --gate none is in use).
     let dir = tempdir().unwrap();
     let fake_manifest = dir.path().join("coherence.toml");
-    std::fs::write(
-        &fake_manifest,
-        "schema_version = 1\n\
-[recall_precision]\nbeta_min = 1.001\nrc_min = 1.001\nmax_drop_pct = 0.0\n\
-[stale_avoidance]\nbeta_min = 0.0\nrc_min = 0.0\nmax_drop_pct = 100.0\n\
-[summary_quality]\nbeta_min = 0.0\nrc_min = 0.0\nmax_drop_pct = 100.0\n\
-[search_usefulness]\nbeta_min = 0.0\nrc_min = 0.0\nmax_drop_pct = 100.0\n\
-[forget_completeness]\nbeta_min = 0.0\nrc_min = 0.0\nmax_drop_pct = 100.0\n",
-    )
-    .unwrap();
+    std::fs::write(&fake_manifest, failing_manifest_toml()).unwrap();
+    let cassettes_dir = dir.path().to_path_buf();
+    std::fs::write(cassettes_dir.join("force_fail.json"), failing_cassette_json()).unwrap();
     let target_baseline = dir.path().join("baseline.json");
     std::fs::copy(baseline_path(), &target_baseline).unwrap();
     let before = std::fs::read_to_string(&target_baseline).unwrap();
 
     let opts = GateOptions {
         mode: GateMode::Beta,
-        cassettes_dir: workspace_root().join("fixtures/v0/replay"),
-        include: vec!["research_domain".to_owned()],
+        cassettes_dir,
+        include: vec!["force_fail".to_owned()],
         manifest_path: fake_manifest,
         baseline_path: Some(target_baseline.clone()),
         trend_path: dir.path().join("trend.jsonl"),
