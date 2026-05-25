@@ -92,16 +92,14 @@ async fn serve(host: String, port: u16) -> anyhow::Result<()> {
     use std::io::Write as _;
     tracing_subscriber::fmt()
         .with_env_filter(
-            std::env::var("RUST_LOG").unwrap_or_else(|_| {
-                "warn,cairn_desktop=info,cairn_cli=info".to_string()
-            }),
+            std::env::var("RUST_LOG")
+                .unwrap_or_else(|_| "warn,cairn_desktop=info,cairn_cli=info".to_string()),
         )
         .with_writer(std::io::stderr)
         .try_init()
         .ok();
 
-    let fixture =
-        DesktopFixture::load_default().context("loading desktop alpha fixture")?;
+    let fixture = DesktopFixture::load_default().context("loading desktop alpha fixture")?;
     let app = router(DesktopRepository::from_fixture(fixture));
     let addr: SocketAddr = format!("{host}:{port}").parse().context("bind addr")?;
     let listener = TcpListener::bind(addr).await.context("bind listener")?;

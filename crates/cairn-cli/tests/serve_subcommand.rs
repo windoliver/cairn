@@ -23,23 +23,20 @@ fn serve_binds_responds_and_shuts_down() {
     reader.read_line(&mut first_line).expect("read first line");
 
     let prefix = "cairn-desktop listening on http://";
-    let addr = first_line
-        .trim()
-        .strip_prefix(prefix)
-        .unwrap_or_else(|| {
-            panic!("unexpected first line: {first_line:?}");
-        });
+    let addr = first_line.trim().strip_prefix(prefix).unwrap_or_else(|| {
+        panic!("unexpected first line: {first_line:?}");
+    });
 
     // Poll /health for up to 5 s.
     let url = format!("http://{addr}/health");
     let deadline = Instant::now() + Duration::from_secs(5);
     let mut ok = false;
     while Instant::now() < deadline {
-        if let Ok(resp) = ureq::get(&url).call() {
-            if resp.status() == 200 {
-                ok = true;
-                break;
-            }
+        if let Ok(resp) = ureq::get(&url).call()
+            && resp.status() == 200
+        {
+            ok = true;
+            break;
         }
         std::thread::sleep(Duration::from_millis(50));
     }
@@ -51,7 +48,10 @@ fn serve_binds_responds_and_shuts_down() {
         .args(["-TERM", &pid])
         .status()
         .expect("invoke kill(1)");
-    assert!(kill_status.success(), "kill -TERM {pid} failed: {kill_status:?}");
+    assert!(
+        kill_status.success(),
+        "kill -TERM {pid} failed: {kill_status:?}"
+    );
 
     let status = child.wait().expect("wait child");
     assert!(status.success(), "child did not exit cleanly: {status:?}");
