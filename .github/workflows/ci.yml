@@ -226,13 +226,19 @@ jobs:
             *)         mode="beta" ;;
           esac
           echo "mode=$mode" >> "$GITHUB_OUTPUT"
-          # HEAD-tree validation: the candidate (this PR / merge_group)
-          # must still carry every required gate input. Without this
-          # check a PR that *deletes* manifest/baseline/cassettes from
-          # HEAD would silently pass — the job evaluates base copies,
-          # but after merge the base branch loses the inputs and every
-          # subsequent PR sees the bootstrap-fallback path (now also
-          # empty), effectively disabling the gate. Fail closed.
+          # HEAD-tree validation. Trust model:
+          #   - manifest + baseline come from the trusted base SHA so a
+          #     PR cannot lower floors or rewrite baselines.
+          #   - cassettes come from HEAD so the gate evaluates this
+          #     candidate's code+fixtures, but the coverage-regression
+          #     guard in cairn-bench (CoverageRegression) compares HEAD
+          #     totals against the trusted base baseline totals. A PR
+          #     that strips actions or tags from any cassette will trip
+          #     that guard before scoring.
+          # The shell-side validation here only ensures the gate
+          # invocation can actually run: files exist, are regular
+          # (not symlinks), non-empty, and the cassettes carry the
+          # metric_category tag.
           required_paths=(
             "crates/cairn-bench/manifests/coherence.toml"
             "crates/cairn-bench/baselines/coherence.json"
@@ -241,15 +247,26 @@ jobs:
             "fixtures/v0/replay/support_domain.json"
           )
           for path in "${required_paths[@]}"; do
-            if [[ ! -f "$path" ]]; then
-              echo "::error::coherence-gate: HEAD is missing required path '$path'; refusing to evaluate (trusted base files cannot mask a candidate that deletes gate inputs)"
+            if [[ ! -e "$path" ]]; then
+              echo "::error::coherence-gate: HEAD is missing required path '$path'"
+              exit 1
+            fi
+            if [[ -L "$path" ]]; then
+              echo "::error::coherence-gate: HEAD path '$path' is a symlink; refuse to follow (trust pinned to regular files)"
+              exit 1
+            fi
+            if [[ ! -s "$path" ]]; then
+              echo "::error::coherence-gate: HEAD path '$path' is empty"
               exit 1
             fi
           done
-          if ! grep -q '"metric_category"' fixtures/v0/replay/research_domain.json; then
-            echo "::error::coherence-gate: HEAD cassettes do not carry metric_category tags; candidates cannot strip coherence taxonomy without first updating the gate definition"
-            exit 1
-          fi
+          for cassette in research_domain engineering_domain support_domain; do
+            cassette_path="fixtures/v0/replay/${cassette}.json"
+            if ! grep -q '"metric_category"' "$cassette_path"; then
+              echo "::error::coherence-gate: HEAD cassette $cassette_path has no metric_category tags; coverage taxonomy stripped"
+              exit 1
+            fi
+          done
           mkdir -p .ci-trusted
           if [[ "$trust_from_base" == "1" ]]; then
             # Fetch the exact immutable base SHA. Avoids the race where
@@ -259,56 +276,36 @@ jobs:
             # Bootstrap guard: the trusted-input model assumes the base
             # SHA already carries the manifest, baseline, and tagged
             # cassettes. On the *very first* PR that introduces these
-            # files, the base predates them, so a strict `git show`
-            # would abort the required job and the PR could never land.
-            # If any required path is missing on the base, fall back to
-            # in-tree files and emit a visible warning. Once this PR
-            # merges into main / release/*, future PRs see the trusted
-            # path. The warning makes the fallback observable so a
-            # future regression that deletes the trusted files from the
-            # base branch would not silently relax the gate (the HEAD
-            # validation above already prevents a candidate from
-            # deleting them while still passing this job).
-            base_has_all=1
-            for path in "${required_paths[@]}"; do
+            # files, the base predates them; the strict `git show`
+            # would abort and the PR could never land. Fall back to
+            # in-tree manifest+baseline when missing on base, with a
+            # visible warning. Once this PR merges, future PRs see the
+            # trusted path. The HEAD validation above already prevents
+            # a candidate from deleting the files while still passing.
+            base_has_inputs=1
+            base_manifest_path="crates/cairn-bench/manifests/coherence.toml"
+            base_baseline_path="crates/cairn-bench/baselines/coherence.json"
+            for path in "$base_manifest_path" "$base_baseline_path"; do
               if ! git cat-file -e "$trusted_sha:$path" 2>/dev/null; then
-                base_has_all=0
+                base_has_inputs=0
                 break
               fi
             done
-            # Tag check: the cassettes need metric_category /
-            # stale_record_ids tags for the coverage guard to find
-            # actions. If the base has the cassette files but not the
-            # tags (e.g. #136 landed but #137 hasn't yet), the gate
-            # would fail with IncompleteCoverage. Probe one cassette for
-            # the marker string and fall back if absent.
-            if [[ "$base_has_all" == "1" ]]; then
-              probe="$(git show "$trusted_sha:fixtures/v0/replay/research_domain.json" 2>/dev/null || echo '')"
-              if ! grep -q '"metric_category"' <<<"$probe"; then
-                base_has_all=0
-              fi
-            fi
-            if [[ "$base_has_all" == "1" ]]; then
-              git show "$trusted_sha:crates/cairn-bench/manifests/coherence.toml" > .ci-trusted/coherence.toml
-              git show "$trusted_sha:crates/cairn-bench/baselines/coherence.json" > .ci-trusted/coherence.json
-              mkdir -p .ci-trusted/replay
-              for cassette in research_domain engineering_domain support_domain; do
-                git show "$trusted_sha:fixtures/v0/replay/${cassette}.json" > ".ci-trusted/replay/${cassette}.json"
-              done
+            if [[ "$base_has_inputs" == "1" ]]; then
+              git show "$trusted_sha:$base_manifest_path" > .ci-trusted/coherence.toml
+              git show "$trusted_sha:$base_baseline_path" > .ci-trusted/coherence.json
               echo "manifest=.ci-trusted/coherence.toml" >> "$GITHUB_OUTPUT"
               echo "baseline=.ci-trusted/coherence.json" >> "$GITHUB_OUTPUT"
-              echo "cassettes=.ci-trusted/replay" >> "$GITHUB_OUTPUT"
             else
-              echo "::warning::coherence-gate falling back to in-tree manifest/baseline/cassettes (base $trusted_sha predates #137 — bootstrap path)"
-              echo "manifest=crates/cairn-bench/manifests/coherence.toml" >> "$GITHUB_OUTPUT"
-              echo "baseline=crates/cairn-bench/baselines/coherence.json" >> "$GITHUB_OUTPUT"
-              echo "cassettes=fixtures/v0/replay" >> "$GITHUB_OUTPUT"
+              echo "::warning::coherence-gate falling back to in-tree manifest/baseline (base $trusted_sha predates #137 — bootstrap path)"
+              echo "manifest=$base_manifest_path" >> "$GITHUB_OUTPUT"
+              echo "baseline=$base_baseline_path" >> "$GITHUB_OUTPUT"
             fi
           else
             echo "manifest=crates/cairn-bench/manifests/coherence.toml" >> "$GITHUB_OUTPUT"
             echo "baseline=crates/cairn-bench/baselines/coherence.json" >> "$GITHUB_OUTPUT"
-            echo "cassettes=fixtures/v0/replay" >> "$GITHUB_OUTPUT"
           fi
+          echo "cassettes=fixtures/v0/replay" >> "$GITHUB_OUTPUT"
       - name: Run coherence gate
         run: |
           ./target/release/cairn-bench coherence run \

@@ -46,6 +46,7 @@ async fn extended_cassettes_pass_beta_gate() {
         baseline_path: Some(baseline_path()),
         trend_path: dir.path().join("trend.jsonl"),
         update_baseline: false,
+        allow_coverage_shrink: false,
         write_trend: true,
         cairn_version: env!("CARGO_PKG_VERSION").to_owned(),
         git_sha: "smoke".to_owned(),
@@ -130,6 +131,7 @@ async fn trend_line_validates_against_schema() {
         baseline_path: None,
         trend_path: trend.clone(),
         update_baseline: false,
+        allow_coverage_shrink: false,
         write_trend: true,
         cairn_version: env!("CARGO_PKG_VERSION").to_owned(),
         git_sha: "smoke".to_owned(),
@@ -297,6 +299,7 @@ async fn gate_outcome_69_on_failing_gate() {
         baseline_path: None,
         trend_path: dir.path().join("trend.jsonl"),
         update_baseline: false,
+        allow_coverage_shrink: false,
         write_trend: false,
         cairn_version: env!("CARGO_PKG_VERSION").to_owned(),
         git_sha: "smoke".to_owned(),
@@ -306,6 +309,40 @@ async fn gate_outcome_69_on_failing_gate() {
     let outcome = run_coherence_gate(opts).await.expect("gate run");
     assert!(!outcome.gate_passed, "gate should have failed");
     assert!(outcome.report.failures.contains(&"summary_quality"));
+}
+
+#[tokio::test]
+async fn update_baseline_rejects_coverage_shrink_without_override() {
+    // `--gate none --update-baseline --include research_domain`
+    // (instead of all three cassettes) would otherwise overwrite the
+    // committed 3-cassette baseline with a smaller-denominator one,
+    // and future runs would be allowed to shed actions down to that
+    // lower floor. Without --allow-coverage-shrink this must fail.
+    use cairn_bench::coherence::GateError;
+    let dir = tempdir().unwrap();
+    let target_baseline = dir.path().join("baseline.json");
+    std::fs::copy(baseline_path(), &target_baseline).unwrap();
+    let opts = GateOptions {
+        mode: GateMode::None,
+        cassettes_dir: workspace_root().join("fixtures/v0/replay"),
+        include: vec!["research_domain".to_owned()],
+        manifest_path: manifest_path(),
+        baseline_path: Some(target_baseline.clone()),
+        trend_path: dir.path().join("trend.jsonl"),
+        update_baseline: true,
+        allow_coverage_shrink: false,
+        write_trend: false,
+        cairn_version: env!("CARGO_PKG_VERSION").to_owned(),
+        git_sha: "smoke".to_owned(),
+        now: "2026-05-24T12:00:00Z".to_owned(),
+        run_id: "01J000000000000000000000RUN".to_owned(),
+    };
+    let err = run_coherence_gate(opts).await.expect_err("must reject");
+    assert!(
+        matches!(err, GateError::BaselineInvalid { ref reason, .. } if reason.contains("shrink")),
+        "expected BaselineInvalid(shrink), got {err:?}"
+    );
+    assert_eq!(err.exit_code(), 78);
 }
 
 #[tokio::test]
@@ -326,6 +363,7 @@ async fn enforced_gate_rejects_coverage_regression() {
         baseline_path: Some(baseline_path()),
         trend_path: dir.path().join("trend.jsonl"),
         update_baseline: false,
+        allow_coverage_shrink: false,
         write_trend: false,
         cairn_version: env!("CARGO_PKG_VERSION").to_owned(),
         git_sha: "smoke".to_owned(),
@@ -356,6 +394,7 @@ async fn enforced_gate_rejects_zero_coverage_cassettes() {
         baseline_path: None,
         trend_path: dir.path().join("trend.jsonl"),
         update_baseline: false,
+        allow_coverage_shrink: false,
         write_trend: false,
         cairn_version: env!("CARGO_PKG_VERSION").to_owned(),
         git_sha: "smoke".to_owned(),
@@ -384,6 +423,7 @@ async fn missing_baseline_path_fails_closed() {
         baseline_path: Some(dir.path().join("does-not-exist.json")),
         trend_path: dir.path().join("trend.jsonl"),
         update_baseline: false,
+        allow_coverage_shrink: false,
         write_trend: false,
         cairn_version: env!("CARGO_PKG_VERSION").to_owned(),
         git_sha: "smoke".to_owned(),
@@ -420,6 +460,7 @@ async fn update_baseline_rejects_zero_coverage_run() {
         baseline_path: Some(target_baseline.clone()),
         trend_path: dir.path().join("trend.jsonl"),
         update_baseline: true,
+        allow_coverage_shrink: false,
         write_trend: false,
         cairn_version: env!("CARGO_PKG_VERSION").to_owned(),
         git_sha: "smoke".to_owned(),
@@ -439,7 +480,7 @@ async fn update_baseline_rejects_zero_coverage_run() {
 
 /// Synthetic baseline whose totals match `failing_cassette_json` (1
 /// action per category). Lets failure-path tests run against a custom
-/// baseline without tripping the round-7 CoverageRegression guard,
+/// baseline without tripping the round-7 `CoverageRegression` guard,
 /// which would otherwise fire because the live baseline records
 /// totals from all three 3-domain cassettes.
 fn force_fail_baseline_json() -> &'static str {
@@ -488,6 +529,7 @@ async fn failed_gate_does_not_update_baseline() {
         baseline_path: Some(target_baseline.clone()),
         trend_path: dir.path().join("trend.jsonl"),
         update_baseline: true,
+        allow_coverage_shrink: false,
         write_trend: false,
         cairn_version: env!("CARGO_PKG_VERSION").to_owned(),
         git_sha: "smoke".to_owned(),

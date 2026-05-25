@@ -37,6 +37,10 @@ pub struct GateOptions {
     pub trend_path: PathBuf,
     /// Rewrite the baseline with this run's scores.
     pub update_baseline: bool,
+    /// Allow the baseline rewrite to shrink any category's `total`.
+    /// Off by default to prevent a seed run on a reduced cassette set
+    /// from silently weakening the gate.
+    pub allow_coverage_shrink: bool,
     /// Append a line to the trend file.
     pub write_trend: bool,
     /// Cairn version string for the trend record.
@@ -172,6 +176,7 @@ impl GateError {
 ///
 /// # Errors
 /// Returns any error from replay, scoring, threshold loading, or trend I/O.
+#[allow(clippy::too_many_lines)]
 pub async fn run_coherence_gate(opts: GateOptions) -> Result<GateOutcome, GateError> {
     let manifest = load_manifest(&opts.manifest_path)?;
     // A configured `baseline_path` MUST exist and parse. Silently treating
@@ -259,6 +264,13 @@ pub async fn run_coherence_gate(opts: GateOptions) -> Result<GateOutcome, GateEr
     // for every empty category, which `validate_baseline` happily
     // accepts. Writing that as the new baseline would silently destroy
     // the prior measurement and lock in 0/0 perfect scores.
+    //
+    // Finally, when an existing baseline is loaded, refuse to write a
+    // baseline whose `total` for any category is smaller than the
+    // current value. `--gate none --update-baseline --include
+    // research_domain` would otherwise produce a smaller-denominator
+    // baseline that locks in for future runs. Override via
+    // `allow_coverage_shrink` when intentionally retiring cassettes.
     if opts.update_baseline
         && gate_passed
         && let Some(path) = &opts.baseline_path
@@ -269,6 +281,20 @@ pub async fn run_coherence_gate(opts: GateOptions) -> Result<GateOutcome, GateEr
                 reason: format!(
                     "refusing to --update-baseline: category {empty} has 0 actions; \
                      pass --include cassettes that exercise every category",
+                ),
+            });
+        }
+        if !opts.allow_coverage_shrink
+            && let Some(b) = baseline.as_ref()
+            && let Some((category, baseline_total, current_total)) =
+                first_shrunk_category(&scores, b)
+        {
+            return Err(GateError::BaselineInvalid {
+                path: path.display().to_string(),
+                reason: format!(
+                    "refusing to --update-baseline: category {category} total would shrink \
+                     from {baseline_total} to {current_total}; pass --allow-coverage-shrink \
+                     to confirm an intentional reduction",
                 ),
             });
         }
@@ -315,6 +341,7 @@ pub enum CoherenceCmd {
 
 /// Arguments for `cairn-bench coherence run`.
 #[derive(Debug, Args)]
+#[allow(clippy::struct_excessive_bools)]
 pub struct CoherenceRunArgs {
     /// Gate mode.
     #[arg(long, value_enum, default_value_t = CliGate::Beta)]
@@ -340,6 +367,13 @@ pub struct CoherenceRunArgs {
     /// Overwrite the baseline with this run's scores.
     #[arg(long)]
     pub update_baseline: bool,
+    /// Permit `--update-baseline` to write a baseline whose `total` for
+    /// any category is smaller than the existing committed baseline.
+    /// Required when intentionally retiring cassettes — without it,
+    /// shrinking the baseline is rejected to prevent a seed run on a
+    /// reduced `--include` set from quietly weakening the gate.
+    #[arg(long)]
+    pub allow_coverage_shrink: bool,
     /// Skip appending to the trend file.
     #[arg(long)]
     pub no_trend_write: bool,
@@ -400,6 +434,7 @@ async fn dispatch_run(run: CoherenceRunArgs) -> u8 {
         baseline_path: Some(run.baseline),
         trend_path: run.trend,
         update_baseline: run.update_baseline,
+        allow_coverage_shrink: run.allow_coverage_shrink,
         write_trend: !run.no_trend_write,
         cairn_version: env!("CARGO_PKG_VERSION").to_owned(),
         git_sha: std::env::var("GIT_SHA").unwrap_or_else(|_| "unknown".to_owned()),
