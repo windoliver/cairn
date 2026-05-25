@@ -2475,7 +2475,7 @@ A SKILL.md file teaches any bash-capable agent how to use Cairn without MCP. Thi
 
 Concrete payoff: a harness with no MCP plugin (or one where the user prefers not to install servers) can still use Cairn fully by loading the skill.
 
-**Contract version.** `cairn.mcp.v1` — the entire verb set below is frozen under this name; a breaking change yields `cairn.mcp.v2` and both versions run side by side during deprecation. The contract version, verb list, and per‑verb schema are generated from the single IDL (§13.5); wire‑compat tests fail CI on drift. Clients declare the version they implement via the **status prelude** (§8.0.a) — they read `status.contract` + `status.capabilities` before any verb call. Cairn refuses unknown verbs rather than silently dropping them. The same IDL generates the CLI clap definitions and SDK trait signatures — single source of truth across all four surfaces.
+**Contract version.** `cairn.mcp.v1` — the entire verb set below is frozen under this name; a breaking change yields `cairn.mcp.v2` and both versions run side by side during deprecation. The contract version, verb list, and per‑verb schema are generated from the single IDL (§13.5); wire‑compat tests fail CI on drift. Clients declare the version they implement via the **status prelude** (§8.0.a) — they read `status.contract` + `status.capabilities` before any verb call. Cairn refuses unknown verbs rather than silently dropping them. The same IDL generates the CLI clap definitions and SDK trait signatures — single source of truth across all four surfaces. See [ADR 0004 — `cairn.mcp.v1` semver freeze](decisions/0004-mcp-v1-semver-freeze.md) for the frozen surface, additive/deprecation rules, and v2 procedure.
 
 ### 8.0 Core verbs (always present in `cairn.mcp.v1`)
 
