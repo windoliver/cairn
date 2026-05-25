@@ -38,35 +38,55 @@ advertised in `cairn status`. Clients MUST inspect `status.capabilities`
 before issuing a mode; the runtime fails closed with `CapabilityUnavailable`
 on any un-advertised code (brief §8.0.a).
 
-> **Source of truth.** Buckets below mirror
-> `crates/cairn-core/tests/capability_matrix_v1.rs::EXPECTED_PHASE`.
-> Gate 9 in the [beta-readiness checklist](../maintainers/beta-readiness.md)
-> compares `cairn status --json` against the **Default-advertised**
-> bucket plus any **non-default platform** entries the operator
-> intentionally enabled — never against the deferred-wiring or
-> later-phase rows.
+> **Source of truth.** Each bucket below has a runtime gate. The
+> snapshot files under
+> `crates/cairn-cli/tests/snapshots/status_snapshot_insta__*.snap`
+> are the byte-exact reference for each deployment profile; the
+> `EXPECTED_PHASE` map in
+> `crates/cairn-core/tests/capability_matrix_v1.rs` is the per-phase
+> reachability spec. Gate 9 in the
+> [beta-readiness checklist](../maintainers/beta-readiness.md) compares
+> `cairn status --json` against the snapshot that matches the actual
+> deployment profile, not against a one-size-fits-all bucket.
 
-### Default-advertised at v0.1 (case A in `advertise()`)
+### Out-of-the-box default (`status_snapshot_insta__default_p0_bound_vault.snap`)
 
-These are the codes `cairn status` emits on a default-P0 binary with
-full gates ON. Stability: frozen v1.0.
+What a freshly-bootstrapped P0 vault emits — no embedding model fetched
+yet, single-tenant off, no opt-in sensors. Stability: frozen v1.0.
 
 | Capability code |
 |-----------------|
 | `cairn.mcp.v1.search.keyword` |
-| `cairn.mcp.v1.search.semantic` |
-| `cairn.mcp.v1.search.hybrid` |
+| `cairn.mcp.v1.policy_trace` |
+| `cairn.mcp.v1.forget.record` |
+| `cairn.mcp.v1.forget.session` |
 | `cairn.mcp.v1.retrieve.session` |
 | `cairn.mcp.v1.retrieve.turn` |
 | `cairn.mcp.v1.retrieve.tool_call` |
-| `cairn.mcp.v1.forget.record` |
-| `cairn.mcp.v1.policy_trace` |
-| `cairn.workflows.v1.consolidation` |
-| `cairn.workflows.v1.dream` |
-| `cairn.workflows.v1.expiration` |
-| `cairn.workflows.v1.evaluation` |
 | `cairn.sensor.v1.screen.xcap` |
 | `cairn.sensor.v1.screen.ocr.tesseract` |
+
+### Opt-in: semantic + hybrid search (model loaded)
+
+Added when `search.local_embeddings: true` (default) **and** the
+embedding model is on disk **and** `sqlite-vec` reports `vector: true`.
+
+| Capability code | Gated by |
+|-----------------|----------|
+| `cairn.mcp.v1.search.semantic` | `config.semantic_search` + `model_present` + `embedding_provider_ready` + `store.vector` |
+| `cairn.mcp.v1.search.hybrid` | same as above (drops with either pillar) |
+
+### Opt-in: workflows (single-tenant + runtime ready)
+
+Added when the deployment is single-tenant and the workflow runtimes
+report ready. Stability: frozen v1.0.
+
+| Capability code | Gated by |
+|-----------------|----------|
+| `cairn.workflows.v1.consolidation` | `consolidation_runtime_ready` |
+| `cairn.workflows.v1.dream` | `llm_configured` + `dream_runtime_ready` |
+| `cairn.workflows.v1.expiration` | `expiration_runtime_ready` |
+| `cairn.workflows.v1.evaluation` | `evaluation_runtime_ready` |
 
 ### Phase-gated under v0.2
 

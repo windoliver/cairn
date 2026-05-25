@@ -106,25 +106,31 @@ are manual and listed at the end of the script output.
 
 ### 9. Capability sync (manual)
 
-Run `target/release/cairn status --json` and compare the `capabilities[]`
-array against the [capability matrix](../reference/capability-matrix.md).
-Compare against:
+Run `target/release/cairn status --json` and compare the
+`capabilities[]` array against the snapshot file matching the
+deployment profile:
 
-- **Default-advertised at v0.1** bucket — always expected, every row.
-- **Phase-gated v0.2 / v0.3** buckets — only when the release ships
-  the matching phase (`status.contract_phase`).
-- **Non-default platform** rows — only those the operator intentionally
-  enabled (cfg / feature / OS).
+| Profile | Reference snapshot |
+|---------|---------------------|
+| Fresh P0, no opt-ins | `crates/cairn-cli/tests/snapshots/status_snapshot_insta__default_p0_bound_vault.snap` |
+| Local embeddings disabled | `status_snapshot_insta__local_embeddings_off.snap` |
+| Unbound vault dir | `status_snapshot_insta__unbound_dir.snap` |
+| SDK with no store | `status_snapshot_insta__sdk_new_no_store.snap` |
 
-Do NOT compare against the **Deferred-wiring** bucket; those
-identifiers are reserved but not advertised by the runtime.
+For any **opt-ins enabled** (semantic search via model fetch,
+single-tenant workflows, screenpipe / WinRT sensors, v0.2+ phase),
+add the matching rows from
+[capability matrix](../reference/capability-matrix.md) "Opt-in" or
+"Phase-gated" buckets.
 
-**Pass:** the advertised set equals the union of the buckets above for
-the target phase + config. No extras, no omissions.
-**Failure:** the runtime advertises a capability the matrix doesn't
-expect at that phase (or vice versa). Reconcile in
-`cairn-core::status::advertise` plus the matching `wiring::*_WIRED`
-constant per CLAUDE.md §4 invariant 6.
+**Pass:** advertised set equals `snapshot ∪ opt-in rows`. No extras
+from the **Deferred-wiring** bucket.
+**Failure:** runtime advertises a deferred-wiring code (over-advertise
+— a `wiring::*_WIRED` flag flipped without matching dispatch), or
+omits a code the snapshot/opt-in bucket expects (under-advertise — a
+gate over-tightened). Reconcile in `cairn-core::status::advertise`
+plus the matching `wiring::*_WIRED` constant per CLAUDE.md §4
+invariant 6, then regenerate the snapshot via `cargo insta accept`.
 
 ### 10. Contract freeze verified (manual)
 
