@@ -21,15 +21,11 @@ cairn-connectors-core = { workspace = true }
 cairn-core = { workspace = true }
 arc-swap = { workspace = true }
 async-trait = { workspace = true }
-axum = { workspace = true }
-bon = { workspace = true }
 chrono = { workspace = true }
-hex = { workspace = true }
 jsonwebtoken = { workspace = true }
 reqwest = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-sha2 = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["macros", "sync"] }
 tokio-util = { workspace = true }
