@@ -101,10 +101,23 @@ impl GhResource for PrsResource {
         }
 
         let exhausted = u32::try_from(prs.len()).unwrap_or(u32::MAX) < per_page;
-        let next_cursor = ResourceCursor {
-            since: max_updated.or(sub_cursor.since),
-            page: if exhausted { Some(1) } else { Some(page + 1) },
-            ..ResourceCursor::default()
+        // Fix 2 (mirrored from IssuesResource): only advance `since` when the
+        // current window is exhausted.  Keeping `since` stable while paginating
+        // a full window prevents the result set from shifting mid-pagination.
+        let next_cursor = if exhausted {
+            // Window done: advance since to max-seen, reset page for next cycle.
+            ResourceCursor {
+                since: max_updated.or(sub_cursor.since),
+                page: Some(1),
+                ..ResourceCursor::default()
+            }
+        } else {
+            // Still paginating same since window — keep since stable.
+            ResourceCursor {
+                since: sub_cursor.since,
+                page: Some(page + 1),
+                ..ResourceCursor::default()
+            }
         };
 
         let rate_limit_hint = client.rate_state().hint_if_low(50);

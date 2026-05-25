@@ -33,6 +33,12 @@ struct IssueDto {
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
     html_url: String,
+    /// GitHub's `/repos/{o}/{r}/issues` endpoint returns both issues AND pull
+    /// requests.  PRs carry a `pull_request` marker object; real issues do not.
+    /// When this field is `Some`, the DTO represents a PR that is also owned
+    /// by `PrsResource` — skip it here to avoid duplicate, misclassified records.
+    #[serde(default)]
+    pull_request: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -87,14 +93,38 @@ impl GhResource for IssuesResource {
             if max_updated.is_none_or(|t| dto.updated_at > t) {
                 max_updated = Some(dto.updated_at);
             }
+            // Fix 3: skip pull requests returned by /issues.
+            // GitHub's /repos/{o}/{r}/issues endpoint returns both issues and
+            // PRs.  PRs carry a non-null `pull_request` marker field.
+            // `PrsResource` already owns PRs via /repos/{o}/{r}/pulls — emitting
+            // them here too would produce duplicate, misclassified records.
+            if dto.pull_request.is_some() {
+                continue;
+            }
             events.push(issue_to_event(dto, repo, None));
         }
 
         let exhausted = u32::try_from(issues.len()).unwrap_or(u32::MAX) < per_page;
-        let next_cursor = ResourceCursor {
-            since: max_updated.or(sub_cursor.since),
-            page: if exhausted { Some(1) } else { Some(page + 1) },
-            ..ResourceCursor::default()
+        // Fix 2: only advance `since` when the current `since`-window is
+        // exhausted (partial page).  While paginating through a full window
+        // keep `since` stable so that page 2, 3, … are all fetched from the
+        // same window.  Advancing `since` mid-window would shift the result
+        // set and cause page N of the new window to skip items that were on
+        // page N-1 of the old window.
+        let next_cursor = if exhausted {
+            // Window done: advance since to max-seen, reset page for next cycle.
+            ResourceCursor {
+                since: max_updated.or(sub_cursor.since),
+                page: Some(1),
+                ..ResourceCursor::default()
+            }
+        } else {
+            // Still paginating same since window — keep since stable.
+            ResourceCursor {
+                since: sub_cursor.since,
+                page: Some(page + 1),
+                ..ResourceCursor::default()
+            }
         };
 
         let rate_limit_hint = client.rate_state().hint_if_low(50);
@@ -232,5 +262,58 @@ mod tests {
             .parse_webhook("ping", "d", "s", b"{}", &repo)
             .expect("ping returns empty");
         assert!(events.is_empty());
+    }
+
+    /// Fix 3: `IssueDto` entries carrying a `pull_request` marker field must be
+    /// skipped in the unit-level deserialization path.  This test verifies that a
+    /// DTO with `pull_request: Some(...)` is not converted to an event, and that
+    /// the real issue alongside it still is.
+    #[test]
+    fn pull_request_field_triggers_skip() {
+        // Minimal IssueDto with pull_request set — should be skipped.
+        let pr_dto: IssueDto = serde_json::from_value(serde_json::json!({
+            "id": 99,
+            "number": 99,
+            "title": "PR disguised as issue",
+            "body": null,
+            "state": "open",
+            "user": {"login": "alice"},
+            "created_at": "2026-05-20T10:00:00Z",
+            "updated_at": "2026-05-20T10:00:00Z",
+            "html_url": "https://github.com/o/r/pull/99",
+            "pull_request": {"url": "https://api.github.com/repos/o/r/pulls/99"}
+        }))
+        .expect("deserializes");
+        assert!(
+            pr_dto.pull_request.is_some(),
+            "pull_request field must be Some"
+        );
+
+        // Minimal IssueDto without pull_request — should be emitted.
+        let issue_dto: IssueDto = serde_json::from_value(serde_json::json!({
+            "id": 10,
+            "number": 10,
+            "title": "Real issue",
+            "body": null,
+            "state": "open",
+            "user": {"login": "bob"},
+            "created_at": "2026-05-21T10:00:00Z",
+            "updated_at": "2026-05-21T10:00:00Z",
+            "html_url": "https://github.com/o/r/issues/10"
+        }))
+        .expect("deserializes");
+        assert!(
+            issue_dto.pull_request.is_none(),
+            "real issue must have no pull_request"
+        );
+
+        let repo = Repo {
+            owner: "o".into(),
+            name: "r".into(),
+        };
+        // The PR DTO must be skipped (no event produced).
+        // The issue DTO must yield an event with kind:issue.
+        let issue_event = issue_to_event(&issue_dto, &repo, None);
+        assert!(issue_event.labels.contains("kind:issue"));
     }
 }

@@ -63,6 +63,28 @@ pub async fn run_prs_poll(
     Ok((outcome.events, outcome.next_cursor))
 }
 
+/// Run `CommitsResource::poll` with a fully-specified `ResourceCursor`.
+/// Used by tests that need explicit control over branch / since / `last_sha`.
+pub async fn run_commits_poll_with_cursor(
+    handle: &CredentialHandle,
+    base_url: &Url,
+    owner: &str,
+    name: &str,
+    cursor: ResourceCursor,
+    budget: u32,
+) -> Result<(Vec<ConnectorEvent>, ResourceCursor), GhError> {
+    let auth = Arc::new(GitHubAuth::from_handle(handle)?);
+    let client = GhClient::new(auth, base_url.clone());
+    let repo = Repo {
+        owner: owner.into(),
+        name: name.into(),
+    };
+    let outcome = CommitsResource
+        .poll(&client, &repo, &cursor, budget)
+        .await?;
+    Ok((outcome.events, outcome.next_cursor))
+}
+
 /// Run `CommitsResource::poll` once and return the produced events + new cursor.
 pub async fn run_commits_poll(
     handle: &CredentialHandle,
@@ -85,6 +107,26 @@ pub async fn run_commits_poll(
         ..Default::default()
     };
     let outcome = CommitsResource.poll(&client, &repo, &sub, budget).await?;
+    Ok((outcome.events, outcome.next_cursor))
+}
+
+/// Run `PrsResource::poll` with a fully-specified `ResourceCursor`.
+/// Used by pagination tests that need to thread `page` and `since` across calls.
+pub async fn run_prs_poll_with_cursor(
+    handle: &CredentialHandle,
+    base_url: &Url,
+    owner: &str,
+    name: &str,
+    cursor: ResourceCursor,
+    budget: u32,
+) -> Result<(Vec<ConnectorEvent>, ResourceCursor), GhError> {
+    let auth = Arc::new(GitHubAuth::from_handle(handle)?);
+    let client = GhClient::new(auth, base_url.clone());
+    let repo = Repo {
+        owner: owner.into(),
+        name: name.into(),
+    };
+    let outcome = PrsResource.poll(&client, &repo, &cursor, budget).await?;
     Ok((outcome.events, outcome.next_cursor))
 }
 
