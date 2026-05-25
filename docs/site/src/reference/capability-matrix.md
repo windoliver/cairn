@@ -1,7 +1,7 @@
 # Capability Matrix
 
 > **Single source of truth.** Other docs link here. When this page and brief
-> [§18.c](../../../../docs/design/design-brief.md) disagree, the brief wins —
+> [§18.c](https://github.com/windoliver/cairn/blob/main/docs/design/design-brief.md) disagree, the brief wins —
 > open a PR updating this page.
 
 This table mirrors brief §18.c lines 4184-4192. It enumerates which capability
@@ -23,13 +23,13 @@ usage, migration guides) links to instead of repeating phase claims.
 | Capability | v0.1 ships | v0.2 ships | v0.3+ |
 |------------|------------|------------|-------|
 | Core verbs 1–8 (`ingest` / `search` / `retrieve` / `summarize` / `assemble_hot` / `capture_trace` / `lint` / `forget`) across all four surfaces (CLI · MCP · SDK · skill) | yes — all 8 | unchanged | unchanged |
-| `search` modes | keyword (FTS5) + semantic (`sqlite-vec` + local `candle`) + hybrid (local blend); droppable to keyword-only via `search.local_embeddings: false` (others rejected with `CapabilityUnavailable`) | adds BM25S lexical scoring + swappable cloud embedding provider via `litellm` (OpenAI / Cohere / Voyage / Ollama); `semantic_degraded=true` only on transient outages | adds `cairn.federation.v1` cross-tenant queries via Nexus full hub |
+| `search` modes | keyword (FTS5) + semantic (`sqlite-vec` + local `candle`) + hybrid (local blend); droppable to keyword-only via `search.local_embeddings: false` (others rejected with `CapabilityUnavailable`) | adds BM25S lexical scoring + swappable cloud embedding provider via `litellm`; `semantic_degraded=true` only on transient provider outages | adds `cairn.federation.v1` cross-tenant queries via Nexus full hub |
 | Session reload | active-session (US2 core) | + cold-storage rehydration (US6) | unchanged |
 | `forget` modes | `record` (US8 core) | + `session` fan-out with drain fences | + `scope` mode |
 | `ConsolidationWorkflow` | rolling-summary pass only (US4 core) | + Reflection / REM / Deep tiers | + EvolutionWorkflow mutations |
-| SRE observability (OpenTelemetry dashboards, tier-migration metrics, rehydration gates) | basic lint + health | full SRE surface | unchanged |
+| SRE observability (OTel dashboards, tier-migration metrics, rehydration gates) | basic lint + health | full SRE surface | unchanged |
 | Extension namespaces | `cairn.admin.v1` (operator verbs) | + `cairn.aggregate.v1` (anonymized agent insights) | + `cairn.federation.v1` (share / accept / revoke — folder-scoped via `subject.path_prefix`) + `cairn.sessiontree.v1` (fork / clone / switch / merge — §5.7) |
-| Sensors | hooks + IDE + terminal + clipboard + voice (sherpa-onnx + cpal) + screen (`xcap` + OS-native OCR, off by default per [ADR 0003](../decisions/0003-screen-sensor-packaging.md)) + neuroskill + recording-to-text batch pipeline | unchanged | + GitHub (issues / PRs / commits) + email (IMAP + webhook) + Drive (Google / OneDrive) + Notion + generic web-clipper extension |
+| Sensors | hooks + IDE + terminal + clipboard + voice (sherpa-onnx + cpal) + screen (`xcap` + OS-native OCR, off by default per [ADR 0003](https://github.com/windoliver/cairn/blob/main/docs/design/decisions/0003-screen-sensor-packaging.md)) + neuroskill + recording-to-text batch pipeline | unchanged | + GitHub (issues / PRs / commits) + email (IMAP + webhook) + Drive (Google / OneDrive) + Notion + generic web-clipper extension |
 
 ## Capability codes
 
@@ -63,5 +63,5 @@ on any un-advertised code (brief §8.0.a).
 
 ## Cross-references
 
-- Brief sections: [§8.0.a](../../../../docs/design/design-brief.md) capability codes, [§15](../../../../docs/design/design-brief.md) evaluation gates, [§18.c](../../../../docs/design/design-brief.md) coverage summary, [§19](../../../../docs/design/design-brief.md) sequencing.
+- Brief sections: [§8.0.a](https://github.com/windoliver/cairn/blob/main/docs/design/design-brief.md) capability codes, [§15](https://github.com/windoliver/cairn/blob/main/docs/design/design-brief.md) evaluation gates, [§18.c](https://github.com/windoliver/cairn/blob/main/docs/design/design-brief.md) coverage summary, [§19](https://github.com/windoliver/cairn/blob/main/docs/design/design-brief.md) sequencing.
 - Site pages: [Capability Model](../concepts/capability-model.md), [Migration Guides](../usage/migration/index.md), [Beta Readiness](../maintainers/beta-readiness.md).
