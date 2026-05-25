@@ -38,15 +38,21 @@ advertised in `cairn status`. Clients MUST inspect `status.capabilities`
 before issuing a mode; the runtime fails closed with `CapabilityUnavailable`
 on any un-advertised code (brief §8.0.a).
 
-| Row | Representative capability codes |
-|-----|----------------------------------|
-| Core verbs | `cairn.mcp.v1.<verb>` for each of the eight verbs |
-| `search` modes | `cairn.mcp.v1.search.keyword`, `.semantic`, `.hybrid`, `.federation` |
-| Session reload | `cairn.mcp.v1.retrieve.session`, `.rehydrate` |
-| `forget` modes | `cairn.mcp.v1.forget.record`, `.session`, `.scope` |
-| Consolidation tiers | `cairn.mcp.v1.summarize.rolling`, `.reflection`, `.rem`, `.deep` |
-| Extension namespaces | `cairn.admin.v1.*`, `cairn.aggregate.v1.*`, `cairn.federation.v1.*`, `cairn.sessiontree.v1.*` |
-| Sensors | `cairn.sensors.v1.<sensor>` (local + remote) |
+| Row | Representative capability codes | Stability |
+|-----|----------------------------------|-----------|
+| Core verbs | `cairn.mcp.v1.<verb>` for each of the eight verbs | frozen v1.0 |
+| `search` modes | `cairn.mcp.v1.search.keyword`, `.semantic`, `.hybrid`, `.federation` | frozen v1.0 |
+| Session reload | `cairn.mcp.v1.retrieve.session`, `.rehydrate` | frozen v1.0 |
+| `forget` modes | `cairn.mcp.v1.forget.record`, `.session`, `.scope` | frozen v1.0 |
+| Consolidation tiers | `cairn.mcp.v1.summarize.rolling`, `.reflection`, `.rem`, `.deep` | frozen v1.0 |
+| Extension namespaces | `cairn.admin.v1.*` | frozen v1.0 |
+| Extension namespaces | `cairn.aggregate.v1.*`, `cairn.federation.v1.*`, `cairn.sessiontree.v1.*` | independent (per-namespace) |
+| Sensors | `cairn.sensors.v1.<sensor>` (local + remote) | sensors namespace (independent) |
+
+Stability tiers and the freeze rules are governed by
+[ADR 0004 — `cairn.mcp.v1` semver freeze](https://github.com/windoliver/cairn/blob/main/docs/design/decisions/0004-mcp-v1-semver-freeze.md).
+See [MCP Semver Policy](../maintainers/mcp-semver-policy.md) for the
+operator-facing summary.
 
 ## Where this is wired
 
