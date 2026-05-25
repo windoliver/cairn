@@ -155,14 +155,14 @@ impl Connector for GitHubConnector {
         req: &WebhookRequest,
         _cx: &WebhookContext,
     ) -> Result<Vec<ConnectorEvent>, ConnectorError> {
-        // The substrate computed and verified the signature_id before this
-        // method is called. We use the X-Hub-Signature-256 header value (with
-        // the "sha256=" prefix stripped) as a signature_id surrogate; substrate
-        // dedups on the canonical sig_id internally.
+        // The substrate has already verified the HMAC-SHA256 signature and
+        // stripped the "sha256=" prefix (declared in connector.toml
+        // `"signature.prefix" = "sha256="`).  Use the raw header value as a
+        // signature_id surrogate; the substrate dedups on the canonical sig_id
+        // internally so no manual prefix stripping is needed here.
         let signature_id = req
             .header("X-Hub-Signature-256")
             .unwrap_or("unverified")
-            .trim_start_matches("sha256=")
             .to_owned();
         Ok(dispatch(req, &signature_id, &self.repo)?)
     }

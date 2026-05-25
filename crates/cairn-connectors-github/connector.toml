@@ -28,6 +28,7 @@ pattern = "*"
 [webhook]
 "signature.algorithm" = "hmac-sha256"
 "signature.header"    = "X-Hub-Signature-256"
+"signature.prefix"    = "sha256="
 allowed_mimes         = ["application/json"]
 delivery_id_header    = "X-GitHub-Delivery"
 
