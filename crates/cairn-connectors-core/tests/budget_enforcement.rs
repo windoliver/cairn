@@ -856,3 +856,244 @@ async fn failed_emit_does_not_consume_budget() {
 
     reg.shutdown().await;
 }
+
+// ---------------------------------------------------------------------------
+// Finding M — over-budget events and failed emits must not leave spool files
+// ---------------------------------------------------------------------------
+
+/// Over-budget events must not write a spool file (Finding M).
+///
+/// Setup: connector with budget = 1.
+///
+/// Step 1: first `poll_now` succeeds → exactly 1 spool file written.
+/// Step 2: second `poll_now` returns `BudgetExceeded` → budget reservation
+///         fails BEFORE the spool write, so NO new spool file appears.
+///
+/// This verifies the key ordering invariant: `try_reserve` now runs before
+/// `spool_bytes`, closing the race where an over-budget rejection left an
+/// orphaned file on disk.
+// The inline connector struct accounts for most of the line count here;
+// extracting it into a top-level helper would obscure the test's narrative.
+#[allow(clippy::too_many_lines)]
+#[tokio::test]
+async fn over_budget_event_leaves_no_spool_file() {
+    // Two-tick connector: emits a different event ID each time `poll` is called
+    // so the two ticks produce distinct spool filenames (content-addressed by
+    // event_id + hash prefix). Without distinct IDs both ticks would hash to
+    // the same filename and the second tick would overwrite the first, making
+    // the file-count assertion ambiguous.
+    struct TwoTickConnector {
+        manifest: ConnectorManifest,
+        sensor: Identity,
+        tick: std::sync::Mutex<u32>,
+    }
+
+    impl TwoTickConnector {
+        fn new() -> Self {
+            Self {
+                manifest: ConnectorManifest::parse_toml(BUDGET_ONE_MANIFEST)
+                    .expect("BUDGET_ONE_MANIFEST must parse"),
+                sensor: Identity::parse("snr:local:connector:budget-test:v1")
+                    .expect("sensor identity must parse"),
+                tick: std::sync::Mutex::new(0),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl Connector for TwoTickConnector {
+        fn name(&self) -> &'static str {
+            "budget-test"
+        }
+
+        fn manifest(&self) -> &ConnectorManifest {
+            &self.manifest
+        }
+
+        fn capabilities(&self) -> &ConnectorCapabilities {
+            static C: ConnectorCapabilities = ConnectorCapabilities {
+                poll: true,
+                webhook: false,
+                backfill: false,
+            };
+            &C
+        }
+
+        fn sensor_identity(&self) -> &Identity {
+            &self.sensor
+        }
+
+        fn supported_contract_versions(&self) -> VersionRange {
+            Self::SUPPORTED_VERSIONS
+        }
+
+        async fn poll(&self, _: &PollContext) -> Result<PollOutcome, ConnectorError> {
+            let mut t = self.tick.lock().expect("tick mutex unpoisoned");
+            *t += 1;
+            // Alternate between two distinct event IDs.
+            let id = if *t == 1 {
+                "01ARZ3NDEKTSV4RRFFQ69G5FA1"
+            } else {
+                "01ARZ3NDEKTSV4RRFFQ69G5FA2"
+            };
+            Ok(PollOutcome {
+                events: vec![ConnectorEvent::new(
+                    ConnectorEventId::new(id),
+                    "budget-test",
+                    SourceRef::new("issue", id, None),
+                    0,
+                    BTreeSet::from(["note".to_string()]),
+                    ConnectorScope::project("owner/repo"),
+                    ConnectorPayload::Json {
+                        mime: "application/json".into(),
+                        body: serde_json::json!({"id": id}),
+                    },
+                    DeliveryMode::Poll { cursor: None },
+                )],
+                next_cursor: None,
+                rate_limit_hint: None,
+            })
+        }
+
+        async fn ingest_webhook(
+            &self,
+            _: &WebhookRequest,
+            _: &WebhookContext,
+        ) -> Result<Vec<ConnectorEvent>, ConnectorError> {
+            Ok(vec![])
+        }
+    }
+
+    impl ConnectorPlugin for TwoTickConnector {
+        const NAME: &'static str = "budget-test";
+        const SUPPORTED_VERSIONS: VersionRange =
+            VersionRange::new(ContractVersion::new(0, 1, 0), ContractVersion::new(0, 2, 0));
+    }
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let spool_dir = tmp.path().join("connector").join("budget-test");
+
+    let mut reg = ConnectorRegistry::builder()
+        .credentials(Arc::new(InMemoryCredentialStore::default()))
+        .consent(Arc::new(AcceptAllConsent::default()))
+        .emit(Arc::new(CountEmit::default()) as Arc<dyn PipelineEmit>)
+        .spool_root(tmp.path().to_path_buf())
+        .build();
+
+    reg.register(TwoTickConnector::new())
+        .expect("register must succeed");
+    reg.enable("budget-test", one_grant())
+        .await
+        .expect("enable must succeed");
+
+    // Step 1: first poll succeeds — exactly 1 spool file must appear.
+    reg.poll_now("budget-test")
+        .await
+        .expect("first poll_now must succeed");
+
+    let files_after_first: Vec<_> = std::fs::read_dir(&spool_dir)
+        .expect("spool dir must exist after first poll")
+        .filter_map(std::result::Result::ok)
+        .collect();
+    assert_eq!(
+        files_after_first.len(),
+        1,
+        "exactly 1 spool file must exist after first poll; found {files_after_first:?}",
+    );
+
+    // Step 2: second poll must fail with BudgetExceeded (budget exhausted).
+    let err = reg
+        .poll_now("budget-test")
+        .await
+        .expect_err("second poll_now must fail: budget exhausted");
+    assert!(
+        matches!(err, ConnectorError::BudgetExceeded { .. }),
+        "expected BudgetExceeded on second poll, got {err:?}",
+    );
+
+    // The spool directory must still have exactly 1 file — no new file was
+    // written because `try_reserve` rejected the event before `spool_bytes`.
+    let files_after_second: Vec<_> = std::fs::read_dir(&spool_dir)
+        .expect("spool dir must exist after second poll")
+        .filter_map(std::result::Result::ok)
+        .collect();
+    assert_eq!(
+        files_after_second.len(),
+        1,
+        "over-budget event must not create a spool file; found {files_after_second:?}",
+    );
+
+    reg.shutdown().await;
+}
+
+/// A failed emit must delete the spool file that was already written (Finding M).
+///
+/// Setup: connector with budget = 1 (large enough for one event).
+///        `AlwaysFailEmit` always returns `Err(Transient)`.
+///
+/// After `poll_now`: the spool directory must be empty — the spool file written
+/// for the event was cleaned up when `emit` failed.
+///
+/// This verifies that `process_event` calls `remove_spool_file_if_exists`
+/// after `emit` returns an error, preventing orphaned spool objects on disk.
+#[tokio::test]
+async fn failed_emit_cleans_up_spool_file() {
+    /// `PipelineEmit` that always returns `Err(Transient)`.
+    struct AlwaysFailEmit;
+
+    #[async_trait]
+    impl PipelineEmit for AlwaysFailEmit {
+        async fn emit(
+            &self,
+            _: cairn_core::domain::capture::CaptureEvent,
+        ) -> Result<(), ConnectorError> {
+            Err(ConnectorError::transient_msg(
+                "simulated emit failure for spool cleanup test",
+            ))
+        }
+    }
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let spool_dir = tmp.path().join("connector").join("budget-test");
+
+    // Use `one_grant` (budget = 1) — budget is not the failing factor here.
+    let mut reg = ConnectorRegistry::builder()
+        .credentials(Arc::new(InMemoryCredentialStore::default()))
+        .consent(Arc::new(AcceptAllConsent::default()))
+        .emit(Arc::new(AlwaysFailEmit))
+        .spool_root(tmp.path().to_path_buf())
+        .build();
+
+    reg.register(OneItemConnector::new("01ARZ3NDEKTSV4RRFFQ69G5FC1"))
+        .expect("register must succeed");
+    reg.enable("budget-test", one_grant())
+        .await
+        .expect("enable must succeed");
+
+    // poll_now must fail because emit always returns Err.
+    let err = reg
+        .poll_now("budget-test")
+        .await
+        .expect_err("poll_now must fail because emit always fails");
+    assert!(
+        matches!(err, ConnectorError::Transient(_)),
+        "expected Transient from failing emit, got {err:?}",
+    );
+
+    // The spool directory must be empty — the file written for the event
+    // must have been deleted when `emit` returned an error (Finding M).
+    //
+    // The spool dir may not exist at all if the cleanup deleted the only file
+    // and no other file was ever created. Handle both cases.
+    let file_count = match std::fs::read_dir(&spool_dir) {
+        Ok(entries) => entries.filter_map(std::result::Result::ok).count(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => 0,
+        Err(e) => panic!("unexpected read_dir error: {e}"),
+    };
+    assert_eq!(
+        file_count, 0,
+        "spool directory must be empty after a failed emit — orphan file was not cleaned up",
+    );
+
+    reg.shutdown().await;
+}

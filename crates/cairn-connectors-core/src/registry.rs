@@ -26,7 +26,7 @@
 //!
 //! Issue #130, brief §9.1 source sensors, §19 v0.3.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
@@ -132,14 +132,34 @@ struct WebhookEntryState {
 }
 
 /// Maximum number of `(connector_name, signature_id)` pairs held in the
-/// in-memory replay set before the oldest entries are evicted.
+/// in-memory replay map before the oldest **committed** entries are evicted.
 ///
-/// At 10 000 entries the set occupies roughly 1–2 MiB of memory (two
+/// At 10 000 entries the map occupies roughly 1–2 MiB of memory (two
 /// `String`s per entry, typical connector name ~16 B, SHA-256 hex ~64 B).
-/// This bound is intentionally conservative — the set is process-local and
+/// This bound is intentionally conservative — the map is process-local and
 /// is not durable across restarts (issue #131 will persist it in the consent
 /// journal).
+///
+/// Only [`ReplayState::Committed`] entries are eligible for eviction.
+/// In-flight [`ReplayState::Pending`] entries must never be evicted while
+/// a handler is still processing the corresponding delivery.
 const REPLAY_SET_MAX: usize = 10_000;
+
+/// Lifecycle state of one entry in the replay map (Finding O).
+///
+/// `Pending` blocks concurrent duplicate deliveries during processing;
+/// `Committed` marks successfully-processed deliveries and can be evicted
+/// once the map reaches [`REPLAY_SET_MAX`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReplayState {
+    /// The delivery is in flight: `ingest_webhook` and `process_event` calls
+    /// are still running. Another delivery of the same signature is blocked
+    /// with a 409 response.
+    Pending,
+    /// The delivery completed successfully. The replay marker is permanent
+    /// until evicted by the FIFO bound at [`REPLAY_SET_MAX`].
+    Committed,
+}
 
 /// State for all webhook routes, shared via `Arc` across `axum::State`.
 struct RegistryWebhookState {
@@ -153,22 +173,29 @@ struct RegistryWebhookState {
     emit: Arc<dyn PipelineEmit>,
     /// Root directory for spooling connector payload bytes (Finding H).
     spool_root: PathBuf,
-    /// In-memory replay guard (Finding I).
+    /// In-memory replay guard (Finding I + Finding O).
     ///
     /// Keyed by `(connector_name, signature_id)` — two strings whose
-    /// concatenation uniquely identifies a webhook delivery. Insertion
-    /// order is tracked by `replay_order` so the oldest entries can be
-    /// evicted when the set grows beyond [`REPLAY_SET_MAX`].
+    /// concatenation uniquely identifies a webhook delivery. Each entry
+    /// carries a [`ReplayState`] that is `Pending` while the handler is
+    /// running and `Committed` after full success.
     ///
-    /// **Durability**: this set is in-memory only; a process restart forgets
-    /// all seen signatures. Issue #131 will persist the replay set in the
+    /// On an incoming delivery the handler atomically inserts `Pending` while
+    /// holding the lock. Any concurrent duplicate that tries to insert the same
+    /// key sees the `Pending` entry and returns 409 immediately. On success the
+    /// handler upgrades the entry to `Committed`; on failure it removes the
+    /// entry entirely so the provider can retry.
+    ///
+    /// **Durability**: this map is in-memory only; a process restart forgets
+    /// all seen signatures. Issue #131 will persist the replay map in the
     /// consent journal.
     ///
     /// Uses `std::sync::Mutex` because the critical section is
     /// synchronous (no `.await` inside the lock).
-    replay_seen: StdMutex<HashSet<(String, String)>>,
-    /// Insertion-order queue for evicting the oldest entries from `replay_seen`
-    /// when the set reaches [`REPLAY_SET_MAX`].
+    replay_seen: StdMutex<HashMap<(String, String), ReplayState>>,
+    /// Insertion-order queue for evicting the oldest **committed** entries from
+    /// `replay_seen` when the map reaches [`REPLAY_SET_MAX`]. Pending entries
+    /// are never evicted.
     replay_order: StdMutex<VecDeque<(String, String)>>,
 }
 
@@ -641,7 +668,7 @@ impl ConnectorRegistry {
             consent: Arc::clone(&self.consent),
             emit: Arc::clone(&self.emit),
             spool_root: self.spool_root.clone(),
-            replay_seen: StdMutex::new(HashSet::new()),
+            replay_seen: StdMutex::new(HashMap::new()),
             replay_order: StdMutex::new(VecDeque::new()),
         });
 
@@ -884,6 +911,28 @@ async fn spool_bytes(
     Ok(())
 }
 
+/// Remove the spool file at `{spool_root}/{relative_path}` if it exists.
+///
+/// Used by `process_event` to clean up orphaned spool files when the emit
+/// or budget reservation fails after the spool write has already completed
+/// (Finding M). Ignores `NotFound` errors — if the file was never created
+/// (e.g. the spool write itself failed) this is a safe no-op.
+///
+/// Returns `Ok(())` on success or `NotFound`; propagates other I/O errors
+/// (permissions, filesystem errors) to the caller, which logs and discards
+/// them — cleanup is best-effort and must not shadow the primary error.
+async fn remove_spool_file_if_exists(
+    spool_root: &std::path::Path,
+    relative_path: &str,
+) -> Result<(), std::io::Error> {
+    let path = spool_root.join(relative_path);
+    match tokio::fs::remove_file(&path).await {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Scope-pattern glob helper (Finding F)
 // ---------------------------------------------------------------------------
@@ -988,18 +1037,32 @@ fn sanitize_path_component(component: &str) -> Result<&str, ConnectorError> {
 /// 3. Call `consent.lookup(connector, scope_key)` to enforce the live-grant
 ///    requirement; return [`ConnectorError::ConsentRevoked`] if the journal
 ///    returns `Revoked` or an error.
-/// 4. Run [`RedactionPipeline::new().redact(event)`] to strip PII.
-/// 5. **Reserve budget (Finding K):** call `rate_limit.try_reserve` to
-///    atomically deduct one token from the per-scope bucket BEFORE emit.
-///    If the budget is exhausted, return [`ConnectorError::BudgetExceeded`]
-///    without calling `emit`. On emit failure, `rate_limit.refund` restores
-///    the reserved token so the event can be retried.
+///    3b. Validate payload against manifest (MIME, size, scope). Return
+///    [`ConnectorError::MalformedPayload`] on violations.
+///    3c. **Reject Binary payloads (Finding N):** Binary payloads require
+///    spool-layer verification (issue #131). Return
+///    [`ConnectorError::MalformedPayload`] with a message referencing #131.
+/// 4. **Reserve budget (Finding M + K):** call `rate_limit.ensure_scope` then
+///    `rate_limit.try_reserve` to atomically deduct one token from the
+///    per-scope bucket BEFORE any spool write. If the budget is exhausted,
+///    return [`ConnectorError::BudgetExceeded`] without writing to the spool
+///    or calling `emit`. This prevents orphaned spool files from over-budget
+///    events (Finding M fix).
+/// 5. Run [`RedactionPipeline::new().redact(event)`] to strip PII. On error,
+///    refund the reservation from step 4.
 /// 6. Spool the post-redaction bytes to `{spool_root}/connector/<name>/…` and
 ///    compute a real SHA-256 hash from those bytes (Finding H). The hash
-///    is guaranteed to match the bytes on disk.
-/// 7. Call [`build_capture_event`] with the spooled path and real hash.
-/// 8. Call `emit.emit(captured)` to hand the event to the pipeline.
-///    On error, refund the budget reservation (step 5).
+///    is guaranteed to match the bytes on disk. On spool failure, refund the
+///    reservation; no orphan file is left (atomic write).
+/// 7. Call [`build_capture_event`] with the spooled path and real hash. On
+///    error, refund the reservation and delete the spool file.
+/// 8. **Re-check state before emit (Finding P):** verify the connector is
+///    still `Enabled`. A concurrent `disable()` call may have flipped the
+///    state after step 1. If disabled, refund the reservation, delete the
+///    spool file, and return a [`ConnectorError::Fatal`].
+/// 9. Call `emit.emit(captured)` to hand the event to the pipeline.
+///    On error, refund the budget reservation and delete the spool file so
+///    the event can be retried (reserve/release pattern, Finding M + K).
 ///
 /// [`ConnectorEvent`]: crate::event::ConnectorEvent
 // The validation + redaction + spool + emit pipeline has many sequential
@@ -1115,31 +1178,65 @@ async fn process_event(
     // 3b. Payload validation — scope, MIME, size (brief §130 Fix 4).
     event.validate_against_manifest(connector.manifest())?;
 
-    // Ensure the per-scope rate-limit bucket exists before the reservation so
-    // that `try_reserve` can locate it. The reservation itself (Finding K) is
-    // performed BEFORE `emit.emit` so that over-budget events are rejected
-    // without calling emit — preventing the duplicate-delivery loop that the
-    // old post-emit charge created.
-    rate_limit.ensure_scope(&scope_key);
-
-    // 4. Redact PII before the event crosses any boundary (brief §5.2 + §14).
-    //    Use the manifest's max_depth limit for the JSON walker.
-    let redacted = RedactionPipeline::new()
-        .with_max_depth(connector.manifest().payload.max_depth)
-        .redact(event)?;
-
-    // 5. Compute the payload hash and spool the post-redaction bytes (Finding D +
-    //    Finding H).
+    // 3c. Binary payloads are rejected at the P0 substrate boundary (Finding N).
     //
-    //    - Text / Json: compute a real SHA-256 from the wire bytes and write them
-    //      atomically to `spool_root`. The hash is guaranteed to match the bytes on
-    //      disk once the spool write completes.
-    //    - Binary: the adapter declares the content's SHA-256 in the payload
-    //      `sha256` field. The framework trusts this value and uses it directly as
-    //      the `PayloadHash` (no re-hash — the spool verification layer in #131
-    //      will cross-check it against the actual content addressed by `bytes_ref`).
-    //      The `bytes_ref` is forwarded as the `payload_ref` so downstream can
-    //      locate the content.
+    //     The spool-verification layer that would cross-check the adapter-declared
+    //     `sha256` against the content addressed by `bytes_ref` is deferred to
+    //     issue #131. Until then, accepting Binary payloads without verification
+    //     would let a malicious adapter spoof any path under `sources/` and any
+    //     hash. Reject here with a clear error so adapters know to wait for #131.
+    if matches!(event.payload, ConnectorPayload::Binary { .. }) {
+        return Err(ConnectorError::MalformedPayload(
+            "Binary payloads require spool-layer verification; deferred to #131 (see spec §8)"
+                .into(),
+        ));
+    }
+
+    // 4. Reserve one budget token BEFORE redaction and spool (Finding M fix).
+    //
+    //    Order: ensure_scope → try_reserve → redact → spool → build → emit.
+    //
+    //    Rationale: reserving first guarantees that an over-budget event is
+    //    rejected WITHOUT creating a spool file. The previous order wrote the
+    //    spool file first and then checked the budget — an over-budget rejection
+    //    left an orphaned file on disk. Moving the reservation before the spool
+    //    write closes that gap.
+    //
+    //    Reserve/release pattern:
+    //    - `ensure_scope` lazily registers the per-scope bucket.
+    //    - `try_reserve` atomically deducts one token. Over-budget events are
+    //      rejected here — no spool write, no emit.
+    //    - If `emit` succeeds the reservation is implicitly committed.
+    //    - If the spool write or `emit` fails, `refund` restores the token and
+    //      the spool file (if already written) is deleted so the event can be
+    //      retried on the next tick without permanently reducing budget or
+    //      accumulating orphan files.
+    rate_limit.ensure_scope(&scope_key);
+    rate_limit.try_reserve(&scope_key, 1)?;
+
+    // 5. Redact PII before the event crosses any boundary (brief §5.2 + §14).
+    //    Use the manifest's max_depth limit for the JSON walker.
+    //    On redaction error, refund the reservation.
+    let redacted = match RedactionPipeline::new()
+        .with_max_depth(connector.manifest().payload.max_depth)
+        .redact(event)
+    {
+        Ok(r) => r,
+        Err(e) => {
+            rate_limit.refund(&scope_key, 1);
+            return Err(e);
+        }
+    };
+
+    // 6. Compute the payload hash and spool the post-redaction bytes (Finding D +
+    //    Finding H, reordered by Finding M).
+    //
+    //    Text / Json: compute a real SHA-256 from the wire bytes and write them
+    //    atomically to `spool_root`. The hash is guaranteed to match the bytes on
+    //    disk once the spool write completes.
+    //
+    //    Binary is already rejected above (Finding N), so this branch only
+    //    handles Text and Json.
     let connector_name = &redacted.event.connector;
     let event_id = redacted.event.event_id.as_str();
 
@@ -1147,86 +1244,103 @@ async fn process_event(
     // as a ULID above and connector_name comes from the registry (trusted),
     // apply the path-component sanitiser here as a second line of defence
     // immediately before interpolating both values into the spool path.
-    sanitize_path_component(event_id)?;
-    sanitize_path_component(connector_name)?;
+    if let Err(e) = sanitize_path_component(event_id) {
+        rate_limit.refund(&scope_key, 1);
+        return Err(e);
+    }
+    if let Err(e) = sanitize_path_component(connector_name) {
+        rate_limit.refund(&scope_key, 1);
+        return Err(e);
+    }
 
-    let (payload_ref, payload_hash) = match &redacted.event.payload {
-        ConnectorPayload::Binary {
-            sha256, bytes_ref, ..
-        } => {
-            // Binary: use the adapter-declared hash; forward bytes_ref under the
-            // `sources/` vault prefix required by `build_capture_event` (brief §3).
-            // Spool write is deferred to #131 (full binary spool verification).
-            let hash_str = if sha256.starts_with("sha256:") {
-                sha256.clone()
-            } else {
-                format!("sha256:{sha256}")
-            };
-            let ph = PayloadHash::parse(hash_str).map_err(|e| {
-                ConnectorError::fatal_msg(format!("Binary sha256 parse error: {e}"))
-            })?;
-            // Ensure the vault-relative path starts with `sources/` (brief §3).
-            let pr = if bytes_ref.starts_with("sources/") {
-                bytes_ref.clone()
-            } else {
-                format!("sources/{bytes_ref}")
-            };
-            (pr, ph)
+    // Text / Json: compute real SHA-256 from the wire bytes and spool them.
+    // Binary is already rejected above.
+    let (bytes, ext) = match payload_to_bytes(&redacted.event.payload) {
+        Ok(v) => v,
+        Err(e) => {
+            rate_limit.refund(&scope_key, 1);
+            return Err(e);
         }
-        text_or_json => {
-            // Text / Json: compute real SHA-256 from the wire bytes and spool them.
-            let (bytes, ext) = payload_to_bytes(text_or_json)?;
-            let digest = Sha256::digest(&bytes);
-            let hash_hex = hex::encode(digest);
-            let hash_str = format!("sha256:{hash_hex}");
-            // Use the first 8 hex chars in the spool filename for fast duplicate
-            // detection by name (without parsing the hash field).
-            let hash_short = &hash_hex[..8];
+    };
+    let digest = Sha256::digest(&bytes);
+    let hash_hex = hex::encode(digest);
+    let hash_str = format!("sha256:{hash_hex}");
+    // Use the first 8 hex chars in the spool filename for fast duplicate
+    // detection by name (without parsing the hash field).
+    let hash_short = &hash_hex[..8];
 
-            // Relative path inside the spool root; mirrors `payload_ref` without the
-            // leading `sources/` so the same relative path works for both the spool
-            // file and the vault reference.
-            let spool_relative =
-                format!("connector/{connector_name}/{event_id}_{hash_short}.{ext}");
+    // Relative path inside the spool root; mirrors `payload_ref` without the
+    // leading `sources/` so the same relative path works for both the spool
+    // file and the vault reference.
+    let spool_relative = format!("connector/{connector_name}/{event_id}_{hash_short}.{ext}");
 
-            // Atomically write to spool so the hash invariant holds: a reader that
-            // observes the file sees exactly the bytes we hashed.
-            spool_bytes(spool_root, &spool_relative, &bytes).await?;
+    // Atomically write to spool so the hash invariant holds: a reader that
+    // observes the file sees exactly the bytes we hashed.
+    // On spool failure: refund the reservation (no orphan file; the atomic
+    // write either completes fully or leaves nothing).
+    if let Err(e) = spool_bytes(spool_root, &spool_relative, &bytes).await {
+        rate_limit.refund(&scope_key, 1);
+        return Err(e);
+    }
 
-            // Vault-relative path starts with `sources/` (brief §3 trust boundary).
-            let pr = format!("sources/{spool_relative}");
-            let ph = PayloadHash::parse(hash_str)
-                .map_err(|e| ConnectorError::fatal_msg(format!("payload hash parse error: {e}")))?;
-            (pr, ph)
+    // Vault-relative path starts with `sources/` (brief §3 trust boundary).
+    let payload_ref = format!("sources/{spool_relative}");
+    let payload_hash = match PayloadHash::parse(hash_str) {
+        Ok(h) => h,
+        Err(e) => {
+            // Parsing a freshly-formatted "sha256:<64-hex>" string should never
+            // fail; if it does, clean up the spool file and refund.
+            rate_limit.refund(&scope_key, 1);
+            let _ = remove_spool_file_if_exists(spool_root, &spool_relative).await;
+            return Err(ConnectorError::fatal_msg(format!(
+                "payload hash parse error: {e}"
+            )));
         }
     };
 
-    // 6. Build a CaptureEvent with the real hash and spooled path.
-    let captured = build_capture_event(
+    // 7. Build a CaptureEvent with the real hash and spooled path.
+    let captured = match build_capture_event(
         &redacted.event,
         connector.sensor_identity(),
         redacted.spans,
         &payload_ref,
         payload_hash,
-    )?;
+    ) {
+        Ok(c) => c,
+        Err(e) => {
+            rate_limit.refund(&scope_key, 1);
+            let _ = remove_spool_file_if_exists(spool_root, &spool_relative).await;
+            return Err(e);
+        }
+    };
 
-    // 7. Reserve one budget token BEFORE calling emit (Finding K).
+    // 8. Re-check connector state immediately before emit (Finding P).
     //
-    //    Reserve/release pattern:
-    //    - `try_reserve` atomically deducts the token now. Over-budget events
-    //      are rejected here — before `emit` — so the provider never receives
-    //      the event and the cursor is NOT advanced, preventing the duplicate-
-    //      delivery loop that the old post-emit charge caused.
-    //    - If `emit` succeeds the reservation is implicitly committed.
-    //    - If `emit` fails, `refund` restores the token so the event can be
-    //      retried on the next poll tick without permanently reducing budget.
-    rate_limit.try_reserve(&scope_key, 1)?;
+    //    A concurrent `disable()` call may have flipped the state to `Disabled`
+    //    after step 1 but before we reach `emit`. This second check closes that
+    //    window: in-flight webhook handlers that passed the initial state check
+    //    will be fast-failed here rather than emitting events for a connector
+    //    the operator has already disabled.
+    //
+    //    Note: "fast-fail mid-processing" is the documented semantics for P0.
+    //    Strict drain-to-completion (ensuring all in-flight handlers finish
+    //    before `disable` returns) is deferred to #131.
+    if !matches!(**state.load(), ConnectorState::Enabled { .. }) {
+        rate_limit.refund(&scope_key, 1);
+        let _ = remove_spool_file_if_exists(spool_root, &spool_relative).await;
+        return Err(ConnectorError::fatal_msg(format!(
+            "connector {} was disabled mid-processing",
+            redacted.event.connector
+        )));
+    }
 
-    // 8. Hand the event to the downstream pipeline.
-    //    On error, refund the reservation so the budget remains available for
-    //    a retry (reserve/release pattern, Finding K).
+    // 9. Hand the event to the downstream pipeline.
+    //    On error, refund the reservation AND delete the spool file so the
+    //    event can be retried on the next poll tick without permanently
+    //    reducing budget or accumulating orphan files (Finding M + Finding K).
     if let Err(emit_err) = emit.emit(captured).await {
         rate_limit.refund(&scope_key, 1);
+        let _ = remove_spool_file_if_exists(spool_root, &spool_relative).await;
         return Err(emit_err);
     }
 
@@ -1335,37 +1449,61 @@ async fn handle_webhook(
         return resp(StatusCode::UNAUTHORIZED, "signature mismatch");
     };
 
-    // Replay guard — CHECK phase (Finding I + Finding L):
+    // Replay guard — atomic Pending insert (Finding I + Finding L + Finding O).
     //
-    // Only READ from the replay set here; do NOT insert yet. The insertion is
-    // deferred to after all `process_event` calls succeed (Finding L fix).
+    // Finding O fix: atomically insert a `Pending` marker inside a single lock
+    // acquisition. This closes the race window from the original "check-then-
+    // process-then-commit" approach where two concurrent identical deliveries
+    // could both pass the check before either committed the marker.
     //
-    // Rationale: if we insert the marker here and `ingest_webhook` or any
-    // `process_event` call subsequently fails, the signature is permanently
-    // locked — the provider's retry receives 409 and the event is lost.
-    // Committing the marker on success only means a retryable failure is
-    // always retryable.
+    // Protocol:
+    //  1. Lock the map.
+    //     - If `(name, sig)` maps to `Pending` or `Committed`: return 409.
+    //     - Otherwise: insert `(name, sig) -> Pending`. Drop lock.
+    //  2. Process ingest_webhook + each process_event.
+    //  3. On full success: lock map, replace `Pending` with `Committed`, push
+    //     the key onto `replay_order` for FIFO eviction. Drop lock.
+    //  4. On any error: lock map, remove entry entirely. Drop lock. Provider
+    //     retry is unblocked (Pending entry removed means next delivery passes).
     //
-    // Gap accepted for P0: a concurrent duplicate delivery that passes the
-    // check before the first delivery commits the marker will be processed
-    // twice. This window is unguarded in the in-memory implementation.
-    // Issue #131 will add a pending-marker with TTL for stricter idempotency.
+    // Eviction: only `Committed` entries are evicted when the map exceeds
+    // `REPLAY_SET_MAX`. `Pending` entries must never be evicted — they are in
+    // flight and their removal would unblock a concurrent duplicate that should
+    // be blocked.
     //
-    // The set is bounded at [`REPLAY_SET_MAX`] entries; when full the oldest
-    // entry is evicted (FIFO order). This is a best-effort guard — it is NOT
-    // durable across restarts.
+    // **Durability**: this map is in-memory only; a process restart forgets
+    // all seen signatures. Issue #131 will persist the replay map.
     let replay_key = (connector_name.clone(), sig_id.0.clone());
     {
         // SAFETY: we never hold this lock across an `.await` point.
-        let seen = state
+        let mut seen = state
             .replay_seen
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
 
-        if seen.contains(&replay_key) {
+        if seen.contains_key(&replay_key) {
+            // Either Pending (in-flight duplicate) or Committed (already done).
             return resp(StatusCode::CONFLICT, "duplicate webhook delivery");
         }
-    } // lock released here — do NOT insert yet (Finding L)
+        // Insert the Pending marker atomically before dropping the lock.
+        seen.insert(replay_key.clone(), ReplayState::Pending);
+    } // lock released here
+
+    // Helper: remove the Pending marker from replay_seen on failure so the
+    // provider can retry. Defined as an inline closure for clarity.
+    //
+    // Called on any error path before returning a non-2xx response.
+    let remove_pending = |key: &(String, String)| {
+        let mut seen = state
+            .replay_seen
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // Only remove if still Pending — a race where Committed was written
+        // before error handling is theoretically impossible but guard anyway.
+        if seen.get(key) == Some(&ReplayState::Pending) {
+            seen.remove(key);
+        }
+    };
 
     // Build WebhookContext and call ingest_webhook (Finding G §5-6).
     let webhook_cx = WebhookContext {
@@ -1379,18 +1517,25 @@ async fn handle_webhook(
     {
         Ok(evs) => evs,
         Err(ConnectorError::RateLimited { .. } | ConnectorError::BudgetExceeded { .. }) => {
+            remove_pending(&replay_key);
             return resp(StatusCode::TOO_MANY_REQUESTS, "rate limited");
         }
         Err(ConnectorError::SignatureMismatch | ConnectorError::AuthExpired { .. }) => {
+            remove_pending(&replay_key);
             return resp(StatusCode::UNAUTHORIZED, "auth error");
         }
         Err(ConnectorError::MalformedPayload(_)) => {
+            remove_pending(&replay_key);
             return resp(StatusCode::BAD_REQUEST, "malformed payload");
         }
         Err(ConnectorError::ConsentRevoked { .. }) => {
+            remove_pending(&replay_key);
             return resp(StatusCode::FORBIDDEN, "consent revoked");
         }
-        Err(_) => return resp(StatusCode::INTERNAL_SERVER_ERROR, "ingest error"),
+        Err(_) => {
+            remove_pending(&replay_key);
+            return resp(StatusCode::INTERNAL_SERVER_ERROR, "ingest error");
+        }
     };
 
     // Route each event through process_event (Finding G §7-8).
@@ -1408,26 +1553,30 @@ async fn handle_webhook(
         {
             Ok(()) => {}
             Err(ConnectorError::RateLimited { .. } | ConnectorError::BudgetExceeded { .. }) => {
+                remove_pending(&replay_key);
                 return resp(StatusCode::TOO_MANY_REQUESTS, "rate limited");
             }
             Err(ConnectorError::ConsentRevoked { .. }) => {
+                remove_pending(&replay_key);
                 return resp(StatusCode::FORBIDDEN, "consent revoked");
             }
             Err(ConnectorError::SignatureMismatch | ConnectorError::AuthExpired { .. }) => {
+                remove_pending(&replay_key);
                 return resp(StatusCode::UNAUTHORIZED, "auth error");
             }
             // 422 for payload/label/other errors; don't leak which gate failed.
-            Err(_) => return resp(StatusCode::UNPROCESSABLE_ENTITY, "event rejected"),
+            Err(_) => {
+                remove_pending(&replay_key);
+                return resp(StatusCode::UNPROCESSABLE_ENTITY, "event rejected");
+            }
         }
     }
 
-    // All events accepted → commit the replay marker (Finding L fix).
+    // All events accepted → commit the replay marker (Finding L + Finding O).
     //
-    // Only insert the `(connector_name, signature_id)` pair into `replay_seen`
-    // after every `process_event` call has returned `Ok`. This ensures that
-    // any retryable failure (from `ingest_webhook` or `process_event`) does
-    // NOT permanently lock the signature — the provider can retry and the next
-    // delivery will pass the duplicate check above.
+    // Upgrade the entry from `Pending` to `Committed` and push the key onto
+    // `replay_order` for FIFO eviction. Evict the oldest `Committed` entry
+    // when the map would exceed `REPLAY_SET_MAX` — never evict `Pending`.
     {
         // SAFETY: we never hold this lock across an `.await` point.
         let mut seen = state
@@ -1439,13 +1588,27 @@ async fn handle_webhook(
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
 
-        // Evict the oldest entry when we hit the cap.
-        if seen.len() >= REPLAY_SET_MAX
-            && let Some(oldest) = order.pop_front()
-        {
-            seen.remove(&oldest);
+        // Evict the oldest Committed entry when we hit the cap.
+        // Never evict Pending entries (they are in-flight).
+        if seen.len() >= REPLAY_SET_MAX {
+            // Walk the front of the FIFO queue looking for a Committed entry.
+            // In steady state the oldest entry is always Committed; we check
+            // to be safe. Skip Pending entries (leave them in the queue too).
+            let mut evict_idx = None;
+            for (i, k) in order.iter().enumerate() {
+                if seen.get(k) == Some(&ReplayState::Committed) {
+                    evict_idx = Some(i);
+                    break;
+                }
+            }
+            if let Some(idx) = evict_idx {
+                let oldest = order.remove(idx).expect("invariant: idx is valid");
+                seen.remove(&oldest);
+            }
         }
-        seen.insert(replay_key.clone());
+
+        // Upgrade Pending → Committed.
+        seen.insert(replay_key.clone(), ReplayState::Committed);
         order.push_back(replay_key);
     } // lock released here
 
