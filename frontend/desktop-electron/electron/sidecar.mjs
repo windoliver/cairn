@@ -17,6 +17,7 @@ const DEFAULT_BOOT_TIMEOUT_MS = 10_000;
  * @property {string} binary       Absolute path to the `cairn` binary
  * @property {string} vault        Vault path (passed via --vault; informational in alpha)
  * @property {string} logPath      Where to tee stderr
+ * @property {string|number} [port]    TCP port (default "4000"; "0" for ephemeral, used by tests)
  * @property {number} [bootTimeoutMs]
  */
 
@@ -40,7 +41,7 @@ export async function spawnSidecar(opts) {
   try {
     child = spawn(
       opts.binary,
-      ["serve", "--port", "0", "--vault", opts.vault],
+      ["serve", "--port", String(opts.port ?? 4000), "--vault", opts.vault],
       { stdio: ["ignore", "pipe", "pipe"] },
     );
   } catch (err) {

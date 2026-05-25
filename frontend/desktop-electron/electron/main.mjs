@@ -41,7 +41,9 @@ async function pollHealth(address, timeoutMs = 15_000) {
   return false;
 }
 
-async function createWindow(address) {
+// Sidecar binds to a fixed port (4000) so preload's hardcoded apiBaseUrl works.
+// Issue #XXX (file follow-up) will introduce IPC port discovery to support ephemeral binding.
+async function createWindow() {
   const win = new BrowserWindow({
     width: 1320,
     height: 860,
@@ -131,7 +133,7 @@ async function main() {
     return;
   }
 
-  await createWindow(handle.address);
+  await createWindow();
 }
 
 app.whenReady().then(() => {

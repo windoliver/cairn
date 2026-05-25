@@ -26,7 +26,8 @@ jobs:
         timeout-minutes: 2
         run: |
           mkdir -p "$RUNNER_TEMP/smoke-vault"
-          open -W -a Cairn --args --smoke-test --vault "$RUNNER_TEMP/smoke-vault"
+          /Applications/Cairn.app/Contents/MacOS/Cairn \
+            --smoke-test --vault "$RUNNER_TEMP/smoke-vault"
           code=$?
           echo "app exit: $code"
           if [ "$code" -ne 0 ]; then
