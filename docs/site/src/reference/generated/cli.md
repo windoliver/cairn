@@ -33,6 +33,7 @@ Commands:
   setup          Configure harness integrations
   mcp            Start an MCP stdio server. Reads MCP frames from stdin, dispatches to the eight
                  cairn verbs, writes responses to stdout. Blocks until stdin closes.
+  serve          Run the desktop GUI backend (HTTP server on localhost).
   vault          Manage the vault registry (brief §3.3)
   skill          Manage the Cairn skill bundle
   skillpack      Manage `.cairnpack` skill archives (issue #128)
@@ -81,6 +82,7 @@ Options:
 - [`cairn nexus`](commands/nexus.md) - Nexus sandbox setup and diagnostics
 - [`cairn setup`](commands/setup.md) - Configure harness integrations
 - [`cairn mcp`](commands/mcp.md) - Start an MCP stdio server. Reads MCP frames from stdin, dispatches to the eight cairn verbs, writes responses to stdout. Blocks until stdin closes.
+- [`cairn serve`](commands/serve.md) - Run the desktop GUI backend (HTTP server on localhost).
 - [`cairn vault`](commands/vault.md) - Manage the vault registry (brief §3.3)
 - [`cairn skill`](commands/skill.md) - Manage the Cairn skill bundle
 - [`cairn skillpack`](commands/skillpack.md) - Manage `.cairnpack` skill archives (issue #128)

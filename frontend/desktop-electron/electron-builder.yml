@@ -1,0 +1,45 @@
+appId: com.cairn.desktop
+productName: Cairn
+copyright: Copyright © 2026 Cairn Contributors
+directories:
+  buildResources: scripts
+  output: release
+files:
+  - "dist/**/*"
+  - "electron/**/*"
+  - "package.json"
+  - "!dist/mac*/**"
+  - "!dist/builder-*"
+extraResources:
+  - from: "resources/bin/cairn"
+    to: "bin/cairn"
+  - from: "../../scripts/uninstall.sh"
+    to: "scripts/uninstall.sh"
+afterSign: "scripts/notarize.mjs"
+mac:
+  category: public.app-category.developer-tools
+  target:
+    - target: dmg
+      arch:
+        - universal
+  hardenedRuntime: true
+  gatekeeperAssess: false
+  entitlements: scripts/entitlements.mac.plist
+  entitlementsInherit: scripts/entitlements.mac.plist
+  # The cairn binary is already lipo'd universal — tell @electron/universal
+  # to treat the per-arch packagings as identical (use as-is, don't try to
+  # merge ARM64 + x64 since it IS already both).
+  x64ArchFiles: "Contents/Resources/bin/cairn"
+dmg:
+  title: "Cairn ${version}"
+  contents:
+    - x: 130
+      y: 220
+    - x: 410
+      y: 220
+      type: link
+      path: /Applications
+    - x: 270
+      y: 380
+      path: scripts/dmg-readme.txt
+      name: README.txt

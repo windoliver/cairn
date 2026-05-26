@@ -112,6 +112,7 @@ hex = { version = "0.4", default-features = false, features = ["alloc"] }
 # tracks `[workspace.package].version`; bump them together.
 cairn-core = { path = "crates/cairn-core", version = "0.0.1" }
 cairn-agent-core = { path = "crates/cairn-agent-core", version = "0.0.1" }
+cairn-desktop = { path = "crates/cairn-desktop", version = "0.0.1" }
 cairn-llm-openai-compat = { path = "crates/cairn-llm-openai-compat", version = "0.0.1" }
 cairn-keychain = { path = "crates/cairn-keychain", version = "0.0.1" }
 cairn-mcp = { path = "crates/cairn-mcp", version = "0.0.1" }

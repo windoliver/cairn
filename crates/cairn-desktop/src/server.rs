@@ -4,13 +4,14 @@ use std::{net::SocketAddr, sync::Arc};
 
 use axum::{
     Json, Router,
-    extract::{Path, Query, State},
-    http::StatusCode,
+    extract::{Path, Query, Request, State},
+    http::{HeaderValue, Method, StatusCode, header},
+    middleware::{Next, from_fn_with_state},
     response::IntoResponse,
     routing::{get, post},
 };
 use serde::Deserialize;
-use tower_http::cors::CorsLayer;
+use tower_http::cors::{AllowHeaders, AllowMethods, AllowOrigin, CorsLayer};
 
 use crate::{
     model::{DesktopReconcileApplyRequest, DesktopReconcilePreviewRequest},
@@ -29,13 +30,22 @@ pub struct DesktopServerState {
     repo: Arc<DesktopRepository>,
 }
 
-/// Build the desktop alpha router.
+/// Build the desktop alpha router without auth — kept for tests and
+/// development. Production callers should use [`router_with_auth`].
 pub fn router(repo: DesktopRepository) -> Router {
+    router_with_auth(repo, None)
+}
+
+/// Build the router with an optional bearer token. When `token` is
+/// `Some`, every non-`/health` route requires `Authorization: Bearer <t>`
+/// and CORS is restricted; otherwise the router is open (the existing
+/// permissive shape) and intended only for tests / local dev.
+pub fn router_with_auth(repo: DesktopRepository, token: Option<String>) -> Router {
     let state = DesktopServerState {
         repo: Arc::new(repo),
     };
-    Router::new()
-        .route("/health", get(health))
+
+    let api_routes = Router::new()
         .route("/api/v1/vault", get(vault))
         .route("/api/v1/folders", get(folders))
         .route("/api/v1/records", get(records))
@@ -47,8 +57,60 @@ pub fn router(repo: DesktopRepository) -> Router {
         .route("/api/v1/sre", get(sre))
         .route("/api/v1/reconcile/preview", post(reconcile_preview))
         .route("/api/v1/reconcile/apply", post(reconcile_apply))
-        .layer(CorsLayer::permissive())
+        .with_state(state.clone());
+
+    let (api_routes, cors) = if let Some(t) = token {
+        let auth_state = AuthState { token: Arc::new(t) };
+        let guarded = api_routes.layer(from_fn_with_state(auth_state, require_bearer));
+        // Packaged renderer is the only legitimate caller; lock to its
+        // origins. Electron's file:// renderer reports Origin: null;
+        // localhost is for the Vite dev server.
+        let restricted = CorsLayer::new()
+            .allow_origin(AllowOrigin::list([
+                HeaderValue::from_static("null"),
+                HeaderValue::from_static("http://127.0.0.1:5173"),
+                HeaderValue::from_static("http://localhost:5173"),
+            ]))
+            .allow_methods(AllowMethods::list([Method::GET, Method::POST]))
+            .allow_headers(AllowHeaders::list([
+                header::AUTHORIZATION,
+                header::CONTENT_TYPE,
+            ]));
+        (guarded, restricted)
+    } else {
+        (api_routes, CorsLayer::permissive())
+    };
+
+    Router::new()
+        .route("/health", get(health))
         .with_state(state)
+        .merge(api_routes)
+        .layer(cors)
+}
+
+#[derive(Clone)]
+struct AuthState {
+    token: Arc<String>,
+}
+
+async fn require_bearer(
+    State(state): State<AuthState>,
+    req: Request,
+    next: Next,
+) -> Result<axum::response::Response, StatusCode> {
+    let header = req
+        .headers()
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    let presented = header.strip_prefix("Bearer ").unwrap_or("");
+    // constant-time-ish: presented and expected lengths first, then
+    // byte compare. ConstantTimeEq isn't worth a new dep for a
+    // local-only token in this slice.
+    if presented.len() != state.token.len() || presented.as_bytes() != state.token.as_bytes() {
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+    Ok(next.run(req).await)
 }
 
 async fn health() -> Json<serde_json::Value> {

@@ -188,4 +188,43 @@ describe("DesktopApiClient", () => {
     expect(fetchMock).toHaveBeenCalledWith("http://127.0.0.1:4000/api/v1/sre");
     expect(report.workflow.status).toBe("warning");
   });
+
+  it("attaches Authorization: Bearer when a token is configured", async () => {
+    fetchMock.mockResolvedValueOnce(
+      new Response("[]", {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    const client = new DesktopApiClient("http://127.0.0.1:4000", "test-token-xyz");
+    await client.records();
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://127.0.0.1:4000/api/v1/records",
+      expect.objectContaining({
+        headers: { authorization: "Bearer test-token-xyz" },
+      }),
+    );
+  });
+
+  it("attaches Authorization: Bearer on POST when a token is configured", async () => {
+    fetchMock.mockResolvedValueOnce(
+      new Response("{}", {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    const client = new DesktopApiClient("http://127.0.0.1:4000", "test-token-xyz");
+    await client.previewReconcile({} as never);
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://127.0.0.1:4000/api/v1/reconcile/preview",
+      expect.objectContaining({
+        method: "POST",
+        headers: expect.objectContaining({
+          authorization: "Bearer test-token-xyz",
+        }),
+      }),
+    );
+  });
 });

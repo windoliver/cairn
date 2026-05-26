@@ -33,6 +33,7 @@ path = "src/bin/cairn-docgen.rs"
 [dependencies]
 cairn-agent-core = { workspace = true }
 cairn-core = { workspace = true }
+cairn-desktop = { workspace = true }
 cairn-embeddings-local = { workspace = true }
 cairn-embeddings-openai = { workspace = true, optional = true }
 cairn-idl = { workspace = true }
@@ -49,9 +50,11 @@ flate2 = { workspace = true }
 tar = { workspace = true }
 tokio_rusqlite = { workspace = true }
 anyhow = { workspace = true }
+axum = { workspace = true }
 jsonschema = { workspace = true }
 clap = { workspace = true }
-tokio = { workspace = true, features = ["rt", "macros", "fs", "io-util"] }
+tokio = { workspace = true, features = ["rt", "macros", "fs", "io-util", "net", "signal"] }
+tracing-subscriber = { workspace = true }
 async-trait = { workspace = true }
 rusqlite = { workspace = true }
 regex = { workspace = true }
@@ -86,6 +89,7 @@ wiremock = { workspace = true }
 assert_cmd = "2"
 predicates = "3"
 tokio = { workspace = true }
+ureq = { version = "2", default-features = false }
 
 [lints]
 workspace = true

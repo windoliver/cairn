@@ -24,6 +24,7 @@ pub mod plugins;
 pub mod render;
 pub mod repair;
 pub mod sensor_gate;
+pub mod serve;
 pub mod session_source;
 pub mod setup;
 pub mod skill;
