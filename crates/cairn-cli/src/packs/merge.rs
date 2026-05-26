@@ -100,6 +100,52 @@ pub fn merge_settings_json(
     Ok(out)
 }
 
+const CLAUDE_MD_BEGIN: &str = "<!-- BEGIN CAIRN PACK MANUAL -->";
+const CLAUDE_MD_END: &str = "<!-- END CAIRN PACK MANUAL -->";
+
+/// Inject (or replace) the cairn pack manual block in a `CLAUDE.md` body.
+///
+/// `block_body` MUST start with [`CLAUDE_MD_BEGIN`] and end with
+/// [`CLAUDE_MD_END`]; it is written between those markers verbatim.
+///
+/// # Errors
+/// Returns [`PackError::MergeConflict`] if `block_body` is malformed
+/// (missing markers) or the existing file has only one marker.
+pub fn inject_block(existing: Option<String>, block_body: &str) -> Result<String, PackError> {
+    if !block_body.starts_with(CLAUDE_MD_BEGIN) || !block_body.trim_end().ends_with(CLAUDE_MD_END)
+    {
+        return Err(PackError::MergeConflict {
+            file: "CLAUDE.md".to_owned(),
+            reason: "block_body must be wrapped with CAIRN PACK MANUAL markers".to_owned(),
+        });
+    }
+    let normalised_body = block_body.trim_end();
+    let Some(existing) = existing else {
+        return Ok(format!("{normalised_body}\n"));
+    };
+
+    let begin = existing.find(CLAUDE_MD_BEGIN);
+    let end = existing.find(CLAUDE_MD_END);
+    match (begin, end) {
+        (Some(b), Some(e)) if b < e => {
+            let end_after = e + CLAUDE_MD_END.len();
+            let mut out = String::with_capacity(existing.len());
+            out.push_str(&existing[..b]);
+            out.push_str(normalised_body);
+            out.push_str(&existing[end_after..]);
+            Ok(out)
+        }
+        (None, None) => {
+            let separator = if existing.ends_with('\n') { "" } else { "\n" };
+            Ok(format!("{existing}{separator}{normalised_body}\n"))
+        }
+        _ => Err(PackError::MergeConflict {
+            file: "CLAUDE.md".to_owned(),
+            reason: "existing file has unbalanced CAIRN PACK MANUAL markers".to_owned(),
+        }),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -153,5 +199,44 @@ mod tests {
         )
         .unwrap();
         assert_eq!(once, twice);
+    }
+}
+
+#[cfg(test)]
+mod claude_md_tests {
+    use super::*;
+
+    const BEGIN: &str = "<!-- BEGIN CAIRN PACK MANUAL -->";
+    const END: &str = "<!-- END CAIRN PACK MANUAL -->";
+
+    #[test]
+    fn injects_into_empty_file() {
+        let body = format!("{BEGIN}\nfragment\n{END}");
+        let out = inject_block(None, &body).unwrap();
+        assert!(out.contains("fragment"));
+        assert!(out.contains(BEGIN));
+        assert!(out.contains(END));
+    }
+
+    #[test]
+    fn replaces_existing_block_preserving_surrounding() {
+        let existing = format!(
+            "# Project\n\nbefore\n\n{BEGIN}\nold fragment\n{END}\n\nafter\n"
+        );
+        let body = format!("{BEGIN}\nnew fragment\n{END}");
+        let out = inject_block(Some(existing), &body).unwrap();
+        assert!(out.contains("new fragment"));
+        assert!(!out.contains("old fragment"));
+        assert!(out.contains("# Project"));
+        assert!(out.contains("after"));
+    }
+
+    #[test]
+    fn appends_block_when_absent() {
+        let existing = "# Project\n\nuser stuff\n".to_owned();
+        let body = format!("{BEGIN}\nfragment\n{END}");
+        let out = inject_block(Some(existing), &body).unwrap();
+        assert!(out.contains("user stuff"));
+        assert!(out.ends_with("fragment\n<!-- END CAIRN PACK MANUAL -->\n"));
     }
 }
