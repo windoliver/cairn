@@ -66,8 +66,6 @@ impl Agent {
 
 const AGENT_BLOCK_BEGIN: &str = "<!-- BEGIN CAIRN AGENT SKILL -->";
 const AGENT_BLOCK_END: &str = "<!-- END CAIRN AGENT SKILL -->";
-const SESSION_START_HOOK_COMMAND: &str =
-    "cairn ingest --folder . --mode keyword >/tmp/cairn-session-start.log 2>&1 &";
 
 fn render_agent_markdown_block(agent: Agent) -> String {
     format!(
@@ -652,38 +650,21 @@ fn install_claude_code_integration(
     project_dir: &std::path::Path,
     force: bool,
 ) -> Result<AgentIntegrationReceipt> {
-    let mut receipt = AgentIntegrationReceipt::new(Agent::ClaudeCode);
-    let settings_path = project_dir.join(".claude/settings.json");
-    let existing = read_json_or_empty(&settings_path)?;
-    let merged = merge_claude_settings(existing)?;
-    let settings = format!(
-        "{}\n",
-        serde_json::to_string_pretty(&merged).context("serializing Claude Code settings JSON")?
-    );
-    write_if_changed(&settings_path, &settings, force, &mut receipt)?;
-
-    let project_mcp_path = project_dir.join(".mcp.json");
-    let existing_mcp = read_json_or_empty(&project_mcp_path)?;
-    let merged_mcp = merge_project_mcp_json(existing_mcp)?;
-    let project_mcp = format!(
-        "{}\n",
-        serde_json::to_string_pretty(&merged_mcp).context("serializing project MCP JSON")?
-    );
-    write_if_changed(&project_mcp_path, &project_mcp, force, &mut receipt)?;
-
-    write_guarded_markdown(
-        &project_dir.join("CLAUDE.md"),
-        &render_agent_markdown_block(Agent::ClaudeCode),
-        &mut receipt,
-    )?;
-    for (name, content) in claude_slash_commands() {
-        write_generated_guarded_file(
-            &project_dir.join(".claude/commands").join(name),
-            content,
-            force,
-            &mut receipt,
-        )?;
-    }
+    let mut receipt = AgentIntegrationReceipt {
+        agent: Agent::ClaudeCode,
+        files_created: Vec::new(),
+        files_updated: Vec::new(),
+        files_skipped: Vec::new(),
+    };
+    let pack_receipt = crate::packs::install::install_pack(&crate::packs::install::PackInstallOpts {
+        harness: crate::packs::manifest::Harness::ClaudeCode,
+        project_dir: project_dir.to_path_buf(),
+        force,
+    })
+    .map_err(|e| anyhow::anyhow!("install cairn-claude-code pack: {e}"))?;
+    receipt.files_created.extend(pack_receipt.files_created.iter().cloned());
+    receipt.files_updated.extend(pack_receipt.files_merged.iter().cloned());
+    receipt.files_skipped.extend(pack_receipt.files_skipped.iter().cloned());
     Ok(receipt)
 }
 
@@ -738,68 +719,6 @@ fn install_cursor_integration(
     Ok(receipt)
 }
 
-fn claude_slash_commands() -> [(&'static str, &'static str); 4] {
-    [
-        ("remember.md", CLAUDE_REMEMBER_COMMAND),
-        ("forget.md", CLAUDE_FORGET_COMMAND),
-        ("recall.md", CLAUDE_RECALL_COMMAND),
-        ("graph.md", CLAUDE_GRAPH_COMMAND),
-    ]
-}
-
-const CLAUDE_REMEMBER_COMMAND: &str = r#"---
-description: Remember durable project context in Cairn
-argument-hint: <memory>
----
-
-<!-- BEGIN CAIRN AGENT SKILL -->
-Store the user's provided memory in Cairn.
-
-Run:
-`cairn ingest --kind user --body "$ARGUMENTS"`
-<!-- END CAIRN AGENT SKILL -->
-"#;
-
-const CLAUDE_FORGET_COMMAND: &str = r#"---
-description: Forget a Cairn record after explicit confirmation
-argument-hint: <record-id>
----
-
-<!-- BEGIN CAIRN AGENT SKILL -->
-Confirm the user wants to forget the named Cairn record, then run:
-
-`cairn forget --record "$ARGUMENTS"`
-<!-- END CAIRN AGENT SKILL -->
-"#;
-
-const CLAUDE_RECALL_COMMAND: &str = r#"---
-description: Search and retrieve relevant Cairn memory
-argument-hint: <query>
----
-
-<!-- BEGIN CAIRN AGENT SKILL -->
-Search Cairn for relevant memory, then retrieve exact records when needed.
-
-Start with:
-`cairn search --mode keyword "$ARGUMENTS"`
-
-Then run:
-`cairn retrieve <record-id>`
-<!-- END CAIRN AGENT SKILL -->
-"#;
-
-const CLAUDE_GRAPH_COMMAND: &str = r"---
-description: Explore non-obvious Cairn graph connections
-argument-hint: <entity-ids>
----
-
-<!-- BEGIN CAIRN AGENT SKILL -->
-Use the MCP graph tools for non-obvious connections between known entity ids.
-
-Prefer `graph.surprising_connections` when comparing multiple entities.
-Do not use graph tools for ordinary file reads or code execution.
-<!-- END CAIRN AGENT SKILL -->
-";
 
 impl AgentIntegrationReceipt {
     fn new(agent: Agent) -> Self {
@@ -809,91 +728,6 @@ impl AgentIntegrationReceipt {
             files_updated: Vec::new(),
             files_skipped: Vec::new(),
         }
-    }
-}
-
-fn read_json_or_empty(path: &std::path::Path) -> Result<serde_json::Value> {
-    match std::fs::read_to_string(path) {
-        Ok(content) => serde_json::from_str(&content)
-            .with_context(|| format!("parsing JSON from {}", path.display())),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(serde_json::json!({})),
-        Err(e) => Err(anyhow::Error::from(e).context(format!("reading {}", path.display()))),
-    }
-}
-
-fn merge_claude_settings(mut value: serde_json::Value) -> Result<serde_json::Value> {
-    let root = value
-        .as_object_mut()
-        .ok_or_else(|| anyhow::anyhow!("Claude Code settings root must be a JSON object"))?;
-    insert_cairn_mcp_server(root)?;
-
-    let hooks = root.remove("hooks");
-    root.insert("hooks".to_owned(), merged_claude_hooks(hooks));
-    Ok(value)
-}
-
-fn merge_project_mcp_json(mut value: serde_json::Value) -> Result<serde_json::Value> {
-    let root = value
-        .as_object_mut()
-        .ok_or_else(|| anyhow::anyhow!("project .mcp.json root must be a JSON object"))?;
-    insert_cairn_mcp_server(root)?;
-    Ok(value)
-}
-
-fn insert_cairn_mcp_server(root: &mut serde_json::Map<String, serde_json::Value>) -> Result<()> {
-    let servers = root
-        .entry("mcpServers")
-        .or_insert_with(|| serde_json::json!({}))
-        .as_object_mut()
-        .ok_or_else(|| anyhow::anyhow!("mcpServers must be a JSON object"))?;
-    servers.insert(
-        "cairn".to_owned(),
-        serde_json::json!({"command": "cairn", "args": ["mcp"]}),
-    );
-    Ok(())
-}
-
-fn merged_claude_hooks(existing: Option<serde_json::Value>) -> serde_json::Value {
-    let mut hooks = existing
-        .and_then(|value| value.as_object().cloned())
-        .unwrap_or_default();
-    let cairn_hook = serde_json::json!({"command": SESSION_START_HOOK_COMMAND});
-    match hooks.remove("SessionStart") {
-        Some(serde_json::Value::Array(mut session_start)) => {
-            if !session_start
-                .iter()
-                .any(|hook| hook_contains_command(hook, SESSION_START_HOOK_COMMAND))
-            {
-                session_start.push(cairn_hook);
-            }
-            hooks.insert(
-                "SessionStart".to_owned(),
-                serde_json::Value::Array(session_start),
-            );
-        }
-        Some(existing_session_start) => {
-            hooks.insert(
-                "SessionStart".to_owned(),
-                serde_json::json!([existing_session_start, cairn_hook]),
-            );
-        }
-        None => {
-            hooks.insert("SessionStart".to_owned(), serde_json::json!([cairn_hook]));
-        }
-    }
-    serde_json::Value::Object(hooks)
-}
-
-fn hook_contains_command(value: &serde_json::Value, command: &str) -> bool {
-    match value {
-        serde_json::Value::String(s) => s == command,
-        serde_json::Value::Array(values) => values
-            .iter()
-            .any(|value| hook_contains_command(value, command)),
-        serde_json::Value::Object(map) => map
-            .values()
-            .any(|value| hook_contains_command(value, command)),
-        _ => false,
     }
 }
 
@@ -1244,7 +1078,7 @@ mod tests {
     }
 
     #[test]
-    fn install_agent_pack_claude_writes_slash_commands_and_background_hook() {
+    fn install_agent_pack_claude_writes_pack_commands_and_hooks() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let project = tmp.path().join("project");
         std::fs::create_dir_all(&project).expect("project dir");
@@ -1259,38 +1093,49 @@ mod tests {
         })
         .expect("install Claude Code agent pack");
 
-        let settings: serde_json::Value = serde_json::from_str(
-            &std::fs::read_to_string(project.join(".claude/settings.json")).expect("settings"),
-        )
-        .expect("settings json");
         let mcp: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(project.join(".mcp.json")).expect("mcp"))
                 .expect("mcp json");
         assert_eq!(mcp["mcpServers"]["cairn"]["command"], "cairn");
-        assert_eq!(
-            mcp["mcpServers"]["cairn"]["args"],
-            serde_json::json!(["mcp"])
-        );
-
-        let command = settings["hooks"]["SessionStart"][0]["command"]
-            .as_str()
-            .expect("SessionStart command");
-        assert!(command.contains("cairn ingest --folder . --mode keyword"));
+        // Pack registers the full MCP transport args (not the legacy ["mcp"] shorthand).
         assert!(
-            command.trim_end().ends_with('&'),
-            "session-start hook should run in the background: {command}"
+            mcp["mcpServers"]["cairn"]["args"].is_array(),
+            "cairn MCP server args must be an array"
         );
 
+        // Pack installs verb-direct commands by verb name (cairn-ingest, etc.)
         let commands = project.join(".claude/commands");
-        let remember =
-            std::fs::read_to_string(commands.join("remember.md")).expect("remember command");
-        let forget = std::fs::read_to_string(commands.join("forget.md")).expect("forget command");
-        let recall = std::fs::read_to_string(commands.join("recall.md")).expect("recall command");
-        let graph = std::fs::read_to_string(commands.join("graph.md")).expect("graph command");
-        assert!(remember.contains("cairn ingest"));
-        assert!(forget.contains("cairn forget"));
-        assert!(recall.contains("cairn retrieve"));
-        assert!(graph.contains("graph.surprising_connections"));
+        assert!(
+            commands.join("cairn-ingest.md").exists(),
+            "cairn-ingest.md must be installed"
+        );
+        assert!(
+            commands.join("cairn-forget.md").exists(),
+            "cairn-forget.md must be installed"
+        );
+        assert!(
+            commands.join("cairn-recall.md").exists(),
+            "cairn-recall.md must be installed"
+        );
+        assert!(
+            commands.join("cairn-search.md").exists(),
+            "cairn-search.md must be installed"
+        );
+
+        // Subagents directory must be populated.
+        let agents = project.join(".claude/agents");
+        assert!(
+            agents.join("context-loader.md").exists(),
+            "context-loader subagent must be installed"
+        );
+
+        // CLAUDE.md must receive the manual fragment.
+        let claude_md =
+            std::fs::read_to_string(project.join("CLAUDE.md")).expect("CLAUDE.md");
+        assert!(
+            claude_md.contains("Cairn"),
+            "CLAUDE.md must contain pack fragment"
+        );
     }
 
     #[test]
@@ -1317,57 +1162,8 @@ mod tests {
     }
 
     #[test]
-    fn claude_settings_merge_preserves_unrelated_keys() {
-        let existing = serde_json::json!({
-            "theme": "dark",
-            "mcpServers": {
-                "other": {"command": "other", "args": []}
-            }
-        });
-        let merged = merge_claude_settings(existing).expect("merge settings");
-
-        assert_eq!(merged["theme"], "dark");
-        assert_eq!(merged["mcpServers"]["other"]["command"], "other");
-        assert_eq!(merged["mcpServers"]["cairn"]["command"], "cairn");
-        assert_eq!(
-            merged["mcpServers"]["cairn"]["args"],
-            serde_json::json!(["mcp"])
-        );
-        let rendered = serde_json::to_string(&merged).expect("json");
-        assert!(rendered.contains("cairn ingest --folder . --mode keyword"));
-    }
-
-    #[test]
-    fn claude_settings_merge_preserves_existing_session_start_hooks() {
-        let existing = serde_json::json!({
-            "hooks": {
-                "SessionStart": [{"command": "echo existing"}],
-                "Stop": [{"command": "echo stop"}]
-            }
-        });
-        let merged = merge_claude_settings(existing).expect("merge settings");
-
-        let session_start = merged["hooks"]["SessionStart"]
-            .as_array()
-            .expect("SessionStart hooks array");
-        assert_eq!(session_start[0]["command"], "echo existing");
-        assert!(
-            session_start
-                .iter()
-                .any(|hook| hook["command"] == SESSION_START_HOOK_COMMAND)
-        );
-        assert_eq!(merged["hooks"]["Stop"][0]["command"], "echo stop");
-    }
-
-    #[test]
     fn agent_markdown_block_snapshot() {
         insta::assert_snapshot!(render_agent_markdown_block(Agent::Codex));
-    }
-
-    #[test]
-    fn claude_settings_snapshot() {
-        let merged = merge_claude_settings(serde_json::json!({})).expect("merge");
-        insta::assert_json_snapshot!(merged);
     }
 
     // Task 7: idempotency and version-same skip tests
