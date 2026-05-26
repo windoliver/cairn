@@ -434,6 +434,7 @@ Issue #131 verification checklist items 1–3 map to §11.1 + §11.2 above.
 | GitHub API changes / new event types | `parse_webhook` returns empty on unknown event types; no panic. Spec for new events lands as a follow-up PR. |
 | Wiremock as a new dev-dep | Dev-only; not in the release binary. Already mainstream in Rust HTTP testing. |
 | Per-resource budget split fairness | Spec says equal split with remainder to issues. If empirical traffic shows starvation, revisit — but only when measured, not preemptively (CLAUDE.md "don't design for hypothetical future requirements"). |
+| Single-repo only per Cairn process | Substrate registry keys by `name()`; manifest fixes name to `"github"`. Multi-repo requires substrate changes. Filed as follow-up. |
 
 ---
 

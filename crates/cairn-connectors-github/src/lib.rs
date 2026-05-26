@@ -2,6 +2,20 @@
 //!
 //! Issue #131, brief §19 v0.3 connector set, §9.1 source sensors.
 //!
+//! ## Multi-repo limitation (v0.3 slice 1)
+//!
+//! The substrate's `ConnectorRegistry` keys entries by `connector.name()`, and
+//! this adapter's manifest fixes the name to `"github"`. As a consequence,
+//! **only one `GitHubConnector` instance can be registered per Cairn process
+//! today**. Attempts to register a second one (e.g. for a different
+//! `owner/repo` pair) will be rejected by the substrate as a duplicate.
+//!
+//! Workaround for v0.3: deploy one Cairn process per repo, or wait for
+//! substrate-level per-instance identity support. See issue #131 follow-ups.
+//!
+//! Webhook routing is per-repo on the GitHub side, so a single registered
+//! connector can still receive deliveries from one configured repo.
+//!
 //! ## Live smoke tests
 //!
 //! The `tests/smoke_live_github.rs` file contains `#[ignore]`-gated tests that
