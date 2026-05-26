@@ -11,7 +11,7 @@
     "html_url": "https://github.com/o/r/pull/12",
     "head": {"sha": "deadbeef", "ref": "feat/x"},
     "base": {"sha": "cafe1234", "ref": "main"},
-    "merged": false,
+    "merged_at": null,
     "draft": false
   }
 ]

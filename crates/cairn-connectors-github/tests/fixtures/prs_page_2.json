@@ -11,7 +11,7 @@
     "html_url": "https://github.com/o/r/pull/13",
     "head": {"sha": "abcd1234", "ref": "feat/y"},
     "base": {"sha": "cafe5678", "ref": "main"},
-    "merged": false,
+    "merged_at": null,
     "draft": false
   },
   {
@@ -26,7 +26,7 @@
     "html_url": "https://github.com/o/r/pull/14",
     "head": {"sha": "1234abcd", "ref": "fix/z"},
     "base": {"sha": "5678cafe", "ref": "main"},
-    "merged": true,
+    "merged_at": "2026-05-24T12:00:00Z",
     "draft": false
   }
 ]

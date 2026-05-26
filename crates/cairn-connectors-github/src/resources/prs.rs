@@ -4,11 +4,10 @@ use std::collections::BTreeSet;
 
 use async_trait::async_trait;
 use cairn_connectors_core::{
-    ConnectorEvent, ConnectorEventId, ConnectorPayload, ConnectorScope, DeliveryMode, SourceRef,
+    ConnectorEvent, ConnectorPayload, ConnectorScope, DeliveryMode, SourceRef,
 };
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
-use ulid::Ulid;
 
 use crate::client::GhClient;
 use crate::cursor::ResourceCursor;
@@ -30,7 +29,12 @@ struct PrDto {
     html_url: String,
     head: RefDto,
     base: RefDto,
-    merged: bool,
+    /// List endpoint returns `merged_at: Option<DateTime>`. Single-PR endpoint
+    /// also exposes a `merged: bool` — we ignore that and derive from
+    /// `merged_at` so the same DTO works for both list and single endpoints.
+    #[serde(default)]
+    merged_at: Option<DateTime<Utc>>,
+    #[serde(default)]
     draft: bool,
 }
 
@@ -163,11 +167,16 @@ fn pr_to_event(
     repo: &Repo,
     webhook_meta: Option<(&str, &str, &str)>,
 ) -> ConnectorEvent {
-    let event_id = ConnectorEventId::new(Ulid::new().to_string());
     let source_ref = SourceRef::new(
         "pr",
         format!("gh:{}/{}#{}", repo.owner, repo.name, dto.number),
         None,
+    );
+    // Deterministic event ID: updated_at timestamp as revision marker.
+    let event_id = crate::event_id::deterministic(
+        "pr",
+        &source_ref.system_id,
+        &dto.updated_at.timestamp().to_string(),
     );
     let mut labels: BTreeSet<String> = BTreeSet::new();
     labels.insert("source:github".into());
@@ -185,7 +194,9 @@ fn pr_to_event(
             "html_url": dto.html_url,
             "head": {"sha": dto.head.sha, "ref": dto.head.ref_name},
             "base": {"sha": dto.base.sha, "ref": dto.base.ref_name},
-            "merged": dto.merged,
+            // Preserve boolean semantics for downstream consumers while using
+            // merged_at (present on list endpoint) rather than merged (list-absent).
+            "merged": dto.merged_at.is_some(),
             "draft": dto.draft,
         }),
     };
@@ -280,5 +291,41 @@ mod tests {
             .parse_webhook("ping", "d", "s", b"{}", &repo)
             .expect("ping returns empty");
         assert!(events.is_empty());
+    }
+
+    /// Fix 2: verify the real list-endpoint shape (`merged_at`, no merged field)
+    /// deserializes correctly and that `merged_at` drives the "merged" boolean
+    /// in the emitted event payload.
+    #[test]
+    fn list_endpoint_shape_open_and_merged_prs() {
+        let body = include_bytes!("../../tests/fixtures/prs_list_real_shape.json");
+        let prs: Vec<PrDto> = serde_json::from_slice(body).expect("deserializes");
+        assert_eq!(prs.len(), 2);
+
+        let repo = Repo {
+            owner: "o".into(),
+            name: "r".into(),
+        };
+
+        let open_event = pr_to_event(&prs[0], &repo, None);
+        let merged_event = pr_to_event(&prs[1], &repo, None);
+
+        let open_merged = match &open_event.payload {
+            cairn_connectors_core::ConnectorPayload::Json { body, .. } => body
+                .get("merged")
+                .and_then(serde_json::Value::as_bool)
+                .expect("merged field"),
+            _ => panic!("expected Json payload"),
+        };
+        assert!(!open_merged, "open PR must have merged=false");
+
+        let closed_merged = match &merged_event.payload {
+            cairn_connectors_core::ConnectorPayload::Json { body, .. } => body
+                .get("merged")
+                .and_then(serde_json::Value::as_bool)
+                .expect("merged field"),
+            _ => panic!("expected Json payload"),
+        };
+        assert!(closed_merged, "merged PR must have merged=true");
     }
 }

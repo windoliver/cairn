@@ -1,0 +1,32 @@
+[
+  {
+    "id": 2001,
+    "number": 55,
+    "title": "feat: open PR",
+    "body": "Open PR body",
+    "state": "open",
+    "user": {"login": "alice"},
+    "created_at": "2026-05-01T09:00:00Z",
+    "updated_at": "2026-05-01T09:00:00Z",
+    "html_url": "https://github.com/o/r/pull/55",
+    "head": {"sha": "aabbccdd", "ref": "feat/open"},
+    "base": {"sha": "11223344", "ref": "main"},
+    "merged_at": null,
+    "draft": false
+  },
+  {
+    "id": 2002,
+    "number": 56,
+    "title": "fix: merged PR",
+    "body": null,
+    "state": "closed",
+    "user": {"login": "bob"},
+    "created_at": "2026-05-01T08:00:00Z",
+    "updated_at": "2026-05-01T10:30:00Z",
+    "html_url": "https://github.com/o/r/pull/56",
+    "head": {"sha": "eeff0011", "ref": "fix/merged"},
+    "base": {"sha": "aabbccdd", "ref": "main"},
+    "merged_at": "2026-05-01T10:00:00Z",
+    "draft": false
+  }
+]
