@@ -455,6 +455,8 @@ fn compute_capabilities(
             expiration_runtime_ready,
             evaluation_runtime_ready,
             federation_runtime_ready: false,
+            // admin_runtime_ready not yet plumbed through CLI (phase 6, issue #161).
+            admin_runtime_ready: false,
             contract_phase: CLI_CONTRACT_PHASE,
         })
     } else {
@@ -590,6 +592,8 @@ fn capabilities_for_config(config: &CairnConfig, model_present: bool) -> Vec<Cap
         expiration_runtime_ready,
         evaluation_runtime_ready,
         federation_runtime_ready: false,
+        // admin_runtime_ready not yet plumbed through CLI (phase 6, issue #161).
+        admin_runtime_ready: false,
         contract_phase: CLI_CONTRACT_PHASE,
     })
 }

@@ -549,6 +549,9 @@ impl CairnMcpHandler {
             evaluation_runtime_ready: self.evaluation_runtime_ready
                 && self.config.evaluation.enabled,
             federation_runtime_ready: self.federation_runtime_ready && self.federation.is_some(),
+            // admin_runtime_ready is not yet plumbed through the MCP handler
+            // (wired in phase 6 of issue #161). Until then, hold dark.
+            admin_runtime_ready: false,
             contract_phase: cairn_core::status::Phase::V0_1,
         };
 

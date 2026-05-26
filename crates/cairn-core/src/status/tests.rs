@@ -36,6 +36,7 @@ fn gates(bound: bool, model_present: bool, store: Option<StoreCaps>) -> Capabili
         expiration_runtime_ready: false,
         evaluation_runtime_ready: false,
         federation_runtime_ready: false,
+        admin_runtime_ready: false,
         contract_phase: Phase::V0_1,
     }
 }
@@ -465,6 +466,7 @@ mod remediation_tests {
             expiration_runtime_ready: false,
             evaluation_runtime_ready: false,
             federation_runtime_ready: false,
+            admin_runtime_ready: false,
         };
 
         for cap in advertise(&gates) {
@@ -556,6 +558,7 @@ mod prop_tests {
                     expiration_runtime_ready: false,
                     evaluation_runtime_ready: false,
                     federation_runtime_ready: false,
+                    admin_runtime_ready: false,
                     contract_phase: phase,
                 }
             })
@@ -636,6 +639,7 @@ fn openai_provider_without_key_drops_semantic_and_hybrid() {
         expiration_runtime_ready: false,
         evaluation_runtime_ready: false,
         federation_runtime_ready: false,
+        admin_runtime_ready: false,
         contract_phase: Phase::V0_1,
     };
     let caps = advertise(&g);
@@ -651,6 +655,21 @@ fn openai_provider_without_key_drops_semantic_and_hybrid() {
     assert!(
         caps.contains(&Capabilities::CairnMcpV1SearchKeyword),
         "keyword must still be advertised; got {caps:?}"
+    );
+}
+
+#[test]
+fn admin_capability_absent_while_dark() {
+    // Even with both runtime preconditions satisfied, ADMIN_EXTENSION_WIRED
+    // is still false in this phase — capability must be absent.
+    let gates = CapabilityGates {
+        admin_runtime_ready: true,
+        ..gates(true, false, None)
+    };
+    let caps = advertise(&gates);
+    assert!(
+        !caps.iter().any(|c| matches!(c, Capabilities::CairnMcpV1ExtensionAdmin)),
+        "admin capability must be absent when ADMIN_EXTENSION_WIRED = false; got {caps:?}"
     );
 }
 

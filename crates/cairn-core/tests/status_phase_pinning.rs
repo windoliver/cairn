@@ -42,6 +42,7 @@ fn full_gates(phase: Phase) -> CapabilityGates {
         expiration_runtime_ready: false,
         evaluation_runtime_ready: false,
         federation_runtime_ready: false,
+        admin_runtime_ready: false,
     }
 }
 

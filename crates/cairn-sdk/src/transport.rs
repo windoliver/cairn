@@ -273,6 +273,8 @@ impl<T: Transport> Sdk<T> {
             expiration_runtime_ready: false,
             evaluation_runtime_ready: false,
             federation_runtime_ready: false,
+            // admin_runtime_ready not yet plumbed through SDK (phase 6, issue #161).
+            admin_runtime_ready: false,
             contract_phase: cairn_core::status::Phase::V0_1,
         }
     }
