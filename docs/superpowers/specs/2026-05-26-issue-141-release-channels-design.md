@@ -40,7 +40,7 @@ runbook, the same shape ADR 0004 / issue #140 used.
 | Stand-alone P0 | brief §2 invariant #2 | Update checks default **off**; `CAIRN_OFFLINE=1` and `agent.offline: true` both kill the poller dead. A fresh laptop with no network never makes an outbound request because of release-channel logic. |
 | CLI is ground truth | brief §2 invariant #3 | All channel state is readable from `cairn status`. Desktop shell wraps the same string; never invents its own. |
 | Fail closed on capability | brief §2 invariant #6 | Verification failures (Cosign sig invalid, channel feed unreachable past retry budget, vault schema newer than binary) return typed errors and non-zero exits — never a silent downgrade. |
-| Privacy by construction | brief §14 + invariant #9 | Update poll is a plain static-file GET — no Cairn-controlled identifiers leave the host. The host's access logs see only channel (URL path) and version + OS + arch (electron-updater's default User-Agent). No record content, no user identity, no IP-derived geo. |
+| Privacy by construction | brief §14 + invariant #9 | Update poll is a plain static-file GET — no Cairn-controlled identifiers leave the host. The host's access logs see only channel (URL path) and version + OS + arch (electron-updater's default User-Agent). No record content, no user identity. Cairn sends no explicit geo identifier; the host may infer coarse location from IP in standard access logs. |
 | `#![forbid(unsafe_code)]`, no `unwrap` in core | CLAUDE.md §6.2 | N/A — no Rust code touched. Pre-emptive note for follow-ups that any `cairn release verify` implementation must obey. |
 | Doc convention | CLAUDE.md §1 (brief is source of truth) | Brief §16 gains §16.b pointing at ADR 0005; ADR 0005 is the canonical policy. Maintainer / user docs link both. |
 
@@ -257,12 +257,12 @@ Each is a named follow-up issue under #32 cited from the ADR.
 
 | Issue criterion | How satisfied |
 |---|---|
-| Define stable, beta, and nightly release channels for CLI and desktop artifacts | §5 channel matrix + ADR 0005 §1; brief §16.b summary. |
-| Implement update metadata, signature verification, rollback guidance, and channel migration rules | §6 update mechanism + §8 migration/rollback + ADR 0005 §§2–4. Implementation deferred to named follow-up issues under #32; this PR ships the **rules** they will implement against. |
-| Ensure update checks respect privacy/offline expectations | §7 privacy/offline contract + ADR 0005 §5. |
+| Define stable, beta, and nightly release channels for CLI and desktop artifacts | §5 channel matrix + ADR 0005 §1 (channel matrix); brief §16.b summary. |
+| Implement update metadata, signature verification, rollback guidance, and channel migration rules | §6 update mechanism + §8 migration/rollback + ADR 0005 §2 (per-OS update mechanism), §3 + §3.a (signature scheme + trust anchors), §5 (channel migration), §6 (rollback). Implementation deferred to named follow-up issues under #32; this PR ships the **rules** they will implement against. |
+| Ensure update checks respect privacy/offline expectations | §7 privacy/offline contract + ADR 0005 §4 (privacy/offline contract). |
 | Users can choose a release channel intentionally | §5 (CLI = pick your tap; desktop = `update.channel`). User-facing doc walks through both. |
-| Artifacts are signed and update metadata is verifiable | §6 Cosign-uniform-layer + per-OS platform-native signatures. Verifier shape pinned by ADR 0005 §3. |
-| Offline users can disable update checks and still use local vaults | §7 — off by default, and dead-code under `CAIRN_OFFLINE=1` regardless of any other setting. |
+| Artifacts are signed and update metadata is verifiable | §6 Cosign-uniform-layer + per-OS platform-native signatures. Verifier shape pinned by ADR 0005 §3 + §3.a (trust anchors). |
+| Offline users can disable update checks and still use local vaults | §7 + ADR 0005 §4 — off by default, and dead-code under `CAIRN_OFFLINE=1` regardless of any other setting. |
 
 Verification checklist items from the issue (update metadata
 verification tests, channel migration tests, offline/disabled update

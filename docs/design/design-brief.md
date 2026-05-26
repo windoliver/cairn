@@ -3944,17 +3944,18 @@ checks both the platform signature and the Cosign sidecar. Verification
 is fail-closed.
 
 **Channel migration is bidirectional with a vault-schema-downgrade guard.**
-Switching channels (stable ↔ beta ↔ nightly) changes the binary on
-next launch; vault data is untouched. Switching channels does not
-enable update checks — if `update.check` is `false` (the default) the
-channel switch applies but no network fetch occurs; the user picks up
-the new channel's binary on their next manual upgrade. Channel switches
-respect `update.check` and `CAIRN_OFFLINE` — a switch with checks
-disabled applies on next launch without any outbound fetch. If a channel
-switch would install a binary older than the vault's schema, startup is
-blocked with a clear error and the user is prompted to either reinstall
-the newer binary or pick a different vault. **Rollback is documented
-but manual** at v1.0 (`cairn release rollback --to <ver>` recipe);
+Switching channels updates `update.channel` (the next-update target) —
+the currently installed binary stays on its embedded `CAIRN_CHANNEL`
+until a verified update is installed or the user manually replaces
+it. If `update.check: true` and neither offline gate is engaged
+(`CAIRN_OFFLINE=1`, `agent.offline: true`), the next launch fetches
+the chosen channel's feed once and surfaces an update prompt;
+otherwise the new target persists silently until checks are
+re-enabled. Vault data is untouched. If a channel switch would
+install a binary older than the vault's schema, startup is blocked
+with a clear error and the user is prompted to either reinstall the
+newer binary or pick a different vault. **Rollback is documented but
+manual** at v1.0 (`cairn release rollback --to <ver>` recipe);
 automatic boot-probe rollback is deferred to v1.1.
 
 Full rules live in [ADR 0005](decisions/0005-release-channels.md).
