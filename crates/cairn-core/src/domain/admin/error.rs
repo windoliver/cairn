@@ -31,7 +31,7 @@ pub enum AdminError {
     },
 
     /// Snapshot artifact integrity check failed (hash mismatch).
-    #[error("snapshot artifact integrity check failed")]
+    #[error("snapshot artifact integrity check failed: expected {expected}, got {actual}")]
     IntegrityMismatch {
         /// Expected digest.
         expected: String,
@@ -171,6 +171,18 @@ mod tests {
                 step: "step:1".into(),
             }
             .exit_code()
+        );
+        assert_eq!(
+            70,
+            AdminError::IntegrityMismatch {
+                expected: "a".into(),
+                actual: "b".into(),
+            }
+            .exit_code(),
+        );
+        assert_eq!(
+            1,
+            AdminError::Store(Box::new(std::io::Error::other("x"))).exit_code(),
         );
     }
 
