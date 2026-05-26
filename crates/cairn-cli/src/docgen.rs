@@ -176,6 +176,7 @@ fn emit_all(
     emit_docgen_docs(&mut files)?;
     emit_config_defaults(&mut files)?;
     emit_plugins(&mut files)?;
+    emit_packs(&mut files)?;
     emit_mcp_tools(&mut files);
     emit_packages(&mut files, package_names, coverage);
     emit_contract_verbs(&mut files, workspace_root)?;
@@ -309,6 +310,85 @@ fn emit_plugins(files: &mut Vec<GeneratedFile>) -> Result<(), DocgenError> {
         );
     }
     files.push(generated_file("plugins.md", out));
+    Ok(())
+}
+
+fn emit_packs(files: &mut Vec<GeneratedFile>) -> Result<(), DocgenError> {
+    for pack_id in crate::packs::verify::bundled_pack_ids() {
+        let dir = match pack_id {
+            "cairn-claude-code" => crate::packs::bundled_pack_for(
+                crate::packs::manifest::Harness::ClaudeCode,
+            ),
+            // No future packs registered yet. Add new arms here when other
+            // harness packs land.
+            other => {
+                return Err(DocgenError::Plugins(format!(
+                    "no embed dir for bundled pack `{other}`"
+                )));
+            }
+        };
+        let bytes = dir
+            .get_file("pack.json")
+            .ok_or_else(|| DocgenError::Plugins(format!("pack `{pack_id}` missing pack.json")))?
+            .contents();
+        let manifest: crate::packs::manifest::PackManifest =
+            serde_json::from_slice(bytes)?;
+
+        let harness_label = match manifest.harness {
+            crate::packs::manifest::Harness::ClaudeCode => "claude-code",
+        };
+
+        let mut out = generated_doc(&format!("Pack: `{}`", manifest.pack_id));
+        let _ = writeln!(
+            out,
+            "Version: `{}`  \nHarness: `{harness_label}`  \nMCP compat: `{}`\n",
+            manifest.version, manifest.cairn_mcp_compat
+        );
+        let _ = writeln!(out, "{}\n", manifest.description);
+
+        out.push_str("## Subagents\n\n| id | MCP tools |\n|---|---|\n");
+        for a in &manifest.subagents {
+            let _ = writeln!(
+                out,
+                "| `{}` | {} |",
+                a.id,
+                a.uses_mcp_tools.join(", ")
+            );
+        }
+        out.push('\n');
+
+        out.push_str("## Slash commands\n\n| id | kind | verb |\n|---|---|---|\n");
+        for c in &manifest.commands {
+            let kind = match c.kind {
+                crate::packs::manifest::CommandKind::VerbDirect => "verb-direct",
+                crate::packs::manifest::CommandKind::Workflow => "workflow",
+            };
+            let _ = writeln!(
+                out,
+                "| `{}` | {} | {} |",
+                c.id,
+                kind,
+                c.verb.as_deref().unwrap_or("—")
+            );
+        }
+        out.push('\n');
+
+        out.push_str("## Hook bindings\n\n| event | command |\n|---|---|\n");
+        for (event, binding) in &manifest.hooks {
+            let _ = writeln!(out, "| `{event}` | `{}` |", binding.command);
+        }
+        out.push('\n');
+
+        out.push_str("## Required capabilities\n\n");
+        for cap in &manifest.requires_capabilities {
+            let _ = writeln!(out, "- `{cap}`");
+        }
+
+        files.push(generated_file(
+            &format!("packs/{pack_id}.md"),
+            out,
+        ));
+    }
     Ok(())
 }
 
