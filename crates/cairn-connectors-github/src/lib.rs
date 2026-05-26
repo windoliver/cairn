@@ -49,8 +49,9 @@ pub use connector::GitHubConnector;
 /// Embedded `connector.toml` bytes, parsed at `GitHubConnector::new` time.
 ///
 /// Exposed as a `pub` constant so integration tests can derive the expected
-/// `manifest_hash` when constructing a [`ConsentGrant`] for the registry
-/// end-to-end test (issue #131).
+/// `manifest_hash` when constructing a `ConsentGrant` (from
+/// `cairn_core::contract::connector_consent`) for the registry end-to-end
+/// test (issue #131).
 pub const MANIFEST_TOML: &str = include_str!("../connector.toml");
 
 /// Test-only helpers exposed for integration tests. Cfg-gated; not part of
