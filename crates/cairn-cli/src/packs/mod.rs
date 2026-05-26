@@ -4,5 +4,18 @@
 //! This module owns the loader, validator, installer, and verify hooks.
 
 pub mod embed;
+pub mod install;
 pub mod manifest;
 pub mod merge;
+
+use include_dir::Dir;
+
+use self::manifest::Harness;
+
+/// Return the embedded pack content for the given harness.
+#[must_use]
+pub fn bundled_pack_for(harness: Harness) -> &'static Dir<'static> {
+    match harness {
+        Harness::ClaudeCode => &embed::CAIRN_CLAUDE_CODE_PACK,
+    }
+}
