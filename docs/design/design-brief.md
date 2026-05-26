@@ -3958,6 +3958,8 @@ newer binary or pick a different vault. **Rollback is documented but
 manual** at v1.0 (`cairn release rollback --to <ver>` recipe);
 automatic boot-probe rollback is deferred to v1.1.
 
+`update.channel` is scope-limited to Cairn's desktop updater — package-manager upgrade paths are independent and walk whichever tap/source the user installed.
+
 Full rules live in [ADR 0005](decisions/0005-release-channels.md).
 The maintainer recipe (cutting a stable, promoting nightly, rotating
 signing keys) lives in

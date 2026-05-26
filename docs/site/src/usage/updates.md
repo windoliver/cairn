@@ -11,6 +11,10 @@ much stability and risk you want.
 
 ## Switching channels (desktop)
 
+Note: the desktop channel (`update.channel`) and the CLI channel
+(which tap or source you installed from) are independent. You can run
+a stable CLI and a beta desktop on the same machine.
+
 1. Open the Cairn desktop app.
 2. Settings → Updates → Channel.
 3. Pick `stable`, `beta`, or `nightly`. The change applies on next
@@ -83,7 +87,9 @@ HTTP headers. **No Cairn-added query params, headers, install IDs, or
 vault-derived data leave your host.** The hosting provider's standard
 access logs see the channel (encoded in the URL path), the running
 version + OS + arch (in User-Agent), and your IP address (HTTP-standard).
-Nothing Cairn-controlled beyond that.
+The hosting provider can infer coarse location/region from that IP
+(HTTP-standard; outside Cairn's control). Cairn itself sends no
+explicit geo identifier. Nothing Cairn-controlled beyond that.
 
 ## Verifying a downloaded artifact
 
@@ -128,9 +134,11 @@ signtool verify /pa /v Cairn-1.0.0.msi
 gpg --verify Cairn-1.0.0.AppImage.asc Cairn-1.0.0.AppImage
 ```
 
-The maintainer's GPG fingerprint and Cosign trust anchors are
-documented in [release channels](../maintainers/release-channels.md)
-under "Rotate signing keys".
+The Cosign certificate identities are pinned in [Current trust
+anchors](../maintainers/release-channels.md#current-trust-anchors).
+The GPG fingerprint for Linux AppImage signatures is published in the
+v1.0 release notes; manual `gpg --verify` of AppImages requires v1.0
+or later.
 
 ## Rolling back to a previous version
 

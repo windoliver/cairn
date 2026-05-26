@@ -163,9 +163,11 @@ Fail-closed: any verification failure → non-zero exit + the
   data leave the host. The host's standard access logs see the channel
   (encoded in the URL path), the running version + OS + arch (in
   User-Agent), and the requester's IP (HTTP-standard). Nothing
-  Cairn-controlled beyond that. (brief §6.6 rule: never log raw record
-  bodies above `debug`; the rule is extended here to also cover
-  update-poll activity.)
+  Cairn-controlled beyond that. The host may infer coarse
+  location/region from the requester IP (HTTP-standard; outside
+  Cairn's control). Cairn sends no explicit geo identifier. (brief
+  §6.6 rule: never log raw record bodies above `debug`; the rule is
+  extended here to also cover update-poll activity.)
 - **Endpoint is a static file** (`updates/<channel>/latest-mac.yml` on
   macOS and `updates/<channel>/latest.yml` on Windows, on github.io /
   optional Cloudflare Pages mirror; Linux AppImage uses the AppImage's
@@ -180,6 +182,16 @@ Fail-closed: any verification failure → non-zero exit + the
 ## 8. Channel migration + rollback
 
 ### 8.1 Channel migration (bidirectional with vault-schema-downgrade guard)
+
+**Scope.** `update.channel` only affects Cairn's desktop updater
+(electron-updater feed selection and next-artifact Cosign identity).
+Package-manager upgrade paths (`brew upgrade cairn`, `cargo install
+--force --bin cairn cairn-cli`, `winget upgrade cairn`, `scoop update
+cairn`) are independent of `update.channel` and walk whichever tap or
+source the user installed. To switch the CLI channel via a package
+manager, the user must also switch the relevant tap (e.g. `brew tap
+cairn/beta && brew install cairn`). The desktop binary and the CLI
+binary on the same machine can be on different channels.
 
 1. User changes `update.channel` from stable → beta (or vice versa)
    via the Settings UI or `cairn config set update.channel beta`.
