@@ -105,8 +105,9 @@ const CLAUDE_MD_END: &str = "<!-- END CAIRN PACK MANUAL -->";
 
 /// Inject (or replace) the cairn pack manual block in a `CLAUDE.md` body.
 ///
-/// `block_body` MUST start with [`CLAUDE_MD_BEGIN`] and end with
-/// [`CLAUDE_MD_END`]; it is written between those markers verbatim.
+/// `block_body` MUST start with `<!-- BEGIN CAIRN PACK MANUAL -->` and
+/// end with `<!-- END CAIRN PACK MANUAL -->`; it is written between
+/// those markers verbatim.
 ///
 /// # Errors
 /// Returns [`PackError::MergeConflict`] if `block_body` is malformed
