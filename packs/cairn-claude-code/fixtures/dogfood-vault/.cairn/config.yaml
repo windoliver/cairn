@@ -1,0 +1,4 @@
+vault:
+  layout: v1
+profile:
+  default_scope: dogfood
