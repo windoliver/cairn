@@ -59,6 +59,44 @@ describe("vault-registry", () => {
     expect(existsSync(`${path}.bak`)).toBe(true);
   });
 
+  it("throws CORRUPT_REGISTRY for valid-JSON but missing vaults array", async () => {
+    writeFileSync(path, JSON.stringify({ version: 1 }));
+    try {
+      await readRegistry(path);
+      throw new Error("expected throw");
+    } catch (err) {
+      expect(err.code).toBe("CORRUPT_REGISTRY");
+    }
+    expect(existsSync(`${path}.bak`)).toBe(true);
+  });
+
+  it("throws CORRUPT_REGISTRY for vault entry missing required fields", async () => {
+    writeFileSync(
+      path,
+      JSON.stringify({
+        version: 1,
+        vaults: [{ id: "x", path: "/p" }], // no label, no last_opened
+        active: "x",
+      }),
+    );
+    try {
+      await readRegistry(path);
+      throw new Error("expected throw");
+    } catch (err) {
+      expect(err.code).toBe("CORRUPT_REGISTRY");
+    }
+  });
+
+  it("throws CORRUPT_REGISTRY for non-string active", async () => {
+    writeFileSync(
+      path,
+      JSON.stringify({ version: 1, vaults: [], active: 42 }),
+    );
+    await expect(readRegistry(path)).rejects.toMatchObject({
+      code: "CORRUPT_REGISTRY",
+    });
+  });
+
   it("throws UNSUPPORTED_VERSION for future schema version", async () => {
     writeFileSync(
       path,

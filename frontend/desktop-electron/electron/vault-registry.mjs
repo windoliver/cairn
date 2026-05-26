@@ -7,7 +7,12 @@ export const CURRENT_VERSION = 1;
 
 /**
  * @typedef {{id: string, path: string, label: string, last_opened: number}} VaultEntry
- * @typedef {{version: number, vaults: VaultEntry[], active: string|null}} VaultRegistry
+ * @typedef {{
+ *   version: number,
+ *   vaults: VaultEntry[],
+ *   active: string|null,
+ *   alpha_fixture_acked?: boolean,
+ * }} VaultRegistry
  */
 
 /**
@@ -70,8 +75,45 @@ export async function readRegistry(path) {
     err.version = parsed.version;
     throw err;
   }
+  // Full v1 schema validation. A syntactically valid but malformed
+  // payload (e.g. {"version":1} with no vaults array, or vaults missing
+  // required fields) is treated as CORRUPT_REGISTRY so the recovery
+  // dialog fires instead of an uncaught .length-of-undefined crash.
+  if (!_isValidV1(parsed)) {
+    const backupPath = `${path}.bak`;
+    await fs.writeFile(backupPath, raw);
+    const err = new Error(
+      `vault_registry.json has invalid v1 shape; original saved to ${backupPath}`,
+    );
+    err.code = "CORRUPT_REGISTRY";
+    err.backupPath = backupPath;
+    throw err;
+  }
   // No v0→v1 migration yet (v1 is the initial schema).
   return parsed;
+}
+
+/** @param {unknown} r */
+function _isValidV1(r) {
+  if (!r || typeof r !== "object") return false;
+  if (!Array.isArray(r.vaults)) return false;
+  if (r.active !== null && typeof r.active !== "string") return false;
+  for (const v of r.vaults) {
+    if (!v || typeof v !== "object") return false;
+    if (typeof v.id !== "string") return false;
+    if (typeof v.path !== "string") return false;
+    if (typeof v.label !== "string") return false;
+    if (typeof v.last_opened !== "number") return false;
+  }
+  // alpha_fixture_acked is optional (added post-launch); when present
+  // must be boolean.
+  if (
+    r.alpha_fixture_acked !== undefined &&
+    typeof r.alpha_fixture_acked !== "boolean"
+  ) {
+    return false;
+  }
+  return true;
 }
 
 /**

@@ -157,30 +157,6 @@ async function main() {
     // First launch (non-smoke) OR registry exists but has zero vaults.
     // Minimal blocking flow for v1 of this packaging slice — a richer
     // React onboarding lands in a sibling issue. Default ~/Documents/cairn.
-    //
-    // Disclose the alpha-fixture state to the user ONCE before we create
-    // any state on their disk. Smoke skips this (CI is not a user).
-    if (!smoke.enabled) {
-      const { response } = await dialog.showMessageBox({
-        type: "info",
-        title: "Cairn alpha — fixture data only",
-        message:
-          "This Cairn build is an alpha. The window will show example data, " +
-          "not the contents of any vault you select. A scratch vault " +
-          "(~/Documents/cairn) is created so future versions can wire your " +
-          "real data in without an extra migration step.",
-        detail:
-          "Real vault binding is a follow-up release. Nothing you do in this " +
-          "window will modify the example data or your real files.",
-        buttons: ["Continue", "Quit"],
-        cancelId: 1,
-        defaultId: 0,
-      });
-      if (response === 1) {
-        app.exit(0);
-        return;
-      }
-    }
     vaultPath = join(homedir(), "Documents", "cairn");
     await fs.mkdir(vaultPath, { recursive: true });
     const entry = {
@@ -193,6 +169,41 @@ async function main() {
     registry.vaults.push(entry);
     registry.active = entry.id;
     await writeRegistry(REGISTRY_PATH, registry);
+  }
+
+  // Alpha-fixture acknowledgement. The sidecar serves canned data
+  // regardless of which vault is selected, so EVERY non-smoke launch
+  // must surface that to the user before we spawn. Ack is persisted in
+  // the registry so we only nag once per machine; subsequent launches
+  // pass through silently. Smoke (CI) skips the prompt by design.
+  if (!smoke.enabled) {
+    if (registry && registry.alpha_fixture_acked === true) {
+      // already acknowledged on a prior launch
+    } else {
+      const { response } = await dialog.showMessageBox({
+        type: "info",
+        title: "Cairn alpha — fixture data only",
+        message:
+          "This Cairn build is an alpha. The window will show example data, " +
+          "NOT the contents of any vault listed in your registry. Real-vault " +
+          "binding lands in a follow-up release.",
+        detail:
+          "Selected vault: " + vaultPath + "\n\n" +
+          "Nothing you do in this window will modify your vault files. " +
+          "Acknowledge to continue; this prompt will not repeat.",
+        buttons: ["Continue", "Quit"],
+        cancelId: 1,
+        defaultId: 0,
+      });
+      if (response === 1) {
+        app.exit(0);
+        return;
+      }
+      if (registry) {
+        registry.alpha_fixture_acked = true;
+        await writeRegistry(REGISTRY_PATH, registry);
+      }
+    }
   }
 
   let handle;
@@ -224,6 +235,22 @@ async function main() {
     const ok = await pollHealth(handle.address, 30_000);
     await handle.kill();
     app.exit(ok ? 0 : 1);
+    return;
+  }
+
+  // Normal launch: verify the sidecar is actually serving requests
+  // before opening the window. spawnSidecar resolves on the first
+  // stdout line; a sidecar that prints the address then dies leaves
+  // the renderer pointed at a dead backend.
+  const healthy = await pollHealth(handle.address, 15_000);
+  if (!healthy) {
+    dialog.showErrorBox(
+      "Cairn backend not responding",
+      `The sidecar started on ${handle.address} but did not answer /health ` +
+        `within 15 seconds. See ${LOG_PATH} for details.`,
+    );
+    await handle.kill();
+    app.exit(1);
     return;
   }
 
