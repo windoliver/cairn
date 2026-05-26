@@ -105,7 +105,8 @@ pub use memory_store::{MemoryStore, MemoryStoreCapabilities, MemoryStorePlugin};
 pub use metrics::{CapturingMetricsSink, MetricsError, MetricsSink, NoopMetricsSink};
 pub use sensor_ingress::{SensorIngress, SensorIngressCapabilities, SensorIngressPlugin};
 pub use snapshot_artifact::{
-    BackupRegistry, MaterializedArtifact, SnapshotArtifactProducer, SnapshotMetadataProvider,
+    BackupRegistry, ConsentLog, MaterializedArtifact, SnapshotApplier, SnapshotArtifactProducer,
+    SnapshotArtifactReader, SnapshotMetadataProvider,
 };
 pub use source_resolver::{SourceResolver, SourceResolverError};
 pub use workflow_jobs::{DeadLetterRow, WorkflowJobsReader};

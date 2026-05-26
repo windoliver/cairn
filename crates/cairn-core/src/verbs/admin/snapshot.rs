@@ -57,7 +57,7 @@ pub fn run(
     producer: &dyn SnapshotArtifactProducer,
     registry: &dyn BackupRegistry,
 ) -> Result<SnapshotResponse, AdminError> {
-    require_role(ctx, admin, AdminRole::Operator)?;
+    super::guard::require_role(ctx, admin, AdminRole::Operator)?;
 
     let backup_id = generate_backup_id();
     let now = chrono::Utc::now();
@@ -108,20 +108,6 @@ pub fn run(
         frontier_step: manifest.frontier_step.clone(),
         manifest,
     })
-}
-
-fn require_role(
-    ctx: &AdminContext,
-    admin: &dyn AdminStateStore,
-    needed: AdminRole,
-) -> Result<(), AdminError> {
-    if !admin.has_role(&ctx.actor, needed).map_err(AdminError::Store)? {
-        return Err(AdminError::NotAuthorized {
-            actor: ctx.actor.clone(),
-            needed,
-        });
-    }
-    Ok(())
 }
 
 /// Generate a unique backup id using a ULID, prefixed with `"snap-"`.
