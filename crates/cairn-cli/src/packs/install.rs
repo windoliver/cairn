@@ -78,7 +78,7 @@ pub fn install_pack(opts: &PackInstallOpts) -> Result<PackInstallReceipt, PackEr
             .project_dir
             .join(".claude/agents")
             .join(format!("{}.md", s.id));
-        write_pack_file(&target, bytes, opts.force, &mut receipt)?;
+        write_pack_file(&opts.project_dir, &target, bytes, opts.force, &mut receipt)?;
     }
 
     // 2. Commands → .claude/commands/<id>.md
@@ -88,7 +88,7 @@ pub fn install_pack(opts: &PackInstallOpts) -> Result<PackInstallReceipt, PackEr
             .project_dir
             .join(".claude/commands")
             .join(format!("{}.md", c.id));
-        write_pack_file(&target, bytes, opts.force, &mut receipt)?;
+        write_pack_file(&opts.project_dir, &target, bytes, opts.force, &mut receipt)?;
     }
 
     // 3. hooks/settings.json → .claude/settings.json (merged).
@@ -107,7 +107,12 @@ pub fn install_pack(opts: &PackInstallOpts) -> Result<PackInstallReceipt, PackEr
         &pack_settings,
         &pack_id_at_version,
     )?;
-    write_json_pretty(&settings_target, &merged_settings, &mut receipt)?;
+    write_json_pretty(
+        &opts.project_dir,
+        &settings_target,
+        &merged_settings,
+        &mut receipt,
+    )?;
 
     // 4. hooks/.mcp.json → project .mcp.json (deep merge of mcpServers).
     if let Some(mcp_file) = dir.get_file("hooks/.mcp.json") {
@@ -115,7 +120,7 @@ pub fn install_pack(opts: &PackInstallOpts) -> Result<PackInstallReceipt, PackEr
         let mcp_target = opts.project_dir.join(".mcp.json");
         let existing_mcp = read_optional_json(&mcp_target)?;
         let merged_mcp = merge_mcp_json(existing_mcp, &pack_mcp, &pack_id_at_version)?;
-        write_json_pretty(&mcp_target, &merged_mcp, &mut receipt)?;
+        write_json_pretty(&opts.project_dir, &mcp_target, &merged_mcp, &mut receipt)?;
     }
 
     // 5. manual.md → CLAUDE.md (block-injected).
@@ -127,7 +132,12 @@ pub fn install_pack(opts: &PackInstallOpts) -> Result<PackInstallReceipt, PackEr
     let claude_md_target = opts.project_dir.join("CLAUDE.md");
     let existing_claude = read_optional_text(&claude_md_target)?;
     let injected = crate::packs::merge::inject_block(existing_claude, manual_text)?;
-    write_text(&claude_md_target, &injected, &mut receipt)?;
+    write_text(
+        &opts.project_dir,
+        &claude_md_target,
+        &injected,
+        &mut receipt,
+    )?;
 
     // 6. Capability advertise — soft check via canonical Capabilities enum.
     //    A pack capability is "known" iff serde can deserialize it as the
@@ -148,13 +158,14 @@ pub fn install_pack(opts: &PackInstallOpts) -> Result<PackInstallReceipt, PackEr
 }
 
 fn write_pack_file(
+    project_dir: &Path,
     target: &Path,
     bytes: &[u8],
     force: bool,
     receipt: &mut PackInstallReceipt,
 ) -> Result<(), PackError> {
+    reject_symlink(project_dir, target)?;
     ensure_parent(target)?;
-    reject_symlink(target)?;
     if target.exists() {
         let existing = std::fs::read(target)?;
         if existing == bytes {
@@ -175,12 +186,13 @@ fn write_pack_file(
 }
 
 fn write_json_pretty(
+    project_dir: &Path,
     target: &Path,
     value: &Value,
     receipt: &mut PackInstallReceipt,
 ) -> Result<(), PackError> {
+    reject_symlink(project_dir, target)?;
     ensure_parent(target)?;
-    reject_symlink(target)?;
     let pretty = format!("{}\n", serde_json::to_string_pretty(value)?);
     let bytes = pretty.as_bytes();
     if target.exists() {
@@ -199,12 +211,13 @@ fn write_json_pretty(
 }
 
 fn write_text(
+    project_dir: &Path,
     target: &Path,
     text: &str,
     receipt: &mut PackInstallReceipt,
 ) -> Result<(), PackError> {
+    reject_symlink(project_dir, target)?;
     ensure_parent(target)?;
-    reject_symlink(target)?;
     let bytes = text.as_bytes();
     if target.exists() {
         let existing = std::fs::read(target)?;
@@ -228,27 +241,41 @@ fn ensure_parent(target: &Path) -> Result<(), PackError> {
     Ok(())
 }
 
-/// Refuse to write through a symlink at the leaf target path.
+/// Refuse to write through a symlink at the leaf target path OR any
+/// parent component between `project_dir` and the leaf.
 ///
 /// Pack install must never overwrite a file outside the project
-/// directory by following a symlink that an attacker (or stale state)
-/// has placed at the destination. We check `symlink_metadata` which
-/// does NOT follow symlinks; if the leaf is a symlink, abort.
-///
-/// This is leaf-only; symlinked *parent* directories would still be
-/// followed by `create_dir_all` + `write`. Callers that need full
-/// containment guarantees must canonicalize the project root and walk
-/// every parent component — out of scope for v1.
-fn reject_symlink(target: &Path) -> Result<(), PackError> {
-    match std::fs::symlink_metadata(target) {
-        Ok(meta) if meta.file_type().is_symlink() => Err(PackError::MergeConflict {
-            file: target.display().to_string(),
-            reason: "refusing to write through symlink at install target; \
-                     remove the link first or pick a different project dir"
-                .to_owned(),
-        }),
-        Ok(_) | Err(_) => Ok(()),
+/// directory by following a symlink — either at the destination
+/// itself, or at any parent like `.claude/` or `.claude/commands/`.
+/// We walk every component from the leaf back up to (but not
+/// including) `project_dir` and reject if any of them is a symlink
+/// per `symlink_metadata` (does NOT follow symlinks).
+fn reject_symlink(project_dir: &Path, target: &Path) -> Result<(), PackError> {
+    let mut current = target;
+    loop {
+        match std::fs::symlink_metadata(current) {
+            Ok(meta) if meta.file_type().is_symlink() => {
+                return Err(PackError::MergeConflict {
+                    file: current.display().to_string(),
+                    reason: "refusing to write through symlink in install path; \
+                             remove the link first or pick a different project dir"
+                        .to_owned(),
+                });
+            }
+            Ok(_) | Err(_) => {}
+        }
+        if current == project_dir {
+            break;
+        }
+        let Some(parent) = current.parent() else {
+            break;
+        };
+        if parent.as_os_str().is_empty() {
+            break;
+        }
+        current = parent;
     }
+    Ok(())
 }
 
 fn read_optional_json(path: &Path) -> Result<Value, PackError> {
@@ -393,5 +420,37 @@ mod tests {
         // The symlink target must remain unchanged.
         let unchanged = std::fs::read_to_string(&outside).unwrap();
         assert_eq!(unchanged, "untouched\n");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn install_refuses_symlinked_parent_dir() {
+        // Attacker plants `.claude` as a symlink to an outside directory;
+        // pack install must abort instead of dropping subagent .md files
+        // into the symlink target.
+        let tmp = tempdir().unwrap();
+        let outside_dir = tmp.path().join("attacker-stash");
+        std::fs::create_dir_all(&outside_dir).unwrap();
+        let project = tmp.path().join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        std::os::unix::fs::symlink(&outside_dir, project.join(".claude"))
+            .expect("symlink test setup");
+
+        let err = install_pack(&PackInstallOpts {
+            harness: Harness::ClaudeCode,
+            project_dir: project.clone(),
+            force: true,
+        })
+        .expect_err("install should refuse symlinked .claude parent");
+        assert!(
+            matches!(err, PackError::MergeConflict { .. }),
+            "got {err:?}"
+        );
+        // No agent .md files should have leaked into the symlink target.
+        let leaked: Vec<_> = std::fs::read_dir(&outside_dir)
+            .unwrap()
+            .filter_map(Result::ok)
+            .collect();
+        assert!(leaked.is_empty(), "files leaked into {outside_dir:?}");
     }
 }

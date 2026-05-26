@@ -14,9 +14,9 @@
   "subagents": [
     { "id": "context-loader",   "path": "agents/context-loader.md",   "uses_mcp_tools": ["assemble_hot","retrieve","search"] },
     { "id": "vault-librarian",  "path": "agents/vault-librarian.md",  "uses_mcp_tools": ["lint"] },
-    { "id": "forget-planner",   "path": "agents/forget-planner.md",   "uses_mcp_tools": ["forget"] },
+    { "id": "forget-planner",   "path": "agents/forget-planner.md",   "uses_mcp_tools": ["retrieve","search","lint"] },
     { "id": "consolidator",     "path": "agents/consolidator.md",     "uses_mcp_tools": ["lint","summarize"] },
-    { "id": "replay-checker",   "path": "agents/replay-checker.md",   "uses_mcp_tools": ["capture_trace","retrieve"] },
+    { "id": "replay-checker",   "path": "agents/replay-checker.md",   "uses_mcp_tools": ["retrieve","search"] },
     { "id": "trace-summarizer", "path": "agents/trace-summarizer.md", "uses_mcp_tools": ["summarize","retrieve"] }
   ],
   "commands": [

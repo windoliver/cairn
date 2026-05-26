@@ -14,9 +14,9 @@ Reference Claude Code skill-pack for Cairn — six subagents, thirteen slash com
 |---|---|
 | `context-loader` | assemble_hot, retrieve, search |
 | `vault-librarian` | lint |
-| `forget-planner` | forget |
+| `forget-planner` | retrieve, search, lint |
 | `consolidator` | lint, summarize |
-| `replay-checker` | capture_trace, retrieve |
+| `replay-checker` | retrieve, search |
 | `trace-summarizer` | summarize, retrieve |
 
 ## Slash commands
