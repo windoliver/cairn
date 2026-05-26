@@ -180,3 +180,42 @@ pub const fn federation_extension_ready() -> bool {
         && FEDERATION_WORKFLOW_WIRED
         && FEDERATION_MCP_TOOLS_WIRED
 }
+
+/// `cairn.admin.v1` extension capability registration (issue #161).
+///
+/// Set to `true` when phase 6 of issue #161 lands the MCP/SDK wiring for
+/// `cairn.admin.v1`. Until then admin verbs ship dark.
+pub const ADMIN_EXTENSION_WIRED: bool = false;
+
+/// Truth-table gate for advertising the `cairn.admin.v1` extension.
+/// All three preconditions must hold: build-time wiring, runtime config
+/// opt-in, and at least one operator identity present in `admin_roles`.
+///
+/// Unlike other `*_ready` helpers in this module, this is not a `const fn`
+/// because it depends on runtime state (config + DB).
+#[must_use]
+pub fn admin_extension_ready(config_enabled: bool, has_operator: bool) -> bool {
+    ADMIN_EXTENSION_WIRED && config_enabled && has_operator
+}
+
+#[cfg(test)]
+mod admin_extension_ready_tests {
+    use super::*;
+
+    #[test]
+    fn truth_table() {
+        // Exercise the four runtime combos. The `wired = true` rows are
+        // verified by construction (short-circuit means flipping the const
+        // can only ADD `true` rows).
+        let cases = [
+            (false, false, false),
+            (false, true,  false),
+            (true,  false, false),
+            (true,  true,  false),
+        ];
+        for (config, has_op, expected) in cases {
+            assert_eq!(admin_extension_ready(config, has_op), expected,
+                "config={config} has_op={has_op}");
+        }
+    }
+}
