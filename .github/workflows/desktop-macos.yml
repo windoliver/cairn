@@ -52,7 +52,15 @@ jobs:
         working-directory: frontend/desktop-electron
         run: npm ci
 
-      - name: Build DMG
+      # Apple/CSC secrets are ONLY injected for tag-pushed builds. PR
+      # builds run untrusted package scripts (npm/cargo/electron-builder
+      # afterSign hook), so giving them signing credentials would let
+      # any same-repo PR exfiltrate the Developer ID certificate or
+      # produce a maliciously-signed artifact. PR DMGs are intentionally
+      # unsigned and rely on the right-click→Open Gatekeeper bypass
+      # documented in the DMG readme.
+      - name: Build DMG (signed, tag pushes only)
+        if: startsWith(github.ref, 'refs/tags/v')
         working-directory: frontend/desktop-electron
         env:
           APPLE_ID: ${{ secrets.APPLE_ID }}
@@ -60,6 +68,17 @@ jobs:
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
           CSC_LINK: ${{ secrets.CSC_LINK }}
           CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
+        run: npm run dist
+
+      - name: Build DMG (unsigned, PR / non-tag)
+        if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
+        working-directory: frontend/desktop-electron
+        env:
+          # Explicitly disable code-sign identity discovery so
+          # electron-builder cannot accidentally pick up a local
+          # certificate on a self-hosted runner. The notarize hook
+          # already no-ops when APPLE_ID is unset.
+          CSC_IDENTITY_AUTO_DISCOVERY: "false"
         run: npm run dist
 
       - name: Verify universal binary
@@ -83,6 +102,9 @@ jobs:
       - name: Upload artifact for downstream jobs
         uses: actions/upload-artifact@v4
         with:
+          # Name is consumed by smoke + upload-release; keep stable.
+          # The artifact itself is unsigned on PR/non-tag builds; tag
+          # builds produce a signed DMG (when secrets are configured).
           name: cairn-macos-dmg
           path: frontend/desktop-electron/release/*.dmg
           retention-days: 7
