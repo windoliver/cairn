@@ -1,0 +1,36 @@
+---
+source: crates/cairn-cli/tests/claude_code_pack_install.rs
+expression: receipt_for_snapshot
+---
+{
+  "pack_id": "cairn-claude-code",
+  "version": "0.1.0",
+  "files_created": [
+    "./.claude/agents/context-loader.md",
+    "./.claude/agents/vault-librarian.md",
+    "./.claude/agents/forget-planner.md",
+    "./.claude/agents/consolidator.md",
+    "./.claude/agents/replay-checker.md",
+    "./.claude/agents/trace-summarizer.md",
+    "./.claude/commands/cairn-ingest.md",
+    "./.claude/commands/cairn-search.md",
+    "./.claude/commands/cairn-retrieve.md",
+    "./.claude/commands/cairn-summarize.md",
+    "./.claude/commands/cairn-assemble.md",
+    "./.claude/commands/cairn-capture-trace.md",
+    "./.claude/commands/cairn-lint.md",
+    "./.claude/commands/cairn-forget.md",
+    "./.claude/commands/cairn-status.md",
+    "./.claude/commands/cairn-standup.md",
+    "./.claude/commands/cairn-wrap-up.md",
+    "./.claude/commands/cairn-audit.md",
+    "./.claude/commands/cairn-recall.md",
+    "./.claude/settings.json",
+    "./.mcp.json",
+    "./CLAUDE.md"
+  ],
+  "files_merged": [],
+  "files_skipped": [],
+  "warnings": [],
+  "degraded": false
+}

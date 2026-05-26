@@ -1,0 +1,68 @@
+---
+source: crates/cairn-cli/tests/claude_code_pack_install.rs
+expression: settings
+---
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "_pack": "cairn-claude-code@0.1.0",
+        "hooks": [
+          {
+            "command": "cairn hook PostToolUse",
+            "type": "command"
+          }
+        ],
+        "matcher": "*"
+      }
+    ],
+    "PreToolUse": [
+      {
+        "_pack": "cairn-claude-code@0.1.0",
+        "hooks": [
+          {
+            "command": "cairn hook PreToolUse",
+            "type": "command"
+          }
+        ],
+        "matcher": "*"
+      }
+    ],
+    "SessionStart": [
+      {
+        "_pack": "cairn-claude-code@0.1.0",
+        "hooks": [
+          {
+            "command": "cairn hook SessionStart",
+            "type": "command"
+          }
+        ],
+        "matcher": "*"
+      }
+    ],
+    "Stop": [
+      {
+        "_pack": "cairn-claude-code@0.1.0",
+        "hooks": [
+          {
+            "command": "cairn hook Stop",
+            "type": "command"
+          }
+        ],
+        "matcher": "*"
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "_pack": "cairn-claude-code@0.1.0",
+        "hooks": [
+          {
+            "command": "cairn hook UserPromptSubmit",
+            "type": "command"
+          }
+        ],
+        "matcher": "*"
+      }
+    ]
+  }
+}
