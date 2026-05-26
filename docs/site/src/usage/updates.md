@@ -18,18 +18,28 @@ a stable CLI and a beta desktop on the same machine.
 1. Open the Cairn desktop app.
 2. Settings → Updates → Channel.
 3. Pick `stable`, `beta`, or `nightly`. The change applies on next
-   launch. Switching channels does not enable update checks — if
-   `update.check` is `false` (the default) you will pick up the new
-   channel's binary on your next manual upgrade (`brew upgrade` /
-   re-download from GitHub Releases / etc.).
+   launch. Switching channels does not enable update checks — see
+   the note below if `update.check` is disabled.
 
-If you have update checks disabled (`update.check: false` or
-`CAIRN_OFFLINE=1`), only the target value in `update.channel` is
-persisted — no feed fetch runs and no binary change occurs. To get an
-actual channel switch in that mode, install manually from the chosen
-channel (e.g. switch the Homebrew tap and run `brew install`, or
-download the signed artifact from GitHub Releases) — the desktop
-updater stays inert.
+*Note: with update checks disabled (`update.check: false` or
+`CAIRN_OFFLINE=1`), changing the desktop channel only persists the
+target in `update.channel`. The running binary doesn't change. The
+new target takes effect when one of the following happens, in order
+of likelihood:*
+
+1. *You re-enable update checks (`update.check: true`) and the
+   desktop updater runs its next scheduled poll.*
+2. *You manually install from the chosen channel — for the desktop,
+   download the signed artifact from
+   [GitHub Releases](https://github.com/windoliver/cairn/releases)
+   and drop it in place.*
+
+*Plain `brew upgrade cairn` (or other package-manager upgrades) walks
+whichever tap you have installed and ignores `update.channel`
+entirely — those paths are independent of the desktop channel.
+To switch the CLI channel via a package manager, switch the tap
+explicitly (e.g. `brew untap cairn/stable && brew tap cairn/beta &&
+brew install cairn`).*
 
 From the command line, the desktop config is at:
 
