@@ -182,9 +182,7 @@ impl GhResource for CommitsResource {
             // Fresh walks must NOT include `until=`; the page numbers correspond
             // to the unfiltered result set.  Continuation walks always include the
             // fixed `until=` date so the bounded result set stays stable.
-            if in_continuation
-                && let Some(u) = cont_until
-            {
+            if in_continuation && let Some(u) = cont_until {
                 query.push(("until", u.to_rfc3339()));
             }
 
