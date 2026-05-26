@@ -116,7 +116,9 @@ impl SqliteAdminStateStore {
             AdminRole::Operator => "operator",
             // `AdminRole` is `#[non_exhaustive]`; if new variants are added
             // without updating this match, the compiler will warn.
-            _ => "unknown",
+            _ => unreachable!(
+                "AdminRole gained a new variant; update SqliteAdminStateStore::role_str"
+            ),
         }
     }
 }

@@ -132,7 +132,7 @@ fn multiple_operators_has_any_operator_tracks_all() {
     let store = SqliteAdminStateStore::open_in_memory().expect("open in-memory admin store");
     let alice = alice();
     let granter = bootstrap();
-    let bob = Identity::parse("hmn:bob").unwrap();
+    let bob = Identity::parse("hmn:bob").expect("test fixture: known-valid identity");
 
     store
         .grant_role(&alice, AdminRole::Operator, &granter)
