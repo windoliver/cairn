@@ -25,10 +25,32 @@ pub struct ConnectorStateRow {
     pub reason: Option<String>,
 }
 
+impl ConnectorStateRow {
+    /// Construct a new [`ConnectorStateRow`].
+    ///
+    /// Required because `#[non_exhaustive]` prevents struct-literal construction
+    /// outside this crate (e.g. in `cairn-store-sqlite`).
+    #[must_use]
+    pub fn new(
+        connector_name: String,
+        enabled: bool,
+        last_changed_at: DateTime<Utc>,
+        last_changed_by: Identity,
+        reason: Option<String>,
+    ) -> Self {
+        Self {
+            connector_name,
+            enabled,
+            last_changed_at,
+            last_changed_by,
+            reason,
+        }
+    }
+}
+
 /// Persistence contract for admin role assignments and connector enable/disable state.
 pub trait AdminStateStore: Send + Sync {
-    /// Returns `true` iff `actor` currently holds `role` (i.e. has an
-    /// `admin_roles` row with `revoked_at IS NULL`).
+    /// Returns true iff `actor` currently holds `role` (a live, unrevoked assignment).
     fn has_role(&self, actor: &Identity, role: AdminRole) -> Result<bool, StoreError>;
 
     /// Returns `true` iff at least one identity currently holds the `Operator` role.
@@ -52,7 +74,7 @@ pub trait AdminStateStore: Send + Sync {
         &self,
         connector_name: &str,
         enabled: bool,
-        by: &Identity,
+        changed_by: &Identity,
         reason: Option<&str>,
     ) -> Result<ConnectorStateRow, StoreError>;
 
