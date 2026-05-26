@@ -45,7 +45,9 @@ async function pollHealth(address, timeoutMs = 15_000) {
 // Sidecar binds an ephemeral port; the discovered address is forwarded
 // to the renderer via webPreferences.additionalArguments so preload can
 // pick it up synchronously without an extra IPC roundtrip per fetch.
-async function createWindow(apiBase) {
+async function createWindow(apiBase, apiToken) {
+  const additionalArgs = [`--cairn-api-base=${apiBase}`];
+  if (apiToken) additionalArgs.push(`--cairn-api-token=${apiToken}`);
   const win = new BrowserWindow({
     width: 1320,
     height: 860,
@@ -55,7 +57,7 @@ async function createWindow(apiBase) {
       preload: join(__dirname, "preload.mjs"),
       contextIsolation: true,
       nodeIntegration: false,
-      additionalArguments: [`--cairn-api-base=${apiBase}`],
+      additionalArguments: additionalArgs,
     },
   });
   if (process.env.NODE_ENV === "development") {
@@ -312,18 +314,18 @@ async function main() {
       }
       handle = next;
       wireCrashHandler(next);
-      // Tell the renderer the address changed so it can re-target fetch.
+      // Tell the renderer the address+token changed so it can re-target.
       if (openWindow && !openWindow.isDestroyed()) {
-        openWindow.webContents.send(
-          "cairn:api-base",
-          `http://${next.address}`,
-        );
+        openWindow.webContents.send("cairn:api-base", {
+          url: `http://${next.address}`,
+          token: next.token,
+        });
       }
     });
   }
   wireCrashHandler(handle);
 
-  openWindow = await createWindow(`http://${handle.address}`);
+  openWindow = await createWindow(`http://${handle.address}`, handle.token);
 }
 
 app.whenReady().then(() => {

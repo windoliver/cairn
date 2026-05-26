@@ -24,6 +24,9 @@ const DEFAULT_BOOT_TIMEOUT_MS = 10_000;
 /**
  * @typedef {object} SidecarHandle
  * @property {string} address      e.g. "127.0.0.1:54321"
+ * @property {string|null} token   Bearer token for non-/health routes;
+ *   null when auth is disabled (sidecar was started with
+ *   CAIRN_DESKTOP_TOKEN="").
  * @property {boolean} exited
  * @property {(cb: (code: number|null, signal: string|null) => void) => void} onExit
  *   Subscribe to child exit. Fires once with the exit code + signal. If
@@ -79,21 +82,43 @@ export async function spawnSidecar(opts) {
     child.on("error", reject);
   });
 
+  const TOKEN_PREFIX = "cairn-desktop token ";
+  // Sidecar emits two stdout lines on boot:
+  //   1. "cairn-desktop listening on http://HOST:PORT"
+  //   2. "cairn-desktop token TOKEN"  (or "... token <none>")
+  // Resolves with { address, token }; token is null when sidecar
+  // disabled auth (test/dev with CAIRN_DESKTOP_TOKEN="").
   const linePromise = new Promise((resolve, reject) => {
     const rl = createInterface({ input: child.stdout });
     let settled = false;
-    rl.once("line", (line) => {
-      settled = true;
-      rl.close();
-      if (!line.startsWith(PREFIX)) {
-        reject(new Error(`unexpected first stdout line (prefix mismatch): ${line}`));
+    let address = null;
+    rl.on("line", (line) => {
+      if (settled) return;
+      if (address === null) {
+        if (!line.startsWith(PREFIX)) {
+          settled = true;
+          rl.close();
+          reject(new Error(`unexpected first stdout line (prefix mismatch): ${line}`));
+          return;
+        }
+        address = line.slice(PREFIX.length).trim();
         return;
       }
-      resolve(line.slice(PREFIX.length).trim());
+      if (!line.startsWith(TOKEN_PREFIX)) {
+        settled = true;
+        rl.close();
+        reject(new Error(`unexpected second stdout line (token prefix mismatch): ${line}`));
+        return;
+      }
+      const raw = line.slice(TOKEN_PREFIX.length).trim();
+      const token = raw === "<none>" ? null : raw;
+      settled = true;
+      rl.close();
+      resolve({ address, token });
     });
     rl.once("close", () => {
       if (!settled) {
-        reject(new Error("sidecar stdout closed before first line"));
+        reject(new Error("sidecar stdout closed before discovery completed"));
       }
     });
   });
@@ -147,9 +172,9 @@ export async function spawnSidecar(opts) {
     );
   });
 
-  let address;
+  let discovery;
   try {
-    address = await Promise.race([linePromise, errPromise, timeout]);
+    discovery = await Promise.race([linePromise, errPromise, timeout]);
     errPromise.catch(() => {});
     clearTimeout(bootTimeoutId);
   } catch (err) {
@@ -165,7 +190,8 @@ export async function spawnSidecar(opts) {
 
   /** @type {SidecarHandle} */
   const handle = {
-    address,
+    address: discovery.address,
+    token: discovery.token,
     get exited() {
       return exited;
     },

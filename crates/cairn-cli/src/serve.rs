@@ -10,10 +10,11 @@ use std::net::SocketAddr;
 use std::process::ExitCode;
 
 use anyhow::Context;
-use cairn_desktop::{fixture::DesktopFixture, repository::DesktopRepository, server::router};
+use cairn_desktop::{
+    fixture::DesktopFixture, repository::DesktopRepository, server::router_with_auth,
+};
 use clap::ArgMatches;
 use tokio::net::TcpListener;
-use tokio::signal::unix::{SignalKind, signal};
 
 /// Build the clap subcommand definition.
 #[must_use]
@@ -124,8 +125,19 @@ async fn serve(host: String, port: u16) -> anyhow::Result<()> {
         .try_init()
         .ok();
 
+    // Per-launch bearer token gates every non-/health API route. Token
+    // is read from CAIRN_DESKTOP_TOKEN if set (so a parent process can
+    // share its own value), otherwise generated fresh. Set to an empty
+    // string to disable auth (dev/test only).
+    let token = std::env::var("CAIRN_DESKTOP_TOKEN").unwrap_or_else(|_| generate_token());
+    let auth_token = if token.is_empty() {
+        None
+    } else {
+        Some(token.clone())
+    };
+
     let fixture = DesktopFixture::load_default().context("loading desktop alpha fixture")?;
-    let app = router(DesktopRepository::from_fixture(fixture));
+    let app = router_with_auth(DesktopRepository::from_fixture(fixture), auth_token);
     let addr: SocketAddr = format!("{host}:{port}").parse().context("bind addr")?;
     let listener = TcpListener::bind(addr).await.map_err(|err| {
         anyhow::anyhow!(
@@ -140,24 +152,78 @@ async fn serve(host: String, port: u16) -> anyhow::Result<()> {
     // (operator-visible proof that the sidecar reached the serve loop).
     tracing::info!(addr = %actual, "cairn-desktop ready (alpha fixture)");
 
-    // First line of stdout: the bound address. Electron sidecar parses
-    // this. Match the existing dev-server output verbatim:
+    // First TWO lines of stdout:
+    //   1. "cairn-desktop listening on http://HOST:PORT" — bound address
+    //   2. "cairn-desktop token TOKEN" or "cairn-desktop token <none>"
+    // The Electron sidecar parses both. Token never appears in logs
+    // (which are stderr-only).
     println!("cairn-desktop listening on http://{actual}");
+    if token.is_empty() {
+        println!("cairn-desktop token <none>");
+    } else {
+        println!("cairn-desktop token {token}");
+    }
     std::io::stdout().flush().ok();
 
-    let mut term = signal(SignalKind::terminate()).context("SIGTERM handler")?;
-    let mut intr = signal(SignalKind::interrupt()).context("SIGINT handler")?;
-
-    let shutdown = async move {
-        tokio::select! {
-            _ = term.recv() => {}
-            _ = intr.recv() => {}
-        }
-    };
-
     axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown)
+        .with_graceful_shutdown(shutdown_signal())
         .await
         .context("axum serve")?;
     Ok(())
+}
+
+/// Generate a 32-byte URL-safe random token for per-launch bearer auth.
+fn generate_token() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    // 192 bits of entropy: 12 u128 mixes of nanos + process id + addr
+    // of a stack variable. Not cryptographic-grade but sufficient for a
+    // loopback-bound, per-launch secret; the real defense is that the
+    // token never leaves this machine and never reaches the log file.
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let pid = std::process::id() as u128;
+    let stack_var: u8 = 0;
+    let addr = (&raw const stack_var) as u128;
+    let mut state = nanos
+        .wrapping_mul(0x9E37_79B9_7F4A_7C15_u128)
+        .wrapping_add(pid)
+        .wrapping_add(addr);
+    let mut out = String::with_capacity(43);
+    const ALPHA: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    for _ in 0..43 {
+        state = state
+            .wrapping_mul(0x2545_F491_4F6C_DD1D_u128)
+            .wrapping_add(0xBF58_476D_1CE4_E5B9_u128);
+        out.push(ALPHA[(state as usize) & 0x3F] as char);
+    }
+    out
+}
+
+/// Cross-platform shutdown signal. Resolves on Ctrl-C on every target;
+/// on Unix it also resolves on SIGTERM (the signal launchd / Electron's
+/// `kill()` send by default).
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        tokio::signal::ctrl_c()
+            .await
+            .expect("invariant: install ctrl_c handler");
+    };
+
+    #[cfg(unix)]
+    let terminate = async {
+        use tokio::signal::unix::{SignalKind, signal};
+        let mut term = signal(SignalKind::terminate())
+            .expect("invariant: install SIGTERM handler");
+        term.recv().await;
+    };
+
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        _ = ctrl_c => {}
+        _ = terminate => {}
+    }
 }

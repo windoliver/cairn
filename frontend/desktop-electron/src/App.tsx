@@ -54,7 +54,26 @@ export function App({
 }: {
   api?: DesktopApi;
 }) {
-  const defaultApi = useMemo(() => new DesktopApiClient(resolveDesktopApiBaseUrl()), []);
+  // API base URL + token are mutable: when the Electron main process
+  // restarts the sidecar on a new ephemeral port, it sends a
+  // 'cairn:api-base' payload over IPC. preload exposes onApiBaseChange;
+  // we rebuild the client on every change.
+  const [apiBaseUrl, setApiBaseUrl] = useState<string>(resolveDesktopApiBaseUrl);
+  const [apiToken, setApiToken] = useState<string | null>(
+    () => window.cairnDesktop?.apiToken ?? null,
+  );
+  useEffect(() => {
+    window.cairnDesktop?.onApiBaseChange?.(({ url, token }) => {
+      setApiBaseUrl(url);
+      setApiToken(token);
+    });
+    // Preload's IPC listener has no teardown contract; the renderer's
+    // lifetime matches the BrowserWindow's, so no unsubscribe needed.
+  }, []);
+  const defaultApi = useMemo(
+    () => new DesktopApiClient(apiBaseUrl, apiToken),
+    [apiBaseUrl, apiToken],
+  );
   const api = providedApi ?? defaultApi;
 
   const [state, setState] = useState<AppState>({

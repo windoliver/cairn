@@ -28,6 +28,7 @@ function fakeBinary(addr = "127.0.0.1:54321"): string {
   const sh = [
     "#!/bin/sh",
     `echo "cairn-desktop listening on http://${addr}"`,
+    `echo "cairn-desktop token <none>"`,
     "while true; do sleep 1; done",
   ].join("\n");
   writeFileSync(p, sh);
@@ -102,6 +103,7 @@ describe("sidecar", () => {
       [
         "#!/bin/sh",
         'echo "cairn-desktop listening on http://127.0.0.1:54322"',
+        'echo "cairn-desktop token <none>"',
         "sleep 0.05",
         "exit 0",
       ].join("\n"),
