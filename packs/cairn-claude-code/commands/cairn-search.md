@@ -1,6 +1,6 @@
 ---
 description: Direct Cairn `search` verb.
-argument-hint: "<query> [--mode keyword|semantic|hybrid]"
+argument-hint: "<query> --mode <keyword|semantic|hybrid>"
 ---
 
 <!-- BEGIN CAIRN PACK -->

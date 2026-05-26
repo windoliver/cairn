@@ -3,7 +3,7 @@
   "mcpServers": {
     "cairn": {
       "command": "cairn",
-      "args": ["serve", "--mcp", "--transport", "stdio"]
+      "args": ["mcp"]
     }
   }
 }

@@ -1,6 +1,6 @@
 ---
 description: Direct Cairn `assemble_hot` verb — fetches the hot-memory prefix.
-argument-hint: "[--scope <scope>] [--budget <tokens>]"
+argument-hint: "[--recipe <id>] [--session <id>] [--budget <tokens>] [--explain]"
 ---
 
 <!-- BEGIN CAIRN PACK -->

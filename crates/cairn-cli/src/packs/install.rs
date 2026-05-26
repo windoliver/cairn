@@ -154,6 +154,7 @@ fn write_pack_file(
     receipt: &mut PackInstallReceipt,
 ) -> Result<(), PackError> {
     ensure_parent(target)?;
+    reject_symlink(target)?;
     if target.exists() {
         let existing = std::fs::read(target)?;
         if existing == bytes {
@@ -179,6 +180,7 @@ fn write_json_pretty(
     receipt: &mut PackInstallReceipt,
 ) -> Result<(), PackError> {
     ensure_parent(target)?;
+    reject_symlink(target)?;
     let pretty = format!("{}\n", serde_json::to_string_pretty(value)?);
     let bytes = pretty.as_bytes();
     if target.exists() {
@@ -202,6 +204,7 @@ fn write_text(
     receipt: &mut PackInstallReceipt,
 ) -> Result<(), PackError> {
     ensure_parent(target)?;
+    reject_symlink(target)?;
     let bytes = text.as_bytes();
     if target.exists() {
         let existing = std::fs::read(target)?;
@@ -223,6 +226,29 @@ fn ensure_parent(target: &Path) -> Result<(), PackError> {
         std::fs::create_dir_all(parent)?;
     }
     Ok(())
+}
+
+/// Refuse to write through a symlink at the leaf target path.
+///
+/// Pack install must never overwrite a file outside the project
+/// directory by following a symlink that an attacker (or stale state)
+/// has placed at the destination. We check `symlink_metadata` which
+/// does NOT follow symlinks; if the leaf is a symlink, abort.
+///
+/// This is leaf-only; symlinked *parent* directories would still be
+/// followed by `create_dir_all` + `write`. Callers that need full
+/// containment guarantees must canonicalize the project root and walk
+/// every parent component — out of scope for v1.
+fn reject_symlink(target: &Path) -> Result<(), PackError> {
+    match std::fs::symlink_metadata(target) {
+        Ok(meta) if meta.file_type().is_symlink() => Err(PackError::MergeConflict {
+            file: target.display().to_string(),
+            reason: "refusing to write through symlink at install target; \
+                     remove the link first or pick a different project dir"
+                .to_owned(),
+        }),
+        Ok(_) | Err(_) => Ok(()),
+    }
 }
 
 fn read_optional_json(path: &Path) -> Result<Value, PackError> {
@@ -341,5 +367,31 @@ mod tests {
         assert!(body.contains("# Project"));
         assert!(body.contains("user content"));
         assert!(body.contains("Cairn (Claude Code reference pack)"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn install_refuses_symlinked_target() {
+        let tmp = tempdir().unwrap();
+        let outside = tmp.path().join("outside-target");
+        std::fs::write(&outside, b"untouched\n").unwrap();
+        let project = tmp.path().join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        std::os::unix::fs::symlink(&outside, project.join("CLAUDE.md"))
+            .expect("symlink test setup");
+
+        let err = install_pack(&PackInstallOpts {
+            harness: Harness::ClaudeCode,
+            project_dir: project.clone(),
+            force: true,
+        })
+        .expect_err("install should refuse symlinked CLAUDE.md");
+        assert!(
+            matches!(err, PackError::MergeConflict { .. }),
+            "got {err:?}"
+        );
+        // The symlink target must remain unchanged.
+        let unchanged = std::fs::read_to_string(&outside).unwrap();
+        assert_eq!(unchanged, "untouched\n");
     }
 }

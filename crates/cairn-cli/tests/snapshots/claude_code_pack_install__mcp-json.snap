@@ -7,10 +7,7 @@ expression: mcp
     "cairn": {
       "_pack": "cairn-claude-code@0.1.0",
       "args": [
-        "serve",
-        "--mcp",
-        "--transport",
-        "stdio"
+        "mcp"
       ],
       "command": "cairn"
     }

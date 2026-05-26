@@ -9,6 +9,19 @@ use crate::packs::manifest::PackError;
 
 const PACK_MARKER_KEY: &str = "_pack";
 
+/// Return `true` iff the `_pack` marker on `entry` belongs to the same
+/// pack as `pack_id` (matching by id, ignoring any `@version` tail).
+///
+/// Pack version bumps must still match prior entries so upgrades replace
+/// rather than duplicate them.
+fn marker_matches_pack(entry: &Value, pack_id: &str) -> bool {
+    let Some(marker) = entry.get(PACK_MARKER_KEY).and_then(Value::as_str) else {
+        return false;
+    };
+    let marker_pack = marker.split_once('@').map_or(marker, |(id, _)| id);
+    marker_pack == pack_id
+}
+
 /// Merge the pack's `settings.json` payload into the existing user JSON.
 ///
 /// User-added entries for the same hook event are preserved. Pack-owned
@@ -32,6 +45,12 @@ pub fn merge_settings_json(
             });
         }
     };
+
+    // Match prior entries by pack id only, so a version bump (e.g.
+    // 0.1.0 → 0.2.0) replaces the old hooks instead of stacking.
+    let pack_id = pack_id_at_version
+        .split_once('@')
+        .map_or(pack_id_at_version, |(id, _)| id);
 
     let pack_hooks = pack_payload
         .get("hooks")
@@ -79,10 +98,9 @@ pub fn merge_settings_json(
             }
         };
 
-        // Drop any prior pack-owned entries for this pack id (round-trip).
-        existing_array.retain(|entry| {
-            entry.get(PACK_MARKER_KEY).and_then(Value::as_str) != Some(pack_id_at_version)
-        });
+        // Drop any prior pack-owned entries for this pack id (round-trip
+        // across version bumps).
+        existing_array.retain(|entry| !marker_matches_pack(entry, pack_id));
 
         // Append the pack entries, each tagged with the marker.
         for entry in pack_array {
@@ -195,6 +213,26 @@ mod tests {
         let twice =
             merge_settings_json(once.clone(), &pack_payload(), "cairn-claude-code@0.1.0").unwrap();
         assert_eq!(once, twice);
+    }
+
+    #[test]
+    fn merge_replaces_prior_version_pack_entries_on_upgrade() {
+        // Install v0.1.0.
+        let v1 = merge_settings_json(Value::Null, &pack_payload(), "cairn-claude-code@0.1.0")
+            .expect("install v1");
+        // Upgrade to v0.2.0 — must replace, not stack.
+        let v2 = merge_settings_json(v1, &pack_payload(), "cairn-claude-code@0.2.0")
+            .expect("upgrade to v2");
+        let arr = v2["hooks"]["SessionStart"].as_array().unwrap();
+        assert_eq!(
+            arr.len(),
+            1,
+            "upgrade must replace prior pack entries, not duplicate them"
+        );
+        assert_eq!(
+            arr[0][PACK_MARKER_KEY].as_str(),
+            Some("cairn-claude-code@0.2.0")
+        );
     }
 }
 

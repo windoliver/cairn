@@ -1,13 +1,14 @@
 ---
 description: Direct Cairn `forget` verb — deletes a record, session, or scope.
-argument-hint: "<--record <id>|--session <id>|--scope <scope>> [--dry-run]"
+argument-hint: "<--record <id>|--session <id>|--scope <json>>"
 ---
 
 <!-- BEGIN CAIRN PACK -->
-ALWAYS run with `--dry-run` first unless the user has explicitly confirmed
-a destructive forget on this exact target.
+Forget is destructive — the `cairn forget` CLI commits immediately.
 
-`cairn forget $ARGUMENTS`
+ALWAYS spawn the `forget-planner` subagent FIRST to produce a dry-run
+FlushPlan via MCP (`mcp__cairn__forget` with `dry_run=true`). Show the
+plan to the user and require explicit confirmation before shelling out.
 
-Show the FlushPlan and ask for confirmation before any non-dry-run call.
+Once confirmed, run `cairn forget $ARGUMENTS`. Show the resulting receipt.
 <!-- END CAIRN PACK -->
