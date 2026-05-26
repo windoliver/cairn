@@ -88,6 +88,10 @@ fn fingerprint_records(conn: &rusqlite::Connection) -> Vec<Row> {
 }
 
 #[test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "end-to-end AC#2 integration test exercises six adapter impls in sequence"
+)]
 fn snapshot_restore_roundtrip_preserves_records() {
     // ── 1. Set up temp vault dir with .cairn/cairn.db ──────────────────────
     let temp = tempfile::tempdir().expect("tempdir");
