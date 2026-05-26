@@ -87,12 +87,15 @@ impl GhResource for IssuesResource {
         let issues: Vec<IssueDto> = client.get_json(&path, &query).await?;
 
         let mut events: Vec<ConnectorEvent> = Vec::with_capacity(issues.len());
-        let mut max_updated = sub_cursor.since;
+        // Carry forward any in-progress max seen from prior pages; initialize
+        // from `pending_since` so exact-full-page windows accumulate correctly
+        // across multiple poll calls before exhaustion.
+        let mut max_updated = sub_cursor.pending_since.or(sub_cursor.since);
         for dto in &issues {
             if max_updated.is_none_or(|t| dto.updated_at > t) {
                 max_updated = Some(dto.updated_at);
             }
-            // Fix 3: skip pull requests returned by /issues.
+            // Skip pull requests returned by /issues.
             // GitHub's /repos/{o}/{r}/issues endpoint returns both issues and
             // PRs.  PRs carry a non-null `pull_request` marker field.
             // `PrsResource` already owns PRs via /repos/{o}/{r}/pulls — emitting
@@ -104,24 +107,28 @@ impl GhResource for IssuesResource {
         }
 
         let exhausted = u32::try_from(issues.len()).unwrap_or(u32::MAX) < per_page;
-        // Fix 2: only advance `since` when the current `since`-window is
-        // exhausted (partial page).  While paginating through a full window
-        // keep `since` stable so that page 2, 3, … are all fetched from the
-        // same window.  Advancing `since` mid-window would shift the result
-        // set and cause page N of the new window to skip items that were on
-        // page N-1 of the old window.
+        // Only advance `since` when the current `since`-window is exhausted
+        // (partial page).  While paginating through a full window keep `since`
+        // stable and accumulate `pending_since` so exact-full-page counts
+        // (50, 100, …) do not replay the same window on the next poll.
+        // Advancing `since` mid-window would shift the result set and cause
+        // page N of the new window to skip items that were on page N-1 of the
+        // old window.
         let next_cursor = if exhausted {
-            // Window done: advance since to max-seen, reset page for next cycle.
+            // Window done: commit pending_since → since, reset page + pending.
             ResourceCursor {
                 since: max_updated.or(sub_cursor.since),
                 page: Some(1),
+                pending_since: None,
                 ..ResourceCursor::default()
             }
         } else {
-            // Still paginating same since window — keep since stable.
+            // Still paginating same since window — keep since stable, advance
+            // pending_since so it survives to the exhaustion page.
             ResourceCursor {
                 since: sub_cursor.since,
                 page: Some(page + 1),
+                pending_since: max_updated,
                 ..ResourceCursor::default()
             }
         };
@@ -178,27 +185,35 @@ fn issue_to_event(
         format!("gh:{}/{}#{}", repo.owner, repo.name, dto.number),
         None,
     );
-    // Deterministic event ID: updated_at timestamp as revision marker.
-    let event_id = crate::event_id::deterministic(
-        "issue",
-        &source_ref.system_id,
-        &dto.updated_at.timestamp().to_string(),
-    );
     let mut labels: BTreeSet<String> = BTreeSet::new();
     labels.insert("source:github".into());
     labels.insert("kind:issue".into());
 
+    let payload_value = serde_json::json!({
+        "id": dto.id,
+        "number": dto.number,
+        "title": dto.title,
+        "body": dto.body,
+        "state": dto.state,
+        "user": dto.user.login,
+        "html_url": dto.html_url,
+    });
+    // Deterministic event ID.
+    // Poll path: timestamp + payload content hash so two updates to the same
+    // issue within 1s produce distinct IDs (GitHub timestamps are second-granular).
+    // Webhook path: delivery_id is GitHub's per-delivery UUID — globally unique.
+    let ts = dto.updated_at.timestamp().to_string();
+    let payload_rev = crate::event_id::payload_revision(&payload_value);
+    let event_id = match webhook_meta {
+        Some((delivery_id, _, _)) => {
+            crate::event_id::from_parts("issue", &source_ref.system_id, &[delivery_id])
+        }
+        None => crate::event_id::from_parts("issue", &source_ref.system_id, &[&ts, &payload_rev]),
+    };
+
     let payload = ConnectorPayload::Json {
         mime: "application/json".into(),
-        body: serde_json::json!({
-            "id": dto.id,
-            "number": dto.number,
-            "title": dto.title,
-            "body": dto.body,
-            "state": dto.state,
-            "user": dto.user.login,
-            "html_url": dto.html_url,
-        }),
+        body: payload_value,
     };
 
     let delivery = match webhook_meta {
@@ -268,10 +283,162 @@ mod tests {
         assert!(events.is_empty());
     }
 
-    /// Fix 3: `IssueDto` entries carrying a `pull_request` marker field must be
-    /// skipped in the unit-level deserialization path.  This test verifies that a
-    /// DTO with `pull_request: Some(...)` is not converted to an event, and that
-    /// the real issue alongside it still is.
+    /// Fix 3 (round-3): two issue payloads with the same `updated_at` but
+    /// different `body` must produce different event IDs (payload hash breaks the tie).
+    #[test]
+    fn issues_event_id_differs_on_same_second_payload_change() {
+        let repo = Repo {
+            owner: "o".into(),
+            name: "r".into(),
+        };
+        let make_dto = |body_text: &str| -> IssueDto {
+            serde_json::from_value(serde_json::json!({
+                "id": 42,
+                "number": 42,
+                "title": "Same timestamp, different body",
+                "body": body_text,
+                "state": "open",
+                "user": {"login": "alice"},
+                "created_at": "2026-05-25T10:00:00Z",
+                // Same second — triggers the collision without Fix 3.
+                "updated_at": "2026-05-25T10:00:00Z",
+                "html_url": "https://github.com/o/r/issues/42"
+            }))
+            .expect("deserializes")
+        };
+        let dto_a = make_dto("First edit within the same second");
+        let dto_b = make_dto("Second edit within the same second");
+
+        let ev_a = issue_to_event(&dto_a, &repo, None);
+        let ev_b = issue_to_event(&dto_b, &repo, None);
+
+        assert_ne!(
+            ev_a.event_id.as_str(),
+            ev_b.event_id.as_str(),
+            "different payload content must produce different event IDs even at the same timestamp"
+        );
+    }
+
+    /// Fix 2 (round-3): when exactly `N*per_page` issues exist, the last page is
+    /// empty.  The preceding full pages must accumulate `pending_since` so that
+    /// when the empty page (exhaustion) arrives, `since` is correctly advanced.
+    ///
+    /// Two sequential polls: first returns 50 items (full, page advances),
+    /// second returns 0 (empty, exhaustion).  After the second poll `since`
+    /// must equal the max `updated_at` seen across both pages.
+    #[tokio::test]
+    async fn issues_poll_advances_since_after_exact_full_page_then_empty() {
+        use cairn_connectors_core::CredentialHandle;
+        use wiremock::matchers::{method, path, query_param};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+
+        let ts = "2026-05-25T10:00:00Z";
+        let full_page: Vec<serde_json::Value> = (0_u64..50)
+            .map(|i| {
+                serde_json::json!({
+                    "id": i, "number": i,
+                    "title": format!("issue {i}"),
+                    "body": null, "state": "open",
+                    "user": {"login": "alice"},
+                    "created_at": ts,
+                    "updated_at": ts,
+                    "html_url": format!("https://github.com/o/r/issues/{i}"),
+                    "labels": []
+                })
+            })
+            .collect();
+
+        // Page 1: full (50 items).
+        Mock::given(method("GET"))
+            .and(path("/repos/o/r/issues"))
+            .and(query_param("page", "1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&full_page))
+            .mount(&server)
+            .await;
+
+        // Page 2: empty.
+        Mock::given(method("GET"))
+            .and(path("/repos/o/r/issues"))
+            .and(query_param("page", "2"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([])))
+            .mount(&server)
+            .await;
+
+        let handle = CredentialHandle::from_bytes(
+            serde_json::json!({"kind": "pat", "token": "t"})
+                .to_string()
+                .into_bytes(),
+        );
+        let base = url::Url::parse(&server.uri()).unwrap();
+
+        let initial = ResourceCursor {
+            page: Some(1),
+            ..Default::default()
+        };
+
+        // First poll: full page → pending_since set, page advances to 2.
+        let outcome1 = IssuesResource
+            .poll(
+                &{
+                    let auth = std::sync::Arc::new(
+                        crate::auth::GitHubAuth::from_handle(&handle).expect("auth"),
+                    );
+                    GhClient::new(auth, base.clone())
+                },
+                &Repo {
+                    owner: "o".into(),
+                    name: "r".into(),
+                },
+                &initial,
+                50,
+            )
+            .await
+            .expect("poll 1");
+        assert_eq!(outcome1.events.len(), 50);
+        assert_eq!(outcome1.next_cursor.page, Some(2), "page advances");
+        assert!(
+            outcome1.next_cursor.pending_since.is_some(),
+            "pending_since must be set after full page"
+        );
+        assert_eq!(
+            outcome1.next_cursor.since, initial.since,
+            "since must not advance on full page"
+        );
+
+        // Second poll (empty page → exhaustion): since must advance.
+        let outcome2 = IssuesResource
+            .poll(
+                &{
+                    let auth = std::sync::Arc::new(
+                        crate::auth::GitHubAuth::from_handle(&handle).expect("auth"),
+                    );
+                    GhClient::new(auth, base.clone())
+                },
+                &Repo {
+                    owner: "o".into(),
+                    name: "r".into(),
+                },
+                &outcome1.next_cursor,
+                50,
+            )
+            .await
+            .expect("poll 2");
+        assert_eq!(outcome2.events.len(), 0);
+        assert!(
+            outcome2.next_cursor.since.is_some(),
+            "since must be set after exhaustion"
+        );
+        assert!(
+            outcome2.next_cursor.pending_since.is_none(),
+            "pending_since must be cleared after exhaustion"
+        );
+        assert_eq!(outcome2.next_cursor.page, Some(1), "page resets to 1");
+    }
+
+    /// Fix 3 (round-2, confirmed): `IssueDto` entries carrying a `pull_request`
+    /// marker field must be skipped.
     #[test]
     fn pull_request_field_triggers_skip() {
         // Minimal IssueDto with pull_request set — should be skipped.
