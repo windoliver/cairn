@@ -26,6 +26,7 @@
 //!   [`ConnectorConsentJournal`] / [`ConsentGrant`] / [`ConsentGrantId`] /
 //!   [`ConnectorConsentLookup`].
 
+pub mod admin_state;
 pub mod agent_provider;
 pub mod conformance;
 pub mod connector_consent;
