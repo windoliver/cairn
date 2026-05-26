@@ -19,7 +19,7 @@ max_items_per_hour = 1000
 max_bytes_per_day  = "50MiB"
 
 [labels]
-allowed = ["source:github", "kind:issue", "kind:pr", "kind:commit", "kind:comment"]
+allowed = ["source:github", "kind:issue", "kind:pr", "kind:commit"]
 
 [[scopes.declared]]
 kind    = "project"

@@ -1,4 +1,4 @@
-//! Issues + `issue_comment` resource.
+//! Issues resource (`issue_comment` ingestion out of scope for v0.3 slice 1; see spec §1.2).
 
 use std::collections::BTreeSet;
 
@@ -215,10 +215,6 @@ impl GhResource for IssuesResource {
                     repo,
                     Some((delivery_id, signature_id, &env.action)),
                 )])
-            }
-            "issue_comment" => {
-                // Out of scope for this slice; substrate logs at debug.
-                Ok(vec![])
             }
             _ => Ok(vec![]),
         }

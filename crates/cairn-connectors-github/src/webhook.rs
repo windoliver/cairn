@@ -11,7 +11,7 @@ use crate::resources::{
 };
 
 /// Dispatch a verified webhook to the right resource. Returns an empty Vec
-/// for `ping`, `installation`, and unknown events — never errors on them.
+/// for `ping`, `installation`, `issue_comment`, and unknown events — never errors on them.
 pub(crate) fn dispatch(
     req: &WebhookRequest,
     signature_id: &str,
@@ -25,7 +25,7 @@ pub(crate) fn dispatch(
         .ok_or_else(|| GhError::Malformed("missing X-GitHub-Delivery".into()))?;
 
     match event_type {
-        "issues" | "issue_comment" => {
+        "issues" => {
             IssuesResource.parse_webhook(event_type, delivery_id, signature_id, &req.body, repo)
         }
         "pull_request" | "pull_request_review" | "pull_request_review_comment" => {
@@ -34,7 +34,10 @@ pub(crate) fn dispatch(
         "push" => {
             CommitsResource.parse_webhook(event_type, delivery_id, signature_id, &req.body, repo)
         }
-        "ping" | "installation" | "installation_repositories" => Ok(vec![]),
+        // issue_comment / ping / installation: known but deliberately not ingested in
+        // this slice (spec §1.2 out of scope). Returning empty Ok keeps GitHub's
+        // delivery acks clean; operators MUST NOT subscribe these events.
+        "issue_comment" | "ping" | "installation" | "installation_repositories" => Ok(vec![]),
         other => {
             tracing::debug!(event_type = other, "github: ignoring unhandled event type");
             Ok(vec![])
@@ -109,5 +112,19 @@ mod tests {
         let events = dispatch(&req, "sigid", &repo).expect("dispatch");
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].source_ref.kind, "commit");
+    }
+
+    #[test]
+    fn issue_comment_is_explicitly_ignored_not_routed_to_issues() {
+        // Round-7 fix: issue_comment is advertised as "known but out of scope"
+        // per spec §1.2. The dispatcher returns Ok(vec![]) immediately rather
+        // than routing to IssuesResource (which previously had its own empty arm).
+        let req = build_req("issue_comment", "d-1", b"{}");
+        let repo = Repo {
+            owner: "o".into(),
+            name: "r".into(),
+        };
+        let events = dispatch(&req, "sigid", &repo).expect("issue_comment is ignored");
+        assert!(events.is_empty());
     }
 }
