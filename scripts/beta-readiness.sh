@@ -106,11 +106,12 @@ print_manual_gates() {
 manual gates remaining (see docs/site/src/maintainers/beta-readiness.md):
   - 9:  capability sync (cairn status --json vs reference/capability-matrix.md)
   - 10: contract freeze verified (contract-drift CI job + ADR 0004)
-  - 11: migration guide review (usage/migration/v0.X-to-v0.Y.md)
-  - 12: known limitations (status.md vs capability matrix)
-  - 13: cassette replay (cargo run -p cairn-bench -- coherence run --gate beta)
-  - 14: privacy posture (forget round-trip + presidio scrub)
-  - 15: release notes draft
+  - 11: release channel policy frozen (ADR 0005 + brief §16.b)
+  - 12: migration guide review (usage/migration/v0.X-to-v0.Y.md)
+  - 13: known limitations (status.md vs capability matrix)
+  - 14: cassette replay (cargo run -p cairn-bench -- coherence run --gate beta)
+  - 15: privacy posture (forget round-trip + presidio scrub)
+  - 16: release notes draft
 EOF
 }
 
