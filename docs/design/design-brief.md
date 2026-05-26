@@ -3914,6 +3914,64 @@ All four (plus Koi v1) migrations share the same three steps:
 
 Nothing in these migrations requires the legacy system to change. Cairn exposes eight verbs through four surfaces (§8.0) — every legacy stack can call whichever fits: the `cairn` CLI from a shell plugin, `cairn mcp` for MCP-speaking harnesses, the Rust SDK for in-process embedding, or the Cairn skill for bash-only environments.
 
+## 16.b Release Channels and Updates [P3]
+
+Cairn ships under three named release channels: **stable** (tagged
+`vX.Y.Z` — crates.io / brew main tap / winget / scoop / GitHub
+Releases), **beta** (tagged `vX.Y.Z-beta.N` or `-rc.N` — `homebrew-cairn-beta`
+tap and GitHub Pre-Releases), and **nightly** (scheduled GHA on `main`
+creates and pushes a `nightly-YYYYMMDD` tag; the tag push triggers the
+signed-publish workflow — GitHub Releases only). One binary per
+platform per channel. `CAIRN_CHANNEL` (build-time) names the installed
+binary's channel; `update.channel` (desktop config) names the channel
+the next update will come from — see ADR 0005 §1 for the field split.
+`cairn status` reports the channel via the build-time `CAIRN_CHANNEL`
+stamp. Desktop users configure the next-update channel via
+`update.channel` in their desktop-config; CLI users pick a channel
+by which artifact / package-manager tap they installed.
+
+**Update checks are off by default.** No outbound poll runs until the
+user opts in (`update.check: true`), and `CAIRN_OFFLINE=1` or
+`agent.offline: true` always wins. When enabled, the desktop shell
+reads electron-updater's native YAML feed at
+`updates/<channel>/latest-mac.yml` (macOS) or
+`updates/<channel>/latest.yml` (Windows);
+AppImageUpdate handles Linux via the AppImage's embedded
+`update-information` field and zsync side-files. Every artifact
+additionally carries a Cosign keyless OIDC signature on the Sigstore
+Rekor transparency log; the shipped `cairn release verify <path>` CLI
+checks both the platform signature and the Cosign sidecar. Verification
+is fail-closed.
+
+**Channel migration is bidirectional with a vault-schema-downgrade guard.**
+Switching channels updates `update.channel` (the next-update target) —
+the currently installed binary stays on its embedded `CAIRN_CHANNEL`
+until a verified update is installed or the user manually replaces
+it. If `update.check: true` and neither offline gate is engaged
+(`CAIRN_OFFLINE=1`, `agent.offline: true`), the next launch fetches
+the chosen channel's feed once and surfaces an update prompt;
+otherwise only the target value in `update.channel` is persisted —
+no feed fetch runs and no binary change occurs. Users wanting an
+actual channel switch in that mode must manually install from the
+chosen channel (e.g. switch the Homebrew tap and run `brew install`,
+or download the signed artifact from GitHub Releases) — the desktop
+updater stays inert. Vault data is untouched. If a channel switch would
+install a binary older than the vault's schema, startup is blocked
+with a clear error and the user is prompted to either reinstall the
+newer binary or pick a different vault. **Rollback is documented but
+manual** at v1.0 (`cairn release rollback --to <ver>` recipe);
+automatic boot-probe rollback is deferred to v1.1.
+
+`update.channel` is scope-limited to Cairn's desktop updater — package-manager upgrade paths are independent and walk whichever tap/source the user installed.
+
+Full rules live in [ADR 0005](decisions/0005-release-channels.md).
+The maintainer recipe (cutting a stable, promoting nightly, rotating
+signing keys) lives in
+[`docs/site/src/maintainers/release-channels.md`](../site/src/maintainers/release-channels.md);
+the user-facing guide (picking a channel, disabling update checks,
+verifying a downloaded artifact) lives in
+[`docs/site/src/usage/updates.md`](../site/src/usage/updates.md).
+
 ---
 
 ## 17. Non‑Goals (what Cairn will never be)
