@@ -9,6 +9,7 @@
 
 #![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used))]
 
+pub mod admin_state;
 pub mod consent;
 pub mod consent_reader;
 pub mod consent_timeline;
@@ -39,6 +40,7 @@ mod verify;
 pub mod wal;
 pub mod workflow_jobs_reader;
 
+pub use admin_state::SqliteAdminStateStore;
 pub use consent_reader::SqliteConsentJournalReader;
 pub use error::StoreError;
 pub use hot_prefix::SqliteHotPrefixCache;
