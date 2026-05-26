@@ -3914,6 +3914,42 @@ All four (plus Koi v1) migrations share the same three steps:
 
 Nothing in these migrations requires the legacy system to change. Cairn exposes eight verbs through four surfaces (§8.0) — every legacy stack can call whichever fits: the `cairn` CLI from a shell plugin, `cairn mcp` for MCP-speaking harnesses, the Rust SDK for in-process embedding, or the Cairn skill for bash-only environments.
 
+## 16.b Release Channels and Updates [P3]
+
+Cairn ships under three named release channels: **stable** (tagged
+`vX.Y.Z` — crates.io / brew main tap / winget / scoop / GitHub
+Releases), **beta** (tagged `vX.Y.Z-beta.N` or `-rc.N` — `homebrew-cairn-beta`
+tap and GitHub Pre-Releases), and **nightly** (scheduled GHA cut off
+`main`, tagged `nightly-YYYYMMDD`, GitHub Releases only). One binary
+per platform per channel; `cairn status` reports the channel via the
+build-time `CAIRN_CHANNEL` stamp. Desktop users pin a channel via
+`update.channel` in their desktop-config; CLI users pick a channel
+by which artifact / package-manager tap they installed.
+
+**Update checks are off by default.** No outbound poll runs until the
+user opts in (`update.check: true`), and `CAIRN_OFFLINE=1` or
+`agent.offline: true` always wins. When enabled, the desktop shell
+reads a Sparkle appcast at `updates/<channel>.xml`; per-OS native
+updaters (electron-updater on macOS / Windows, AppImageUpdate on
+Linux) handle the download. Every artifact additionally carries a
+Cosign keyless OIDC signature on the Sigstore Rekor transparency log;
+the shipped `cairn release verify <path>` CLI checks both the platform
+signature and the Cosign sidecar. Verification is fail-closed.
+
+**Channel migration is forward-only.** Switching channels changes the
+binary on next launch; vault data is untouched. Downgrade across a
+vault-schema bump is blocked. **Rollback is documented but manual** at
+v1.0 (`cairn release rollback --to <ver>` recipe); automatic
+boot-probe rollback is deferred to v1.1.
+
+Full rules live in [ADR 0005](decisions/0005-release-channels.md).
+The maintainer recipe (cutting a stable, promoting nightly, rotating
+signing keys) lives in
+[`docs/site/src/maintainers/release-channels.md`](../site/src/maintainers/release-channels.md);
+the user-facing guide (picking a channel, disabling update checks,
+verifying a downloaded artifact) lives in
+[`docs/site/src/usage/updates.md`](../site/src/usage/updates.md).
+
 ---
 
 ## 17. Non‑Goals (what Cairn will never be)
