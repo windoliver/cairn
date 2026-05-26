@@ -328,7 +328,11 @@ mod tests {
         let reg = cairn_core::contract::registry::PluginRegistry::new();
         let report = run(&reg);
         // 1 synthetic registry-empty plugin + 1 pack report (all-ok cases).
-        assert_eq!(report.plugins.len(), 2, "synthetic registry-empty plugin + pack");
+        assert_eq!(
+            report.plugins.len(),
+            2,
+            "synthetic registry-empty plugin + pack"
+        );
         assert!(report.summary.failed >= 1);
         assert_eq!(exit_code(&report, false), 69);
         assert_eq!(exit_code(&report, true), 69);

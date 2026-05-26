@@ -112,8 +112,7 @@ const CLAUDE_MD_END: &str = "<!-- END CAIRN PACK MANUAL -->";
 /// Returns [`PackError::MergeConflict`] if `block_body` is malformed
 /// (missing markers) or the existing file has only one marker.
 pub fn inject_block(existing: Option<String>, block_body: &str) -> Result<String, PackError> {
-    if !block_body.starts_with(CLAUDE_MD_BEGIN) || !block_body.trim_end().ends_with(CLAUDE_MD_END)
-    {
+    if !block_body.starts_with(CLAUDE_MD_BEGIN) || !block_body.trim_end().ends_with(CLAUDE_MD_END) {
         return Err(PackError::MergeConflict {
             file: "CLAUDE.md".to_owned(),
             reason: "block_body must be wrapped with CAIRN PACK MANUAL markers".to_owned(),
@@ -190,14 +189,10 @@ mod tests {
 
     #[test]
     fn merge_is_idempotent() {
-        let once = merge_settings_json(Value::Null, &pack_payload(), "cairn-claude-code@0.1.0")
-            .unwrap();
-        let twice = merge_settings_json(
-            once.clone(),
-            &pack_payload(),
-            "cairn-claude-code@0.1.0",
-        )
-        .unwrap();
+        let once =
+            merge_settings_json(Value::Null, &pack_payload(), "cairn-claude-code@0.1.0").unwrap();
+        let twice =
+            merge_settings_json(once.clone(), &pack_payload(), "cairn-claude-code@0.1.0").unwrap();
         assert_eq!(once, twice);
     }
 }
@@ -220,9 +215,7 @@ mod claude_md_tests {
 
     #[test]
     fn replaces_existing_block_preserving_surrounding() {
-        let existing = format!(
-            "# Project\n\nbefore\n\n{BEGIN}\nold fragment\n{END}\n\nafter\n"
-        );
+        let existing = format!("# Project\n\nbefore\n\n{BEGIN}\nold fragment\n{END}\n\nafter\n");
         let body = format!("{BEGIN}\nnew fragment\n{END}");
         let out = inject_block(Some(existing), &body).unwrap();
         assert!(out.contains("new fragment"));

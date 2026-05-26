@@ -120,9 +120,10 @@ pub fn install_pack(opts: &PackInstallOpts) -> Result<PackInstallReceipt, PackEr
 
     // 5. manual.md → CLAUDE.md (block-injected).
     let manual_bytes = dir.get_file(&manifest.manual_fragment).unwrap().contents();
-    let manual_text = std::str::from_utf8(manual_bytes).map_err(|e| PackError::ManifestInvalid {
-        reason: format!("manual_fragment is not UTF-8: {e}"),
-    })?;
+    let manual_text =
+        std::str::from_utf8(manual_bytes).map_err(|e| PackError::ManifestInvalid {
+            reason: format!("manual_fragment is not UTF-8: {e}"),
+        })?;
     let claude_md_target = opts.project_dir.join("CLAUDE.md");
     let existing_claude = read_optional_text(&claude_md_target)?;
     let injected = crate::packs::merge::inject_block(existing_claude, manual_text)?;
@@ -136,9 +137,9 @@ pub fn install_pack(opts: &PackInstallOpts) -> Result<PackInstallReceipt, PackEr
     for cap in &manifest.requires_capabilities {
         let json = format!("\"{cap}\"");
         if serde_json::from_str::<cairn_core::generated::common::Capabilities>(&json).is_err() {
-            receipt
-                .warnings
-                .push(format!("capability `{cap}` not advertised — install proceeds, runtime will fail closed"));
+            receipt.warnings.push(format!(
+                "capability `{cap}` not advertised — install proceeds, runtime will fail closed"
+            ));
             receipt.degraded = true;
         }
     }
@@ -322,7 +323,10 @@ mod tests {
         let first = install_pack(&opts(tmp.path())).unwrap();
         let second = install_pack(&opts(tmp.path())).unwrap();
         assert!(!first.files_created.is_empty());
-        assert!(second.files_created.is_empty(), "second run creates nothing");
+        assert!(
+            second.files_created.is_empty(),
+            "second run creates nothing"
+        );
         // Every file in the second run should be in skipped (already
         // matching) — no merges either.
         assert!(second.files_merged.is_empty(), "second run merges nothing");

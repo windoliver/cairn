@@ -176,7 +176,10 @@ fn is_safe_relative_path(s: &str) -> bool {
             return false;
         }
         // Reject non-ASCII, backslash, and control characters in path components.
-        if comp.bytes().any(|b| !b.is_ascii() || b == b'\\' || b < 0x20) {
+        if comp
+            .bytes()
+            .any(|b| !b.is_ascii() || b == b'\\' || b < 0x20)
+        {
             return false;
         }
     }
@@ -369,10 +372,8 @@ impl PackManifest {
     /// Returns [`PackError`] on the first failed invariant.
     pub fn validate_pass_b(&self) -> Result<(), PackError> {
         // 7 + 8. Tool names: collect known tool names from cairn-mcp.
-        let known_tools: std::collections::BTreeSet<&str> = cairn_mcp::generated::TOOLS
-            .iter()
-            .map(|t| t.name)
-            .collect();
+        let known_tools: std::collections::BTreeSet<&str> =
+            cairn_mcp::generated::TOOLS.iter().map(|t| t.name).collect();
 
         for c in &self.commands {
             if let Some(verb) = &c.verb
@@ -582,9 +583,12 @@ mod validate_tests {
         });
         m.hooks.insert(
             "SessionStart".to_owned(),
-            HookBinding { command: "cairn hook SessionStart".to_owned() },
+            HookBinding {
+                command: "cairn hook SessionStart".to_owned(),
+            },
         );
-        m.validate_pass_a().expect("populated valid manifest passes Pass A");
+        m.validate_pass_a()
+            .expect("populated valid manifest passes Pass A");
     }
 }
 
@@ -630,7 +634,9 @@ mod pass_b_tests {
     #[test]
     fn pass_b_rejects_unknown_mcp_tool_in_subagent() {
         let mut m = minimal_for_pass_b();
-        m.subagents[0].uses_mcp_tools.push("does_not_exist".to_owned());
+        m.subagents[0]
+            .uses_mcp_tools
+            .push("does_not_exist".to_owned());
         match m.validate_pass_b() {
             Err(PackError::McpToolUnknown { tool }) => assert_eq!(tool, "does_not_exist"),
             other => panic!("expected McpToolUnknown, got {other:?}"),
@@ -694,9 +700,10 @@ mod load_tests {
             .get_file("pack.json")
             .expect("pack.json present")
             .contents();
-        let manifest: PackManifest =
-            serde_json::from_slice(bytes).expect("parses");
-        manifest.validate_pass_a().expect("real manifest passes Pass A");
+        let manifest: PackManifest = serde_json::from_slice(bytes).expect("parses");
+        manifest
+            .validate_pass_a()
+            .expect("real manifest passes Pass A");
     }
 }
 

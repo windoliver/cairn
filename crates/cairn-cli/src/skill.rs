@@ -656,15 +656,22 @@ fn install_claude_code_integration(
         files_updated: Vec::new(),
         files_skipped: Vec::new(),
     };
-    let pack_receipt = crate::packs::install::install_pack(&crate::packs::install::PackInstallOpts {
-        harness: crate::packs::manifest::Harness::ClaudeCode,
-        project_dir: project_dir.to_path_buf(),
-        force,
-    })
-    .map_err(|e| anyhow::anyhow!("install cairn-claude-code pack: {e}"))?;
-    receipt.files_created.extend(pack_receipt.files_created.iter().cloned());
-    receipt.files_updated.extend(pack_receipt.files_merged.iter().cloned());
-    receipt.files_skipped.extend(pack_receipt.files_skipped.iter().cloned());
+    let pack_receipt =
+        crate::packs::install::install_pack(&crate::packs::install::PackInstallOpts {
+            harness: crate::packs::manifest::Harness::ClaudeCode,
+            project_dir: project_dir.to_path_buf(),
+            force,
+        })
+        .map_err(|e| anyhow::anyhow!("install cairn-claude-code pack: {e}"))?;
+    receipt
+        .files_created
+        .extend(pack_receipt.files_created.iter().cloned());
+    receipt
+        .files_updated
+        .extend(pack_receipt.files_merged.iter().cloned());
+    receipt
+        .files_skipped
+        .extend(pack_receipt.files_skipped.iter().cloned());
     Ok(receipt)
 }
 
@@ -718,7 +725,6 @@ fn install_cursor_integration(
     )?;
     Ok(receipt)
 }
-
 
 impl AgentIntegrationReceipt {
     fn new(agent: Agent) -> Self {
@@ -1130,8 +1136,7 @@ mod tests {
         );
 
         // CLAUDE.md must receive the manual fragment.
-        let claude_md =
-            std::fs::read_to_string(project.join("CLAUDE.md")).expect("CLAUDE.md");
+        let claude_md = std::fs::read_to_string(project.join("CLAUDE.md")).expect("CLAUDE.md");
         assert!(
             claude_md.contains("Cairn"),
             "CLAUDE.md must contain pack fragment"

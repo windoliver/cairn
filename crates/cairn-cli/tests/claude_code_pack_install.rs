@@ -85,8 +85,10 @@ fn strip_tempdir(paths: &[std::path::PathBuf], base: &Path) -> Vec<std::path::Pa
     paths
         .iter()
         .map(|p| {
-            p.strip_prefix(base)
-                .map_or_else(|_| p.clone(), |sub| std::path::PathBuf::from("./").join(sub))
+            p.strip_prefix(base).map_or_else(
+                |_| p.clone(),
+                |sub| std::path::PathBuf::from("./").join(sub),
+            )
         })
         .collect()
 }

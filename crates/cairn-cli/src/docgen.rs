@@ -316,9 +316,9 @@ fn emit_plugins(files: &mut Vec<GeneratedFile>) -> Result<(), DocgenError> {
 fn emit_packs(files: &mut Vec<GeneratedFile>) -> Result<(), DocgenError> {
     for pack_id in crate::packs::verify::bundled_pack_ids() {
         let dir = match pack_id {
-            "cairn-claude-code" => crate::packs::bundled_pack_for(
-                crate::packs::manifest::Harness::ClaudeCode,
-            ),
+            "cairn-claude-code" => {
+                crate::packs::bundled_pack_for(crate::packs::manifest::Harness::ClaudeCode)
+            }
             // No future packs registered yet. Add new arms here when other
             // harness packs land.
             other => {
@@ -331,8 +331,7 @@ fn emit_packs(files: &mut Vec<GeneratedFile>) -> Result<(), DocgenError> {
             .get_file("pack.json")
             .ok_or_else(|| DocgenError::Plugins(format!("pack `{pack_id}` missing pack.json")))?
             .contents();
-        let manifest: crate::packs::manifest::PackManifest =
-            serde_json::from_slice(bytes)?;
+        let manifest: crate::packs::manifest::PackManifest = serde_json::from_slice(bytes)?;
 
         let harness_label = match manifest.harness {
             crate::packs::manifest::Harness::ClaudeCode => "claude-code",
@@ -348,12 +347,7 @@ fn emit_packs(files: &mut Vec<GeneratedFile>) -> Result<(), DocgenError> {
 
         out.push_str("## Subagents\n\n| id | MCP tools |\n|---|---|\n");
         for a in &manifest.subagents {
-            let _ = writeln!(
-                out,
-                "| `{}` | {} |",
-                a.id,
-                a.uses_mcp_tools.join(", ")
-            );
+            let _ = writeln!(out, "| `{}` | {} |", a.id, a.uses_mcp_tools.join(", "));
         }
         out.push('\n');
 
@@ -384,10 +378,7 @@ fn emit_packs(files: &mut Vec<GeneratedFile>) -> Result<(), DocgenError> {
             let _ = writeln!(out, "- `{cap}`");
         }
 
-        files.push(generated_file(
-            &format!("packs/{pack_id}.md"),
-            out,
-        ));
+        files.push(generated_file(&format!("packs/{pack_id}.md"), out));
     }
     Ok(())
 }
