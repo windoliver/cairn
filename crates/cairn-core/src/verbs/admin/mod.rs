@@ -2,5 +2,6 @@
 
 pub mod guard;
 pub mod manifest;
+pub mod replay_wal;
 pub mod restore;
 pub mod snapshot;
