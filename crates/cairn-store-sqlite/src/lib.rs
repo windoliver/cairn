@@ -9,6 +9,8 @@
 
 #![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used))]
 
+pub mod admin_consent_log;
+pub use admin_consent_log::SqliteConsentLog;
 pub mod admin_state;
 pub mod consent;
 pub mod consent_reader;

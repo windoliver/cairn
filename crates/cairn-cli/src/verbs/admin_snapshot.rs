@@ -107,6 +107,11 @@ fn create_snapshot(vault_root: &Path, backup_path: &Path) -> Result<SnapshotRece
     })
 }
 
+#[allow(
+    deprecated,
+    reason = "collect_target_ids is deprecated but still used here; \
+              will be replaced when Tasks 2.5/2.6 land"
+)]
 pub(crate) fn register_backup_artifact(
     vault_root: &Path,
     backup_path: &Path,
@@ -147,6 +152,20 @@ pub(crate) fn materialize_backup_artifact(source_root: &Path, backup_path: &Path
     Ok(())
 }
 
+#[deprecated(
+    note = "moved to cairn-store-sqlite::admin_consent_log (SqliteConsentLog); \
+            will be deleted in a follow-up commit"
+)]
+#[allow(
+    dead_code,
+    reason = "caller in admin_restore.rs removed in Task 2.1; \
+              Tasks 2.5/2.6 will delete this fn entirely"
+)]
+#[allow(
+    deprecated,
+    reason = "this fn is itself deprecated and calls other deprecated helpers; \
+              suppress chained deprecation noise until Tasks 2.5/2.6 delete the lot"
+)]
 pub(crate) fn replay_current_forgets(live_vault_root: &Path, restored_root: &Path) -> Result<()> {
     let live_db = live_vault_root.join(".cairn/cairn.db");
     let forget_hashes = current_record_forget_hashes(&live_db)?;
@@ -297,6 +316,11 @@ pub(crate) fn forget_backup_registry_entry(
 #[allow(
     dead_code,
     reason = "backup rewrite plumbing is staged for forget propagation but not yet wired to the CLI"
+)]
+#[allow(
+    deprecated,
+    reason = "purge_targets is deprecated but still used here; \
+              will be replaced when Tasks 2.5/2.6 land"
 )]
 fn rewrite_registered_backup(
     vault_root: &Path,
@@ -573,6 +597,14 @@ fn sqlite_string_literal(path: &Path) -> String {
     format!("'{escaped}'")
 }
 
+#[deprecated(
+    note = "moved to cairn-store-sqlite::admin_consent_log; \
+            will be deleted in a follow-up commit"
+)]
+#[allow(
+    dead_code,
+    reason = "only caller (replay_current_forgets) is itself dead pending Tasks 2.5/2.6"
+)]
 fn current_record_forget_hashes(db_path: &Path) -> Result<BTreeSet<String>> {
     if !db_path.exists() {
         return Ok(BTreeSet::new());
@@ -606,6 +638,10 @@ fn current_record_forget_hashes(db_path: &Path) -> Result<BTreeSet<String>> {
     Ok(hashes)
 }
 
+#[deprecated(
+    note = "moved to cairn-store-sqlite::admin_consent_log; \
+            will be deleted in a follow-up commit"
+)]
 fn collect_target_ids(db_path: &Path) -> Result<Vec<TargetId>> {
     if !db_path.exists() {
         return Ok(Vec::new());
@@ -672,6 +708,10 @@ fn collect_source_rewrites(db_path: &Path, targets: &[TargetId]) -> Result<Vec<S
     Ok(groups.into_values().collect())
 }
 
+#[deprecated(
+    note = "moved to cairn-store-sqlite::admin_consent_log; \
+            will be deleted in a follow-up commit"
+)]
 fn purge_targets(db_path: &Path, targets: &[TargetId]) -> Result<()> {
     if targets.is_empty() || !db_path.exists() {
         return Ok(());
@@ -741,6 +781,14 @@ fn table_exists(conn: &Connection, table: &str) -> Result<bool> {
     Ok(exists == 1)
 }
 
+#[deprecated(
+    note = "moved to cairn-store-sqlite::admin_consent_log; \
+            will be deleted in a follow-up commit"
+)]
+#[allow(
+    dead_code,
+    reason = "only callers deprecated/dead pending Tasks 2.5/2.6"
+)]
 fn target_id_hash(target_id: &str) -> String {
     use sha2::{Digest, Sha256};
 

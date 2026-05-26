@@ -15,7 +15,7 @@ struct RestoreReceipt {
 
 /// Run `cairn admin restore`.
 #[must_use]
-pub fn run(sub: &ArgMatches, vault_root: &Path) -> ExitCode {
+pub fn run(sub: &ArgMatches, _vault_root: &Path) -> ExitCode {
     let from = PathBuf::from(
         sub.get_one::<String>("from")
             .expect("invariant: clap requires --from"),
@@ -32,11 +32,12 @@ pub fn run(sub: &ArgMatches, vault_root: &Path) -> ExitCode {
         status: "accepted",
     };
 
+    // NOTE: forget-replay on restore is temporarily skipped here; it is
+    // re-wired through the new verb fn + SqliteConsentLog in Tasks 2.5/2.6.
     let restore_result =
         super::admin_snapshot::validate_non_overlapping_paths("backup", &from, "restore", &into)
             .and_then(|()| super::admin_snapshot::validate_backup_root(&from))
-            .and_then(|()| super::admin_snapshot::materialize_backup_artifact(&from, &into))
-            .and_then(|()| super::admin_snapshot::replay_current_forgets(vault_root, &into));
+            .and_then(|()| super::admin_snapshot::materialize_backup_artifact(&from, &into));
     if let Err(error) = restore_result {
         eprintln!("cairn admin restore: {error:#}");
         return ExitCode::from(74);
