@@ -39,9 +39,9 @@ The following rules govern Cairn releases from v1.0 forward.
 
 | Channel | Trigger | Artifact destinations | Update poll feed | Cosign tag | Audience |
 |---|---|---|---|---|---|
-| **stable** | git tag `vX.Y.Z` (no pre-release suffix) | crates.io · `homebrew-cairn` main tap · winget · scoop · GitHub Releases (DMG/MSI/AppImage/deb/tarball) | electron-updater YAML: `updates/stable/latest-{mac,windows}.yml` on github.io · Linux: embedded AppImageUpdate metadata | `cairn-stable` | Default for everyone; what `brew install cairn` gives you |
-| **beta** | git tag `vX.Y.Z-beta.N` or `vX.Y.Z-rc.N` | `homebrew-cairn-beta` tap · GitHub Pre-Releases · no crates.io publish (pre-release versions auto-skipped by `cargo install` unless `--version` pinned) | electron-updater YAML: `updates/beta/latest-{mac,windows}.yml` on github.io · Linux: embedded AppImageUpdate metadata | `cairn-beta` | Opt-in. Users who want the next release with at least one tagged checkpoint of stability |
-| **nightly** | scheduled GHA every 24h off `main`, tagged `nightly-YYYYMMDD` | GitHub Releases ("Nightly" section), **no** package-manager publish | electron-updater YAML: `updates/nightly/latest-{mac,windows}.yml` on github.io · Linux: embedded AppImageUpdate metadata | `cairn-nightly` | Developers + dogfooders. No semver promise. Aged off after 30 days. |
+| **stable** | git tag `vX.Y.Z` (no pre-release suffix) | crates.io · `homebrew-cairn` main tap · winget · scoop · GitHub Releases (DMG/MSI/AppImage/deb/tarball) | electron-updater YAML: `updates/stable/latest-mac.yml` (macOS) · `updates/stable/latest.yml` (Windows) on github.io · Linux: embedded AppImageUpdate metadata | `cairn-stable` | Default for everyone; what `brew install cairn` gives you |
+| **beta** | git tag `vX.Y.Z-beta.N` or `vX.Y.Z-rc.N` | `homebrew-cairn-beta` tap · GitHub Pre-Releases · no crates.io publish (pre-release versions auto-skipped by `cargo install` unless `--version` pinned) | electron-updater YAML: `updates/beta/latest-mac.yml` (macOS) · `updates/beta/latest.yml` (Windows) on github.io · Linux: embedded AppImageUpdate metadata | `cairn-beta` | Opt-in. Users who want the next release with at least one tagged checkpoint of stability |
+| **nightly** | scheduled GHA on `main` creates and pushes a `nightly-YYYYMMDD` tag; the tag push triggers the signed-publish workflow | GitHub Releases ("Nightly" section), **no** package-manager publish | electron-updater YAML: `updates/nightly/latest-mac.yml` (macOS) · `updates/nightly/latest.yml` (Windows) on github.io · Linux: embedded AppImageUpdate metadata | `cairn-nightly` | Developers + dogfooders. No semver promise. Aged off after 30 days. |
 
 One binary per platform per channel. The Rust core compiles
 identically; the only difference is the build-time `CAIRN_CHANNEL`
@@ -100,12 +100,19 @@ repo. Pinned identities:
 |---|---|---|---|
 | stable | `https://github.com/windoliver/cairn/.github/workflows/release-stable.yml@refs/tags/v*` | `https://token.actions.githubusercontent.com` | git tag `vX.Y.Z` |
 | beta | `https://github.com/windoliver/cairn/.github/workflows/release-beta.yml@refs/tags/v*-{beta,rc}.*` | same | git tag `vX.Y.Z-beta.N` / `-rc.N` |
-| nightly | `https://github.com/windoliver/cairn/.github/workflows/release-nightly.yml@refs/tags/nightly-*` | same | scheduled GHA |
+| nightly | `https://github.com/windoliver/cairn/.github/workflows/release-nightly.yml@refs/tags/nightly-*` | same | tag push (`nightly-YYYYMMDD`) created by the scheduled GHA |
 
 GPG fingerprint for Linux AppImage signatures: **to be published in
 the v1.0 release notes and reproduced verbatim in
 `docs/site/src/maintainers/release-channels.md` "Rotate signing keys"
 under "GPG (AppImage)".**
+
+**Nightly is two-stage.** A scheduled workflow on `main` mints the
+`nightly-YYYYMMDD` git tag (no signing). The tag push triggers
+`release-nightly.yml`, which builds and signs against the tag — so
+the Cosign certificate's `ref` claim binds to `refs/tags/nightly-*`,
+not `refs/heads/main`. Verifiers must accept only the tag-bound
+identity; reject any nightly signed under a branch-bound identity.
 
 The workflow paths above are **frozen identifiers** under this ADR —
 they cannot be renamed without minting `cairn.update.v2`.
@@ -136,9 +143,17 @@ they cannot be renamed without minting `cairn.update.v2`.
 
 1. User changes `update.channel` from stable → beta (or vice versa)
    via the Settings UI or `cairn config set update.channel beta`.
-2. Next launch fetches the chosen channel's feed **once**, surfaces a
-   "Update to vX.Y.Z-beta.1 available" prompt.
-3. User confirms → electron-updater pulls + verifies + restarts.
+2. Next launch:
+   - If `update.check: true` **and** neither `CAIRN_OFFLINE=1` nor
+     `agent.offline: true` is set, the desktop shell fetches the
+     chosen channel's feed once and surfaces a "Update to
+     vX.Y.Z-beta.1 available" prompt.
+   - If `update.check: false` (the default) or any offline flag is
+     set, no fetch occurs. The channel switch still applies on next
+     launch — the user will pick up the new channel's binary on
+     their next manual upgrade (`brew upgrade` / re-download from
+     GitHub Releases / etc.).
+3. User confirms (when a prompt was surfaced) → electron-updater pulls + verifies + restarts.
 4. Vault registry stays put. The same vault dirs survive every channel
    switch — channel is a binary-install concept, not a vault concept.
 5. Downgrade across a vault-schema bump is **blocked at startup** with

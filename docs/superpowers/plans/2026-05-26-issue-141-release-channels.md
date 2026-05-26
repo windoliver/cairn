@@ -79,9 +79,9 @@ The following rules govern Cairn releases from v1.0 forward.
 
 | Channel | Trigger | Artifact destinations | Update poll feed | Cosign tag | Audience |
 |---|---|---|---|---|---|
-| **stable** | git tag `vX.Y.Z` (no pre-release suffix) | crates.io · `homebrew-cairn` main tap · winget · scoop · GitHub Releases (DMG/MSI/AppImage/deb/tarball) | electron-updater YAML: `updates/stable/latest-{mac,windows}.yml` on github.io · Linux: embedded AppImageUpdate metadata | `cairn-stable` | Default for everyone; what `brew install cairn` gives you |
-| **beta** | git tag `vX.Y.Z-beta.N` or `vX.Y.Z-rc.N` | `homebrew-cairn-beta` tap · GitHub Pre-Releases · no crates.io publish (pre-release versions auto-skipped by `cargo install` unless `--version` pinned) | electron-updater YAML: `updates/beta/latest-{mac,windows}.yml` on github.io · Linux: embedded AppImageUpdate metadata | `cairn-beta` | Opt-in. Users who want the next release with at least one tagged checkpoint of stability |
-| **nightly** | scheduled GHA every 24h off `main`, tagged `nightly-YYYYMMDD` | GitHub Releases ("Nightly" section), **no** package-manager publish | electron-updater YAML: `updates/nightly/latest-{mac,windows}.yml` on github.io · Linux: embedded AppImageUpdate metadata | `cairn-nightly` | Developers + dogfooders. No semver promise. Aged off after 30 days. |
+| **stable** | git tag `vX.Y.Z` (no pre-release suffix) | crates.io · `homebrew-cairn` main tap · winget · scoop · GitHub Releases (DMG/MSI/AppImage/deb/tarball) | electron-updater YAML: `updates/stable/latest-mac.yml` (macOS) · `updates/stable/latest.yml` (Windows) on github.io · Linux: embedded AppImageUpdate metadata | `cairn-stable` | Default for everyone; what `brew install cairn` gives you |
+| **beta** | git tag `vX.Y.Z-beta.N` or `vX.Y.Z-rc.N` | `homebrew-cairn-beta` tap · GitHub Pre-Releases · no crates.io publish (pre-release versions auto-skipped by `cargo install` unless `--version` pinned) | electron-updater YAML: `updates/beta/latest-mac.yml` (macOS) · `updates/beta/latest.yml` (Windows) on github.io · Linux: embedded AppImageUpdate metadata | `cairn-beta` | Opt-in. Users who want the next release with at least one tagged checkpoint of stability |
+| **nightly** | scheduled GHA on `main` creates and pushes a `nightly-YYYYMMDD` tag; the tag push triggers the signed-publish workflow | GitHub Releases ("Nightly" section), **no** package-manager publish | electron-updater YAML: `updates/nightly/latest-mac.yml` (macOS) · `updates/nightly/latest.yml` (Windows) on github.io · Linux: embedded AppImageUpdate metadata | `cairn-nightly` | Developers + dogfooders. No semver promise. Aged off after 30 days. |
 
 One binary per platform per channel. The Rust core compiles
 identically; the only difference is the build-time `CAIRN_CHANNEL`
@@ -156,9 +156,16 @@ Fail-closed: any verification failure → non-zero exit + the
 
 1. User changes `update.channel` from stable → beta (or vice versa)
    via the Settings UI or `cairn config set update.channel beta`.
-2. Next launch fetches the chosen channel's feed **once**, surfaces a
-   "Update to vX.Y.Z-beta.1 available" prompt.
-3. User confirms → electron-updater pulls + verifies + restarts.
+2. Next launch:
+   - If `update.check: true` **and** neither `CAIRN_OFFLINE=1` nor
+     `agent.offline: true` is set, the desktop shell fetches the
+     chosen channel's feed once and surfaces a "Update to
+     vX.Y.Z-beta.1 available" prompt.
+   - If `update.check: false` (the default) or any offline flag is
+     set, no fetch occurs. The channel switch still applies on next
+     launch — the user picks up the new channel's binary on their
+     next manual upgrade.
+3. User confirms (when a prompt was surfaced) → electron-updater pulls + verifies + restarts.
 4. Vault registry stays put. The same vault dirs survive every channel
    switch — channel is a binary-install concept, not a vault concept.
 5. Downgrade across a vault-schema bump is **blocked at startup** with
@@ -342,7 +349,8 @@ by which artifact / package-manager tap they installed.
 user opts in (`update.check: true`), and `CAIRN_OFFLINE=1` or
 `agent.offline: true` always wins. When enabled, the desktop shell
 reads electron-updater's native YAML feed at
-`updates/<channel>/latest-{mac,windows}.yml` on macOS and Windows;
+`updates/<channel>/latest-mac.yml` (macOS) or
+`updates/<channel>/latest.yml` (Windows) on macOS and Windows;
 AppImageUpdate handles Linux via the AppImage's embedded
 `update-information` field and zsync side-files. Every artifact
 additionally carries a Cosign keyless OIDC signature on the Sigstore
@@ -352,12 +360,17 @@ is fail-closed.
 
 **Channel migration is bidirectional with a vault-schema-downgrade guard.**
 Switching channels (stable ↔ beta ↔ nightly) changes the binary on
-next launch; vault data is untouched. If a channel switch would install
-a binary older than the vault's schema, startup is blocked with a clear
-error and the user is prompted to either reinstall the newer binary or
-pick a different vault. **Rollback is documented but manual** at v1.0
-(`cairn release rollback --to <ver>` recipe); automatic boot-probe
-rollback is deferred to v1.1.
+next launch; vault data is untouched. Switching channels does not
+enable update checks — if `update.check` is `false` (the default) the
+channel switch applies but no network fetch occurs; the user picks up
+the new channel's binary on their next manual upgrade. Channel switches
+respect `update.check` and `CAIRN_OFFLINE` — a switch with checks
+disabled applies on next launch without any outbound fetch. If a channel
+switch would install a binary older than the vault's schema, startup is
+blocked with a clear error and the user is prompted to either reinstall
+the newer binary or pick a different vault. **Rollback is documented
+but manual** at v1.0 (`cairn release rollback --to <ver>` recipe);
+automatic boot-probe rollback is deferred to v1.1.
 
 Full rules live in [ADR 0005](decisions/0005-release-channels.md).
 The maintainer recipe (cutting a stable, promoting nightly, rotating
@@ -385,8 +398,9 @@ new_string:
 Cairn ships under three named release channels: **stable** (tagged
 `vX.Y.Z` — crates.io / brew main tap / winget / scoop / GitHub
 Releases), **beta** (tagged `vX.Y.Z-beta.N` or `-rc.N` — `homebrew-cairn-beta`
-tap and GitHub Pre-Releases), and **nightly** (scheduled GHA cut off
-`main`, tagged `nightly-YYYYMMDD`, GitHub Releases only). One binary
+tap and GitHub Pre-Releases), and **nightly** (scheduled GHA on `main`
+creates and pushes a `nightly-YYYYMMDD` tag; the tag push triggers the
+signed-publish workflow — GitHub Releases only). One binary
 per platform per channel; `cairn status` reports the channel via the
 build-time `CAIRN_CHANNEL` stamp. Desktop users pin a channel via
 `update.channel` in their desktop-config; CLI users pick a channel
@@ -396,7 +410,8 @@ by which artifact / package-manager tap they installed.
 user opts in (`update.check: true`), and `CAIRN_OFFLINE=1` or
 `agent.offline: true` always wins. When enabled, the desktop shell
 reads electron-updater's native YAML feed at
-`updates/<channel>/latest-{mac,windows}.yml` on macOS and Windows;
+`updates/<channel>/latest-mac.yml` (macOS) or
+`updates/<channel>/latest.yml` (Windows);
 AppImageUpdate handles Linux via the AppImage's embedded
 `update-information` field and zsync side-files. Every artifact
 additionally carries a Cosign keyless OIDC signature on the Sigstore
@@ -406,12 +421,17 @@ is fail-closed.
 
 **Channel migration is bidirectional with a vault-schema-downgrade guard.**
 Switching channels (stable ↔ beta ↔ nightly) changes the binary on
-next launch; vault data is untouched. If a channel switch would install
-a binary older than the vault's schema, startup is blocked with a clear
-error and the user is prompted to either reinstall the newer binary or
-pick a different vault. **Rollback is documented but manual** at v1.0
-(`cairn release rollback --to <ver>` recipe); automatic boot-probe
-rollback is deferred to v1.1.
+next launch; vault data is untouched. Switching channels does not
+enable update checks — if `update.check` is `false` (the default) the
+channel switch applies but no network fetch occurs; the user picks up
+the new channel's binary on their next manual upgrade. Channel switches
+respect `update.check` and `CAIRN_OFFLINE` — a switch with checks
+disabled applies on next launch without any outbound fetch. If a channel
+switch would install a binary older than the vault's schema, startup is
+blocked with a clear error and the user is prompted to either reinstall
+the newer binary or pick a different vault. **Rollback is documented
+but manual** at v1.0 (`cairn release rollback --to <ver>` recipe);
+automatic boot-probe rollback is deferred to v1.1.
 
 Full rules live in [ADR 0005](decisions/0005-release-channels.md).
 The maintainer recipe (cutting a stable, promoting nightly, rotating
@@ -570,9 +590,10 @@ the user-facing summary lives in [Updates](../usage/updates.md).
 8. Trigger the `release-stable.yml` workflow (added in follow-up
    under #32) with the tag as input. It builds + signs + publishes
    to all stable destinations + updates the `homebrew-cairn` tap +
-   updates `updates/stable/latest-{mac,windows}.yml` electron-updater feed
-   (for macOS and Windows; the Linux AppImage's embedded
-   `update-information` is regenerated at build time).
+   updates `updates/stable/latest-mac.yml` (macOS) and
+   `updates/stable/latest.yml` (Windows) electron-updater feeds
+   (the Linux AppImage's embedded `update-information` is regenerated
+   at build time).
 9. Verify artifacts on a clean machine: `cairn release verify
    <downloaded>.dmg` must print `ok: cosign + apple-developer-id`.
 10. Post the release notes to GitHub Releases; mark as latest.
@@ -585,8 +606,9 @@ the user-facing summary lives in [Updates](../usage/updates.md).
    in `release-dry-run`).
 3. Trigger `release-beta.yml` workflow — builds, signs, publishes to
    the `homebrew-cairn-beta` tap, marks the GitHub Release as
-   "Pre-release", updates `updates/beta/latest-{mac,windows}.yml`
-   (macOS and Windows; Linux AppImage carries embedded metadata).
+   "Pre-release", updates `updates/beta/latest-mac.yml` (macOS) and
+   `updates/beta/latest.yml` (Windows) electron-updater feeds
+   (Linux AppImage carries embedded metadata).
 4. Announce in the release thread; ask beta testers for feedback.
 
 ### Promote a nightly to beta

@@ -14,7 +14,14 @@ much stability and risk you want.
 1. Open the Cairn desktop app.
 2. Settings → Updates → Channel.
 3. Pick `stable`, `beta`, or `nightly`. The change applies on next
-   launch.
+   launch. Switching channels does not enable update checks — if
+   `update.check` is `false` (the default) you will pick up the new
+   channel's binary on your next manual upgrade (`brew upgrade` /
+   re-download from GitHub Releases / etc.).
+
+If you have update checks disabled (`update.check: false` or
+`CAIRN_OFFLINE=1`), the channel switch still applies on next launch —
+but no outbound fetch runs until you re-enable checks.
 
 From the command line, the desktop config is at:
 
@@ -65,14 +72,14 @@ To make sure they stay off:
 The desktop app's onboarding asks once whether you want update
 checks. You can change your mind any time in Settings → Updates.
 
-When checks are enabled, the desktop app polls (macOS / Windows)
-`https://windoliver.github.io/cairn/updates/<channel>/latest-<platform>.yml` once per
-24 hours, where `<platform>` is `mac` or `windows`. On Linux,
-AppImageUpdate uses the AppImage's embedded metadata; no separate
-Cairn-controlled poll endpoint runs. The payload sent by the macOS /
-Windows poller is metadata-only: channel name, current version, OS,
-arch, and an opaque rotating install ID that resets weekly. No vault
-content, no user identity, no IP-derived geo.
+When checks are enabled, the desktop app polls once per 24 hours:
+`https://windoliver.github.io/cairn/updates/<channel>/latest-mac.yml`
+on macOS, or `https://windoliver.github.io/cairn/updates/<channel>/latest.yml`
+on Windows. On Linux, AppImageUpdate uses the AppImage's embedded
+metadata; no separate Cairn-controlled poll endpoint runs. The payload
+sent by the macOS / Windows poller is metadata-only: channel name,
+current version, OS, arch, and an opaque rotating install ID that resets
+weekly. No vault content, no user identity, no IP-derived geo.
 
 ## Verifying a downloaded artifact
 

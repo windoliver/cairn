@@ -70,15 +70,26 @@ Six files; doc-only PR.
 
 | Channel | Trigger | Artifact destinations | Update poll feed | Cosign tag | Audience |
 |---|---|---|---|---|---|
-| **stable** | git tag `vX.Y.Z` (no pre-release suffix) | crates.io · `homebrew-cairn` main tap · winget · scoop · GitHub Releases (DMG/MSI/AppImage/deb/tarball) | `updates/stable/latest-<platform>.yml` on github.io | `cairn-stable` | Default for everyone; what `brew install cairn` gives you |
-| **beta** | git tag `vX.Y.Z-beta.N` or `vX.Y.Z-rc.N` | `homebrew-cairn-beta` tap · GitHub Pre-Releases · no crates.io publish (pre-release versions auto-skipped by `cargo install` unless `--version` pinned) | `updates/beta/latest-<platform>.yml` | `cairn-beta` | Opt-in. Users who want the next release with at least one tagged checkpoint of stability |
-| **nightly** | scheduled GHA every 24h off `main`, tagged `nightly-YYYYMMDD` | GitHub Releases ("Nightly" section), **no** package-manager publish | `updates/nightly/latest-<platform>.yml` | `cairn-nightly` | Developers + dogfooders. No semver promise. Aged off after 30 days |
+| **stable** | git tag `vX.Y.Z` (no pre-release suffix) | crates.io · `homebrew-cairn` main tap · winget · scoop · GitHub Releases (DMG/MSI/AppImage/deb/tarball) | `updates/stable/latest-mac.yml` (macOS) · `updates/stable/latest.yml` (Windows) on github.io | `cairn-stable` | Default for everyone; what `brew install cairn` gives you |
+| **beta** | git tag `vX.Y.Z-beta.N` or `vX.Y.Z-rc.N` | `homebrew-cairn-beta` tap · GitHub Pre-Releases · no crates.io publish (pre-release versions auto-skipped by `cargo install` unless `--version` pinned) | `updates/beta/latest-mac.yml` (macOS) · `updates/beta/latest.yml` (Windows) | `cairn-beta` | Opt-in. Users who want the next release with at least one tagged checkpoint of stability |
+| **nightly** | scheduled GHA on `main` creates and pushes a `nightly-YYYYMMDD` tag; the tag push triggers the signed-publish workflow | GitHub Releases ("Nightly" section), **no** package-manager publish | `updates/nightly/latest-mac.yml` (macOS) · `updates/nightly/latest.yml` (Windows) | `cairn-nightly` | Developers + dogfooders. No semver promise. Aged off after 30 days |
 
 **One binary per platform per channel.** The Rust core compiles
 identically; the only difference is the build-time `CAIRN_CHANNEL` env
 var the build embeds and `cairn status` reports. Channel-specific
 behavior (feed URL, update-check default, signature-verify identity) is
 table-driven off that one string.
+
+**Nightly is two-stage.** A `schedule:`-triggered workflow on `main`
+mints the `nightly-YYYYMMDD` git tag (no signing). The tag push
+triggers `release-nightly.yml`, which builds and signs against the tag
+— so the Cosign certificate's `ref` claim binds to
+`refs/tags/nightly-*`, not `refs/heads/main`. This is required because
+a scheduled workflow running on `main` produces an OIDC token with
+`ref = refs/heads/main`, which would fail Cosign verification against
+the `refs/tags/nightly-*` trust anchor. Verifiers must accept only the
+tag-bound identity; reject any nightly signed under a branch-bound
+identity.
 
 **Channel pinning lives in two places.**
 
@@ -130,10 +141,11 @@ Fail-closed: any verification failure → non-zero exit + the
   record IDs, no user identifiers, no IP-derived geo. Logged at `trace`
   only (brief §6.6 rule: never log raw record bodies above `debug`; the
   rule is extended here to also cover update-poll payloads).
-- **Endpoint is a static file** (`updates/<channel>/latest-<platform>.yml` on
-  github.io / a Cloudflare Pages mirror). No server-side application
-  logging beyond the hoster's standard access logs, which the user-facing
-  doc names so users know what to expect.
+- **Endpoint is a static file** (`updates/<channel>/latest-mac.yml` on
+  macOS, `updates/<channel>/latest.yml` on Windows, on github.io /
+  a Cloudflare Pages mirror). No server-side application logging beyond
+  the hoster's standard access logs, which the user-facing doc names so
+  users know what to expect.
 - **CLI never polls.** Only the desktop shell can be opted in. CLI users
   learn about updates from `brew outdated` / `cargo install --force` /
   the one-shot `cairn status --check-updates` (explicit invocation only,
@@ -145,9 +157,16 @@ Fail-closed: any verification failure → non-zero exit + the
 
 1. User changes `update.channel` from stable → beta (or vice versa)
    via the Settings UI or `cairn config set update.channel beta`.
-2. Next launch fetches the chosen channel's feed **once**, surfaces a
-   "Update to vX.Y.Z-beta.1 available" prompt.
-3. User confirms → electron-updater pulls + verifies + restarts.
+2. Next launch:
+   - If `update.check: true` **and** neither `CAIRN_OFFLINE=1` nor
+     `agent.offline: true` is set, the desktop shell fetches the
+     chosen channel's feed once and surfaces a "Update to
+     vX.Y.Z-beta.1 available" prompt.
+   - If `update.check: false` (the default) or any offline flag is
+     set, no fetch occurs. The channel switch still applies on next
+     launch — the user picks up the new channel's binary on their
+     next manual upgrade.
+3. User confirms (when a prompt was surfaced) → electron-updater pulls + verifies + restarts.
 4. Vault registry stays put. The same vault dirs survive every channel
    switch — channel is a binary-install concept, not a vault concept.
 5. Downgrade across a vault-schema bump is **blocked at startup** with
@@ -231,7 +250,7 @@ ships the **specs they test against**, not the tests themselves.
   every update and a state machine for "first launch after update". The
   design noise is real engineering; deferring to v1.1 keeps #141 in the
   doc-only lane. A follow-up issue under #32 captures this.
-- **Cloudflare Pages mirror of `updates/<channel>/latest-{mac,windows}.yml`.** Default is
+- **Cloudflare Pages mirror of the electron-updater YAML feeds (`latest-mac.yml` / `latest.yml`).** Default is
   github.io directly. If GitHub Pages bandwidth becomes a concern, the
   mirror is a one-line DNS change; named in the ADR as a permitted
   variant. Linux AppImage uses the embedded `update-information` field,

@@ -3919,9 +3919,10 @@ Nothing in these migrations requires the legacy system to change. Cairn exposes 
 Cairn ships under three named release channels: **stable** (tagged
 `vX.Y.Z` — crates.io / brew main tap / winget / scoop / GitHub
 Releases), **beta** (tagged `vX.Y.Z-beta.N` or `-rc.N` — `homebrew-cairn-beta`
-tap and GitHub Pre-Releases), and **nightly** (scheduled GHA cut off
-`main`, tagged `nightly-YYYYMMDD`, GitHub Releases only). One binary
-per platform per channel; `cairn status` reports the channel via the
+tap and GitHub Pre-Releases), and **nightly** (scheduled GHA on `main`
+creates and pushes a `nightly-YYYYMMDD` tag; the tag push triggers the
+signed-publish workflow — GitHub Releases only). One binary per
+platform per channel; `cairn status` reports the channel via the
 build-time `CAIRN_CHANNEL` stamp. Desktop users pin a channel via
 `update.channel` in their desktop-config; CLI users pick a channel
 by which artifact / package-manager tap they installed.
@@ -3930,7 +3931,8 @@ by which artifact / package-manager tap they installed.
 user opts in (`update.check: true`), and `CAIRN_OFFLINE=1` or
 `agent.offline: true` always wins. When enabled, the desktop shell
 reads electron-updater's native YAML feed at
-`updates/<channel>/latest-{mac,windows}.yml` on macOS and Windows;
+`updates/<channel>/latest-mac.yml` (macOS) or
+`updates/<channel>/latest.yml` (Windows);
 AppImageUpdate handles Linux via the AppImage's embedded
 `update-information` field and zsync side-files. Every artifact
 additionally carries a Cosign keyless OIDC signature on the Sigstore
@@ -3940,12 +3942,17 @@ is fail-closed.
 
 **Channel migration is bidirectional with a vault-schema-downgrade guard.**
 Switching channels (stable ↔ beta ↔ nightly) changes the binary on
-next launch; vault data is untouched. If a channel switch would install
-a binary older than the vault's schema, startup is blocked with a clear
-error and the user is prompted to either reinstall the newer binary or
-pick a different vault. **Rollback is documented but manual** at v1.0
-(`cairn release rollback --to <ver>` recipe); automatic boot-probe
-rollback is deferred to v1.1.
+next launch; vault data is untouched. Switching channels does not
+enable update checks — if `update.check` is `false` (the default) the
+channel switch applies but no network fetch occurs; the user picks up
+the new channel's binary on their next manual upgrade. Channel switches
+respect `update.check` and `CAIRN_OFFLINE` — a switch with checks
+disabled applies on next launch without any outbound fetch. If a channel
+switch would install a binary older than the vault's schema, startup is
+blocked with a clear error and the user is prompted to either reinstall
+the newer binary or pick a different vault. **Rollback is documented
+but manual** at v1.0 (`cairn release rollback --to <ver>` recipe);
+automatic boot-probe rollback is deferred to v1.1.
 
 Full rules live in [ADR 0005](decisions/0005-release-channels.md).
 The maintainer recipe (cutting a stable, promoting nightly, rotating

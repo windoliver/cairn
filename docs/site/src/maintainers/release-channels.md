@@ -10,7 +10,27 @@ the user-facing summary lives in [Updates](../usage/updates.md).
 |---|---|---|---|
 | **stable** | `vX.Y.Z` (no suffix) | When milestone is ready | crates.io · `homebrew-cairn` tap · winget · scoop · GitHub Releases |
 | **beta** | `vX.Y.Z-beta.N` / `-rc.N` | Every 2–4 weeks during a release cycle | `homebrew-cairn-beta` tap · GitHub Pre-Releases |
-| **nightly** | `nightly-YYYYMMDD` | Daily scheduled GHA off `main` | GitHub Releases ("Nightly" section); aged off after 30 days |
+| **nightly** | `nightly-YYYYMMDD` | Scheduled GHA on `main` creates and pushes the tag; the tag push triggers the signed-publish workflow | GitHub Releases ("Nightly" section); aged off after 30 days |
+
+### Nightly two-stage model
+
+The nightly release is a two-stage pipeline to keep Cosign's OIDC
+`ref` claim bound to the tag, not the branch:
+
+- **Stage 1 — mint the tag:** A `schedule:`-triggered workflow runs on
+  `main` and pushes a `nightly-YYYYMMDD` git tag (no artifact
+  building, no signing in this stage).
+- **Stage 2 — build and sign:** The tag push triggers
+  `release-nightly.yml`, which runs against `refs/tags/nightly-YYYYMMDD`,
+  builds the artifacts, and signs them. The Cosign certificate's `ref`
+  claim therefore binds to `refs/tags/nightly-*`, matching the trust
+  anchor in [ADR 0005 §3.a](../../../design/decisions/0005-release-channels.md).
+
+This split is required because a `schedule:` workflow running on `main`
+would produce an OIDC token with `ref = refs/heads/main`, causing
+Cosign verification against `refs/tags/nightly-*` to fail. Always
+verify nightlies using the tag-bound identity; reject any nightly
+signed under a branch-bound identity.
 
 ## Recipes
 
@@ -33,9 +53,10 @@ the user-facing summary lives in [Updates](../usage/updates.md).
 8. Trigger the `release-stable.yml` workflow (added in follow-up
    under #32) with the tag as input. It builds + signs + publishes
    to all stable destinations + updates the `homebrew-cairn` tap +
-   updates `updates/stable/latest-{mac,windows}.yml` electron-updater feed
-   (for macOS and Windows; the Linux AppImage's embedded
-   `update-information` field is regenerated at build time).
+   updates `updates/stable/latest-mac.yml` (macOS) and
+   `updates/stable/latest.yml` (Windows) electron-updater feeds
+   (the Linux AppImage's embedded `update-information` field is
+   regenerated at build time).
 9. Verify artifacts on a clean machine: `cairn release verify
    <downloaded>.dmg` must print `ok: cosign + apple-developer-id`.
 10. Post the release notes to GitHub Releases; mark as latest.
@@ -48,8 +69,9 @@ the user-facing summary lives in [Updates](../usage/updates.md).
    in `release-dry-run`).
 3. Trigger `release-beta.yml` workflow — builds, signs, publishes to
    the `homebrew-cairn-beta` tap, marks the GitHub Release as
-   "Pre-release", updates `updates/beta/latest-{mac,windows}.yml`
-   (macOS and Windows; Linux AppImage carries embedded metadata).
+   "Pre-release", updates `updates/beta/latest-mac.yml` (macOS) and
+   `updates/beta/latest.yml` (Windows) electron-updater feeds
+   (Linux AppImage carries embedded metadata).
 4. Announce in the release thread; ask beta testers for feedback.
 
 ### Promote a nightly to beta
