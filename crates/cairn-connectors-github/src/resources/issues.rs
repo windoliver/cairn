@@ -4,11 +4,10 @@ use std::collections::BTreeSet;
 
 use async_trait::async_trait;
 use cairn_connectors_core::{
-    ConnectorEvent, ConnectorEventId, ConnectorPayload, ConnectorScope, DeliveryMode, SourceRef,
+    ConnectorEvent, ConnectorPayload, ConnectorScope, DeliveryMode, SourceRef,
 };
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
-use ulid::Ulid;
 
 use crate::client::GhClient;
 use crate::cursor::ResourceCursor;
@@ -174,11 +173,16 @@ fn issue_to_event(
     repo: &Repo,
     webhook_meta: Option<(&str, &str, &str)>,
 ) -> ConnectorEvent {
-    let event_id = ConnectorEventId::new(Ulid::new().to_string());
     let source_ref = SourceRef::new(
         "issue",
         format!("gh:{}/{}#{}", repo.owner, repo.name, dto.number),
         None,
+    );
+    // Deterministic event ID: updated_at timestamp as revision marker.
+    let event_id = crate::event_id::deterministic(
+        "issue",
+        &source_ref.system_id,
+        &dto.updated_at.timestamp().to_string(),
     );
     let mut labels: BTreeSet<String> = BTreeSet::new();
     labels.insert("source:github".into());

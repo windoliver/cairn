@@ -24,6 +24,7 @@ mod client;
 mod connector;
 mod cursor;
 mod error;
+mod event_id;
 mod resources;
 mod webhook;
 
