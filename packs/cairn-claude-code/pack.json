@@ -1,0 +1,14 @@
+{
+  "schema": "cairn-pack/v1",
+  "pack_id": "cairn-claude-code",
+  "name": "cairn-claude-code",
+  "version": "0.1.0",
+  "harness": "claude-code",
+  "cairn_mcp_compat": ">=1.0.0",
+  "description": "Reference Claude Code skill-pack for Cairn.",
+  "requires_capabilities": [],
+  "subagents": [],
+  "commands": [],
+  "hooks": {},
+  "manual_fragment": "manual.md"
+}
