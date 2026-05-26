@@ -118,8 +118,8 @@ identity.
   feed URL and next-artifact Cosign identity switch on the next launch.
   A one-shot fetch of the chosen feed runs only if `update.check: true`
   is set and neither `CAIRN_OFFLINE=1` nor `agent.offline: true` is
-  engaged — otherwise the channel switch applies with no outbound
-  network call.
+  engaged — otherwise only the target value in `update.channel` is
+  persisted with no feed fetch and no binary change.
 
 ## 6. Update mechanism (per OS)
 
@@ -201,9 +201,12 @@ binary on the same machine can be on different channels.
      chosen channel's feed once and surfaces a "Update to
      vX.Y.Z-beta.1 available" prompt.
    - If `update.check: false` (the default) or any offline flag is
-     set, no fetch occurs. The channel switch still applies on next
-     launch — the user picks up the new channel's binary on their
-     next manual upgrade.
+     set, no fetch occurs. Only the target value in `update.channel`
+     is persisted — no feed fetch runs and no binary change occurs.
+     Users wanting an actual channel switch in that mode must manually
+     install from the chosen channel (e.g. switch the Homebrew tap and
+     run `brew install`, or download the signed artifact from GitHub
+     Releases) — the desktop updater stays inert.
 3. User confirms (when a prompt was surfaced) → electron-updater pulls + verifies + restarts.
 4. Vault registry stays put. The same vault dirs survive every channel
    switch — channel is a binary-install concept, not a vault concept.

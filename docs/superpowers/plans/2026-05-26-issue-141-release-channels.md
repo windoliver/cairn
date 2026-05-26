@@ -123,8 +123,9 @@ Channel pinning lives in two places:
   immediately; the feed URL and next-artifact Cosign identity switch on
   the next launch. A one-shot fetch of the chosen feed runs only if
   `update.check: true` is set and neither `CAIRN_OFFLINE=1` nor
-  `agent.offline: true` is engaged — otherwise the channel switch
-  applies with no outbound network call.
+  `agent.offline: true` is engaged — otherwise only the target value
+  in `update.channel` is persisted with no feed fetch and no binary
+  change.
 
 ### 2. Per-OS update mechanism
 
@@ -197,9 +198,12 @@ Fail-closed: any verification failure → non-zero exit + the
      chosen channel's feed once and surfaces a "Update to
      vX.Y.Z-beta.1 available" prompt.
    - If `update.check: false` (the default) or any offline flag is
-     set, no fetch occurs. The channel switch still applies on next
-     launch — the user picks up the new channel's binary on their
-     next manual upgrade.
+     set, no fetch occurs. Only the target value in `update.channel`
+     is persisted — no feed fetch runs and no binary change occurs.
+     Users wanting an actual channel switch in that mode must manually
+     install from the chosen channel (e.g. switch the Homebrew tap and
+     run `brew install`, or download the signed artifact from GitHub
+     Releases) — the desktop updater stays inert.
 3. User confirms (when a prompt was surfaced) → electron-updater pulls + verifies + restarts.
 4. Vault registry stays put. The same vault dirs survive every channel
    switch — channel is a binary-install concept, not a vault concept.
@@ -394,13 +398,16 @@ checks both the platform signature and the Cosign sidecar. Verification
 is fail-closed.
 
 **Channel migration is bidirectional with a vault-schema-downgrade guard.**
-Switching channels (stable ↔ beta ↔ nightly) changes the binary on
-next launch; vault data is untouched. Switching channels does not
-enable update checks — if `update.check` is `false` (the default) the
-channel switch applies but no network fetch occurs; the user picks up
-the new channel's binary on their next manual upgrade. Channel switches
-respect `update.check` and `CAIRN_OFFLINE` — a switch with checks
-disabled applies on next launch without any outbound fetch. If a channel
+Switching channels updates `update.channel` (the next-update target) —
+the currently installed binary stays on its embedded `CAIRN_CHANNEL`
+until a verified update is installed or the user manually replaces it.
+Switching channels does not enable update checks — if `update.check`
+is `false` (the default) or any offline flag is set, only the target
+value in `update.channel` is persisted; no feed fetch runs and no
+binary change occurs. Users wanting an actual channel switch in that
+mode must manually install from the chosen channel (e.g. switch the
+Homebrew tap and run `brew install`, or download the signed artifact
+from GitHub Releases) — the desktop updater stays inert. If a channel
 switch would install a binary older than the vault's schema, startup is
 blocked with a clear error and the user is prompted to either reinstall
 the newer binary or pick a different vault. **Rollback is documented
@@ -455,13 +462,16 @@ checks both the platform signature and the Cosign sidecar. Verification
 is fail-closed.
 
 **Channel migration is bidirectional with a vault-schema-downgrade guard.**
-Switching channels (stable ↔ beta ↔ nightly) changes the binary on
-next launch; vault data is untouched. Switching channels does not
-enable update checks — if `update.check` is `false` (the default) the
-channel switch applies but no network fetch occurs; the user picks up
-the new channel's binary on their next manual upgrade. Channel switches
-respect `update.check` and `CAIRN_OFFLINE` — a switch with checks
-disabled applies on next launch without any outbound fetch. If a channel
+Switching channels updates `update.channel` (the next-update target) —
+the currently installed binary stays on its embedded `CAIRN_CHANNEL`
+until a verified update is installed or the user manually replaces it.
+Switching channels does not enable update checks — if `update.check`
+is `false` (the default) or any offline flag is set, only the target
+value in `update.channel` is persisted; no feed fetch runs and no
+binary change occurs. Users wanting an actual channel switch in that
+mode must manually install from the chosen channel (e.g. switch the
+Homebrew tap and run `brew install`, or download the signed artifact
+from GitHub Releases) — the desktop updater stays inert. If a channel
 switch would install a binary older than the vault's schema, startup is
 blocked with a clear error and the user is prompted to either reinstall
 the newer binary or pick a different vault. **Rollback is documented

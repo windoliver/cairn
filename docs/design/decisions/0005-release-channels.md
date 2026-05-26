@@ -83,8 +83,9 @@ Channel pinning lives in two places:
   immediately; the feed URL and next-artifact Cosign identity switch on
   the next launch. A one-shot fetch of the chosen feed runs only if
   `update.check: true` is set and neither `CAIRN_OFFLINE=1` nor
-  `agent.offline: true` is engaged — otherwise the channel switch
-  applies with no outbound network call.
+  `agent.offline: true` is engaged — otherwise only the target value
+  in `update.channel` is persisted with no feed fetch and no binary
+  change.
 
 ### 2. Per-OS update mechanism
 
@@ -119,28 +120,33 @@ Fail-closed: any verification failure → non-zero exit + the
 
 The verifier accepts artifacts signed by the **release workflows**
 running in `windoliver/cairn`, not arbitrary workflows in the same
-repo. Pinned identities:
+repo. Each channel pins an **identity regex** (used with
+`--certificate-identity-regexp`) that is anchored and disjoint from
+the other channels' patterns:
 
-| Channel | Cosign certificate identity | Cosign issuer | Trigger |
-|---|---|---|---|
-| stable | `https://github.com/windoliver/cairn/.github/workflows/release-stable.yml@refs/tags/v*` | `https://token.actions.githubusercontent.com` | git tag `vX.Y.Z` |
-| beta | `https://github.com/windoliver/cairn/.github/workflows/release-beta.yml@refs/tags/v*-{beta,rc}.*` | same | git tag `vX.Y.Z-beta.N` / `-rc.N` |
-| nightly | `https://github.com/windoliver/cairn/.github/workflows/release-nightly.yml@refs/tags/nightly-*` | same | tag push (`nightly-YYYYMMDD`) created by the scheduled GHA |
+| Channel | Cosign certificate identity regex (anchored) | Cosign issuer |
+|---|---|---|
+| stable | `^https://github\.com/windoliver/cairn/\.github/workflows/release-stable\.yml@refs/tags/v[0-9]+\.[0-9]+\.[0-9]+$` | `https://token.actions.githubusercontent.com` |
+| beta | `^https://github\.com/windoliver/cairn/\.github/workflows/release-beta\.yml@refs/tags/v[0-9]+\.[0-9]+\.[0-9]+-(beta|rc)\.[0-9]+$` | same |
+| nightly | `^https://github\.com/windoliver/cairn/\.github/workflows/release-nightly\.yml@refs/tags/nightly-[0-9]{8}$` | same |
 
-GPG fingerprint for Linux AppImage signatures: **to be published in
-the v1.0 release notes and reproduced verbatim in
-`docs/site/src/maintainers/release-channels.md` "Rotate signing keys"
-under "GPG (AppImage)".**
+Notes:
+- Each regex is **fully anchored** (`^…$`) — partial matches are rejected.
+- Stable's regex excludes pre-release suffixes (`-beta`, `-rc`, etc.) so a beta artifact cannot satisfy the stable trust anchor.
+- Nightly's regex requires exactly 8 digits matching the `YYYYMMDD` date.
+- GPG fingerprint for Linux AppImage signatures: **published in the v1.0 release notes** and reproduced verbatim in
+  [`docs/site/src/maintainers/release-channels.md`](../../site/src/maintainers/release-channels.md#current-trust-anchors)
+  under "Current trust anchors".
 
 **Nightly is two-stage.** A scheduled workflow on `main` mints the
 `nightly-YYYYMMDD` git tag (no signing). The tag push triggers
 `release-nightly.yml`, which builds and signs against the tag — so
-the Cosign certificate's `ref` claim binds to `refs/tags/nightly-*`,
+the Cosign certificate's `ref` claim binds to `refs/tags/nightly-YYYYMMDD`,
 not `refs/heads/main`. Verifiers must accept only the tag-bound
 identity; reject any nightly signed under a branch-bound identity.
 
-The workflow paths above are **frozen identifiers** under this ADR —
-they cannot be renamed without minting `cairn.update.v2`.
+The workflow paths and these regex shapes are **frozen identifiers**
+under this ADR — they cannot be renamed without minting `cairn.update.v2`.
 
 ### 4. Privacy / offline contract
 
@@ -197,10 +203,12 @@ different channels.
      chosen channel's feed once and surfaces a "Update to
      vX.Y.Z-beta.1 available" prompt.
    - If `update.check: false` (the default) or any offline flag is
-     set, no fetch occurs. The channel switch still applies on next
-     launch — the user will pick up the new channel's binary on
-     their next manual upgrade (`brew upgrade` / re-download from
-     GitHub Releases / etc.).
+     set, no fetch occurs. Only the target value in `update.channel`
+     is persisted — no feed fetch runs and no binary change occurs.
+     Users wanting an actual channel switch in that mode must manually
+     install from the chosen channel (e.g. switch the Homebrew tap and
+     run `brew install`, or download the signed artifact from GitHub
+     Releases) — the desktop updater stays inert.
 3. User confirms (when a prompt was surfaced) → electron-updater pulls + verifies + restarts.
 4. Vault registry stays put. The same vault dirs survive every channel
    switch — channel is a binary-install concept, not a vault concept.

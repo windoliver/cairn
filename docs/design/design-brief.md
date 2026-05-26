@@ -3950,8 +3950,12 @@ until a verified update is installed or the user manually replaces
 it. If `update.check: true` and neither offline gate is engaged
 (`CAIRN_OFFLINE=1`, `agent.offline: true`), the next launch fetches
 the chosen channel's feed once and surfaces an update prompt;
-otherwise the new target persists silently until checks are
-re-enabled. Vault data is untouched. If a channel switch would
+otherwise only the target value in `update.channel` is persisted —
+no feed fetch runs and no binary change occurs. Users wanting an
+actual channel switch in that mode must manually install from the
+chosen channel (e.g. switch the Homebrew tap and run `brew install`,
+or download the signed artifact from GitHub Releases) — the desktop
+updater stays inert. Vault data is untouched. If a channel switch would
 install a binary older than the vault's schema, startup is blocked
 with a clear error and the user is prompted to either reinstall the
 newer binary or pick a different vault. **Rollback is documented but

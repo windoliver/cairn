@@ -24,8 +24,12 @@ a stable CLI and a beta desktop on the same machine.
    re-download from GitHub Releases / etc.).
 
 If you have update checks disabled (`update.check: false` or
-`CAIRN_OFFLINE=1`), the channel switch still applies on next launch —
-but no outbound fetch runs until you re-enable checks.
+`CAIRN_OFFLINE=1`), only the target value in `update.channel` is
+persisted — no feed fetch runs and no binary change occurs. To get an
+actual channel switch in that mode, install manually from the chosen
+channel (e.g. switch the Homebrew tap and run `brew install`, or
+download the signed artifact from GitHub Releases) — the desktop
+updater stays inert.
 
 From the command line, the desktop config is at:
 
@@ -113,6 +117,8 @@ original signature on the transparency log.
 You can also verify manually using upstream tooling:
 
 Substitute the channel-appropriate workflow path and tag for beta or nightly artifacts — see [ADR 0005 §3.a](../../../design/decisions/0005-release-channels.md) for the trust-anchor table.
+
+The example below uses `--certificate-identity` (exact match) pinned to one version. To verify any stable release in one command, swap to `--certificate-identity-regexp '^https://github\.com/windoliver/cairn/\.github/workflows/release-stable\.yml@refs/tags/v[0-9]+\.[0-9]+\.[0-9]+$'`.
 
 ```bash
 # Cosign verification (any OS):

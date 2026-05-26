@@ -116,14 +116,23 @@ After any key rotation, update the documented fingerprint in
 
 ### Current trust anchors
 
-| Channel | Cosign identity | Cosign issuer |
+Each channel uses a fully-anchored **identity regex** with
+`--certificate-identity-regexp`. The patterns are disjoint — a beta
+artifact cannot satisfy the stable trust anchor and vice versa.
+
+| Channel | Cosign certificate identity regex (anchored) | Cosign issuer |
 |---|---|---|
-| stable | `https://github.com/windoliver/cairn/.github/workflows/release-stable.yml@refs/tags/v*` | `https://token.actions.githubusercontent.com` |
-| beta | `https://github.com/windoliver/cairn/.github/workflows/release-beta.yml@refs/tags/v*-{beta,rc}.*` | same |
-| nightly | `https://github.com/windoliver/cairn/.github/workflows/release-nightly.yml@refs/tags/nightly-*` | same |
+| stable | `^https://github\.com/windoliver/cairn/\.github/workflows/release-stable\.yml@refs/tags/v[0-9]+\.[0-9]+\.[0-9]+$` | `https://token.actions.githubusercontent.com` |
+| beta | `^https://github\.com/windoliver/cairn/\.github/workflows/release-beta\.yml@refs/tags/v[0-9]+\.[0-9]+\.[0-9]+-(beta|rc)\.[0-9]+$` | same |
+| nightly | `^https://github\.com/windoliver/cairn/\.github/workflows/release-nightly\.yml@refs/tags/nightly-[0-9]{8}$` | same |
 | GPG (AppImage) | _Fingerprint to be published in the v1.0 release notes._ | |
 
-These identities are frozen under [ADR 0005 §3.a](../../../design/decisions/0005-release-channels.md). Any change to the workflow path or ref pattern requires `cairn.update.v2`.
+Notes:
+- Stable's regex excludes pre-release suffixes (`-beta`, `-rc`, etc.).
+- Nightly's regex requires exactly 8 digits (`YYYYMMDD`).
+- Use `--certificate-identity-regexp` (not `--certificate-identity`) when matching any channel's identity regex.
+
+These identities are frozen under [ADR 0005 §3.a](../../../design/decisions/0005-release-channels.md). Any change to the workflow path or regex shape requires `cairn.update.v2`.
 
 ### Retire an aged-off nightly
 
