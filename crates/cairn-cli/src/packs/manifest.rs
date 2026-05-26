@@ -24,7 +24,7 @@ pub struct SubagentDecl {
     pub id: String,
     /// Pack-relative path to the subagent markdown file.
     pub path: String,
-    /// Bare verb names used by this subagent (e.g. `assemble_hot`).
+    /// MCP tool names used by this subagent (e.g. `assemble_hot`).
     /// Cross-validated against MCP TOOLS in Pass B.
     pub uses_mcp_tools: Vec<String>,
 }
@@ -32,6 +32,7 @@ pub struct SubagentDecl {
 /// Slash command kind.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
+#[non_exhaustive]
 pub enum CommandKind {
     /// Direct shell-out to `cairn <verb>`.
     VerbDirect,
@@ -70,7 +71,7 @@ pub struct PackManifest {
     pub schema: String,
     /// Pack id (path-safe token).
     pub pack_id: String,
-    /// Display name (path-safe token).
+    /// Human-readable display name; must satisfy the path-safe token predicate.
     pub name: String,
     /// Pack semver.
     pub version: String,
@@ -94,6 +95,7 @@ pub struct PackManifest {
 
 /// Pack-runtime error.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum PackError {
     /// Manifest validation failed.
     #[error("manifest invalid: {reason}")]
@@ -108,12 +110,12 @@ pub enum PackError {
         got: String,
     },
     /// Harness in manifest differs from requested harness.
-    #[error("harness mismatch: pack declares {want:?}, requested {got:?}")]
+    #[error("harness mismatch: pack declares `{want}`, requested `{got}`")]
     HarnessMismatch {
-        /// Declared harness.
-        want: Harness,
-        /// Requested harness.
-        got: Harness,
+        /// Declared harness wire string (e.g. `"claude-code"`).
+        want: String,
+        /// Requested harness wire string.
+        got: String,
     },
     /// Capability referenced by `requires_capabilities` not in advertise table.
     #[error("unknown capability `{cap}`")]
