@@ -100,7 +100,7 @@ jobs:
           xcrun stapler validate "$DMG"
 
       - name: Upload artifact for downstream jobs
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           # Name is consumed by smoke + upload-release; keep stable.
           # The artifact itself is unsigned on PR/non-tag builds; tag
