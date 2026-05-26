@@ -6,9 +6,10 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use cairn_connectors_core::{
     CONTRACT_VERSION, Connector, ConnectorCapabilities, ConnectorError, ConnectorEvent,
-    ConnectorManifest, ConnectorPlugin, ContractVersion, Identity, PollContext, PollOutcome,
-    VersionRange, WebhookContext, WebhookRequest,
+    ConnectorManifest, ConnectorPlugin, ContractVersion, CredentialHandle, Identity, PollContext,
+    PollOutcome, VersionRange, WebhookContext, WebhookRequest,
 };
+use sha2::{Digest as _, Sha256};
 use url::Url;
 
 use crate::MANIFEST_TOML;
@@ -20,12 +21,23 @@ use crate::resources::{
 };
 use crate::webhook::dispatch;
 
+/// Cached `GitHubAuth` with a fingerprint of the credential bytes that produced it.
+struct CachedAuth {
+    fingerprint: [u8; 32],
+    auth: Arc<GitHubAuth>,
+}
+
 /// Public top-level connector. Created once per `(repo, credentials)` pair.
 pub struct GitHubConnector {
     manifest: ConnectorManifest,
     sensor: Identity,
     repo: Repo,
     base_url: Url,
+    /// Cached `GitHubAuth` keyed by a fingerprint of the credential bytes.
+    /// `None` until the first poll constructs it. On poll, if the fingerprint
+    /// matches we reuse the cached auth (preserving App's installation-token
+    /// cache across polls); otherwise we rebuild when credentials rotate.
+    cached_auth: std::sync::Mutex<Option<CachedAuth>>,
 }
 
 impl GitHubConnector {
@@ -56,6 +68,7 @@ impl GitHubConnector {
                 name: name.into(),
             },
             base_url,
+            cached_auth: std::sync::Mutex::new(None),
         })
     }
 
@@ -65,6 +78,45 @@ impl GitHubConnector {
     fn resources(&self) -> [&dyn GhResource; 3] {
         [&IssuesResource, &PrsResource, &CommitsResource]
     }
+
+    /// Return a cached `Arc<GitHubAuth>`, rebuilding only when the credential
+    /// bytes have changed (detected via SHA-256 fingerprint). This preserves
+    /// the App variant's `ArcSwap<Option<InstallationToken>>` cache across
+    /// polls, avoiding a fresh JWT + installation-token round-trip every tick.
+    ///
+    /// Uses `std::sync::Mutex` — the lock is held only during a non-async
+    /// fingerprint comparison and optional `Arc` clone; we never await while
+    /// holding it.
+    fn resolve_auth(&self, handle: &CredentialHandle) -> Result<Arc<GitHubAuth>, ConnectorError> {
+        let fp = fingerprint(handle);
+        let mut guard = self
+            .cached_auth
+            .lock()
+            .expect("cached_auth mutex: not poisoned");
+        if let Some(c) = guard.as_ref()
+            && c.fingerprint == fp
+        {
+            return Ok(c.auth.clone());
+        }
+        // Credentials rotated or first call — rebuild.
+        let fresh = Arc::new(GitHubAuth::from_handle(handle)?);
+        *guard = Some(CachedAuth {
+            fingerprint: fp,
+            auth: fresh.clone(),
+        });
+        Ok(fresh)
+    }
+}
+
+/// SHA-256 fingerprint of the raw credential bytes. Used as a cache key so we
+/// detect credential rotation without storing the plaintext bytes.
+fn fingerprint(handle: &CredentialHandle) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(handle.bytes());
+    let out = hasher.finalize();
+    let mut fp = [0u8; 32];
+    fp.copy_from_slice(&out);
+    fp
 }
 
 #[async_trait]
@@ -95,7 +147,7 @@ impl Connector for GitHubConnector {
     }
 
     async fn poll(&self, cx: &PollContext) -> Result<PollOutcome, ConnectorError> {
-        let auth = Arc::new(GitHubAuth::from_handle(&cx.credentials)?);
+        let auth = self.resolve_auth(&cx.credentials)?;
         let client = GhClient::new(auth, self.base_url.clone());
 
         let mut state = CursorState::decode(cx.last_cursor.as_deref())?;
