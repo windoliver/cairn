@@ -14,7 +14,7 @@ scripts/beta-readiness.sh --quick
 scripts/beta-readiness.sh --full
 ```
 
-The script honors `CAIRN_BIN`, `CARGO_TARGET_DIR`, and `RUST_LOG`. Gates 9-15
+The script honors `CAIRN_BIN`, `CARGO_TARGET_DIR`, and `RUST_LOG`. Gates 9-16
 are manual and listed at the end of the script output.
 
 ## Gate categories
