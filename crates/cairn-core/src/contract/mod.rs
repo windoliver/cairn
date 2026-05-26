@@ -46,6 +46,7 @@ pub mod memory_store;
 pub mod metrics;
 pub mod registry;
 pub mod sensor_ingress;
+pub mod snapshot_artifact;
 pub mod source_resolver;
 pub mod version;
 pub mod workflow_jobs;
@@ -103,6 +104,9 @@ pub use mcp_server::{MCPServer, MCPServerCapabilities, MCPServerPlugin};
 pub use memory_store::{MemoryStore, MemoryStoreCapabilities, MemoryStorePlugin};
 pub use metrics::{CapturingMetricsSink, MetricsError, MetricsSink, NoopMetricsSink};
 pub use sensor_ingress::{SensorIngress, SensorIngressCapabilities, SensorIngressPlugin};
+pub use snapshot_artifact::{
+    BackupRegistry, MaterializedArtifact, SnapshotArtifactProducer, SnapshotMetadataProvider,
+};
 pub use source_resolver::{SourceResolver, SourceResolverError};
 pub use workflow_jobs::{DeadLetterRow, WorkflowJobsReader};
 pub use workflow_orchestrator::{
