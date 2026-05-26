@@ -5,3 +5,4 @@
 
 pub mod embed;
 pub mod manifest;
+pub mod merge;
