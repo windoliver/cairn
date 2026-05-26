@@ -13,6 +13,11 @@ audience = "operator"
 page = "usage/plugins.md"
 generated_reference = "reference/generated/plugins.md"
 
+[packages.cairn-connectors-github]
+audience = "operator"
+page = "usage/plugins.md"
+generated_reference = "reference/generated/plugins.md"
+
 [packages.cairn-embeddings-local]
 audience = "internal"
 page = ""

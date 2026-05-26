@@ -1,5 +1,6 @@
 ---
 source: crates/cairn-connectors-core/tests/manifest_validates.rs
+assertion_line: 18
 expression: m
 ---
 connector:
@@ -30,6 +31,7 @@ scopes:
 webhook:
   signature.algorithm: hmac-sha256
   signature.header: X-Fixture-Signature
+  signature.prefix: ~
   allowed_mimes:
     - application/json
   delivery_id_header: ~

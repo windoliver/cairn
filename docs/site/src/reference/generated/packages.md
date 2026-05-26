@@ -10,6 +10,7 @@ Generated from workspace package metadata and `docs-coverage.toml`.
 | `cairn-bench` | `internal` | - | - |
 | `cairn-cli` | `user` | `usage/cli.md` | `reference/generated/cli.md` |
 | `cairn-connectors-core` | `operator` | `usage/plugins.md` | `reference/generated/plugins.md` |
+| `cairn-connectors-github` | `operator` | `usage/plugins.md` | `reference/generated/plugins.md` |
 | `cairn-core` | `sdk-author` | `reference/rust-api.md` | - |
 | `cairn-desktop` | `operator` | `usage/cli.md` | - |
 | `cairn-embeddings-local` | `internal` | - | - |
