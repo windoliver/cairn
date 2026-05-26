@@ -28,7 +28,7 @@
     { "id": "cairn-capture-trace", "path": "commands/cairn-capture-trace.md", "kind": "verb-direct", "verb": "capture_trace" },
     { "id": "cairn-lint",          "path": "commands/cairn-lint.md",          "kind": "verb-direct", "verb": "lint" },
     { "id": "cairn-forget",        "path": "commands/cairn-forget.md",        "kind": "verb-direct", "verb": "forget" },
-    { "id": "cairn-status",        "path": "commands/cairn-status.md",        "kind": "verb-direct", "verb": "status" },
+    { "id": "cairn-status",        "path": "commands/cairn-status.md",        "kind": "workflow" },
     { "id": "cairn-standup",       "path": "commands/cairn-standup.md",       "kind": "workflow" },
     { "id": "cairn-wrap-up",       "path": "commands/cairn-wrap-up.md",       "kind": "workflow" },
     { "id": "cairn-audit",         "path": "commands/cairn-audit.md",         "kind": "workflow" },

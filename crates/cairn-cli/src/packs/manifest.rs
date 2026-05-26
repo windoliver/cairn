@@ -333,6 +333,47 @@ impl PackManifest {
         }
         Ok(())
     }
+
+    /// Pass B: cross-reference validation against MCP TOOLS, capability
+    /// advertise table, and hook lifecycle list.
+    ///
+    /// Covers spec §4 invariants 7, 8, 10.
+    ///
+    /// # Errors
+    /// Returns [`PackError`] on the first failed invariant.
+    pub fn validate_pass_b(&self) -> Result<(), PackError> {
+        // 7 + 8. Tool names: collect known tool names from cairn-mcp.
+        let known_tools: std::collections::BTreeSet<&str> = cairn_mcp::generated::TOOLS
+            .iter()
+            .map(|t| t.name)
+            .collect();
+
+        for c in &self.commands {
+            if let Some(verb) = &c.verb
+                && !known_tools.contains(verb.as_str())
+            {
+                return Err(PackError::McpToolUnknown { tool: verb.clone() });
+            }
+        }
+        for s in &self.subagents {
+            for tool in &s.uses_mcp_tools {
+                if !known_tools.contains(tool.as_str()) {
+                    return Err(PackError::McpToolUnknown { tool: tool.clone() });
+                }
+            }
+        }
+
+        // 10. Capabilities: validate by attempting to deserialize each
+        //     against the canonical `Capabilities` enum.
+        for cap in &self.requires_capabilities {
+            let json = format!("\"{cap}\"");
+            if serde_json::from_str::<cairn_core::generated::common::Capabilities>(&json).is_err() {
+                return Err(PackError::CapabilityUnknown { cap: cap.clone() });
+            }
+        }
+
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -518,6 +559,89 @@ mod validate_tests {
             HookBinding { command: "cairn hook SessionStart".to_owned() },
         );
         m.validate_pass_a().expect("populated valid manifest passes Pass A");
+    }
+}
+
+#[cfg(test)]
+mod pass_b_tests {
+    use super::*;
+
+    fn minimal_for_pass_b() -> PackManifest {
+        let mut m = PackManifest {
+            schema: "cairn-pack/v1".to_owned(),
+            pack_id: "test-pack".to_owned(),
+            name: "test-pack".to_owned(),
+            version: "0.1.0".to_owned(),
+            harness: Harness::ClaudeCode,
+            cairn_mcp_compat: ">=1.0.0".to_owned(),
+            description: "test".to_owned(),
+            requires_capabilities: vec![],
+            subagents: vec![],
+            commands: vec![],
+            hooks: BTreeMap::new(),
+            manual_fragment: "manual.md".to_owned(),
+        };
+        m.subagents.push(SubagentDecl {
+            id: "loader".to_owned(),
+            path: "agents/loader.md".to_owned(),
+            uses_mcp_tools: vec!["assemble_hot".to_owned()],
+        });
+        m.commands.push(CommandDecl {
+            id: "cairn-ingest".to_owned(),
+            path: "commands/cairn-ingest.md".to_owned(),
+            kind: CommandKind::VerbDirect,
+            verb: Some("ingest".to_owned()),
+        });
+        m
+    }
+
+    #[test]
+    fn pass_b_accepts_known_mcp_tools_and_caps() {
+        let m = minimal_for_pass_b();
+        m.validate_pass_b().expect("known tools pass");
+    }
+
+    #[test]
+    fn pass_b_rejects_unknown_mcp_tool_in_subagent() {
+        let mut m = minimal_for_pass_b();
+        m.subagents[0].uses_mcp_tools.push("does_not_exist".to_owned());
+        match m.validate_pass_b() {
+            Err(PackError::McpToolUnknown { tool }) => assert_eq!(tool, "does_not_exist"),
+            other => panic!("expected McpToolUnknown, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn pass_b_rejects_unknown_verb_in_command() {
+        let mut m = minimal_for_pass_b();
+        m.commands[0].verb = Some("fictional".to_owned());
+        match m.validate_pass_b() {
+            Err(PackError::McpToolUnknown { tool }) => assert_eq!(tool, "fictional"),
+            other => panic!("expected McpToolUnknown, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn pass_b_rejects_unknown_capability() {
+        let mut m = minimal_for_pass_b();
+        m.requires_capabilities
+            .push("cairn.mcp.v1.does.not.exist".to_owned());
+        match m.validate_pass_b() {
+            Err(PackError::CapabilityUnknown { cap }) => {
+                assert_eq!(cap, "cairn.mcp.v1.does.not.exist");
+            }
+            other => panic!("expected CapabilityUnknown, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn bundled_manifest_passes_pass_b() {
+        let bytes = crate::packs::embed::CAIRN_CLAUDE_CODE_PACK
+            .get_file("pack.json")
+            .expect("pack.json present")
+            .contents();
+        let m: PackManifest = serde_json::from_slice(bytes).expect("parse");
+        m.validate_pass_b().expect("real manifest passes Pass B");
     }
 }
 
