@@ -361,27 +361,27 @@ expression: json
     {
       "cases": [
         {
-          "id": "pack_conformance_case",
+          "id": "pack_json_parses",
           "status": "ok",
           "tier": 1
         },
         {
-          "id": "pack_conformance_case",
+          "id": "pack_pass_a",
           "status": "ok",
           "tier": 1
         },
         {
-          "id": "pack_conformance_case",
+          "id": "pack_pass_b",
           "status": "ok",
           "tier": 1
         },
         {
-          "id": "pack_conformance_case",
+          "id": "pack_paths_present",
           "status": "ok",
           "tier": 1
         },
         {
-          "id": "pack_conformance_case",
+          "id": "pack_install_round_trip",
           "status": "ok",
           "tier": 2
         }

@@ -31,7 +31,7 @@ Reference Claude Code skill-pack for Cairn — six subagents, thirteen slash com
 | `cairn-capture-trace` | verb-direct | capture_trace |
 | `cairn-lint` | verb-direct | lint |
 | `cairn-forget` | verb-direct | forget |
-| `cairn-status` | workflow | — |
+| `cairn-status` | verb-direct | status |
 | `cairn-standup` | workflow | — |
 | `cairn-wrap-up` | workflow | — |
 | `cairn-audit` | workflow | — |

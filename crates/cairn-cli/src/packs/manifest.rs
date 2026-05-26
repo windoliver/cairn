@@ -371,9 +371,16 @@ impl PackManifest {
     /// # Errors
     /// Returns [`PackError`] on the first failed invariant.
     pub fn validate_pass_b(&self) -> Result<(), PackError> {
-        // 7 + 8. Tool names: collect known tool names from cairn-mcp.
-        let known_tools: std::collections::BTreeSet<&str> =
+        // 7 + 8. Tool names: TOOLS + PRELUDE_TOOLS + CLI-only verbs.
+        let mut known_tools: std::collections::BTreeSet<&str> =
             cairn_mcp::generated::TOOLS.iter().map(|t| t.name).collect();
+        for t in cairn_mcp::prelude_tools::PRELUDE_TOOLS {
+            known_tools.insert(t.name);
+        }
+        // CLI-only verbs: served by cairn-cli's clap dispatch, not exposed
+        // as MCP tools. Verb-direct slash commands referencing these are
+        // valid shell-outs.
+        known_tools.insert("status");
 
         for c in &self.commands {
             if let Some(verb) = &c.verb

@@ -143,10 +143,8 @@ pub fn run(registry: &PluginRegistry) -> VerifyReport {
                     CaseStatus::Failed { message: reason }
                 }
             };
-            // CaseOutcome.id is &'static str; use a stable sentinel —
-            // the per-case human name is surfaced in the failure message.
             cases.push(CaseOutcome {
-                id: "pack_conformance_case",
+                id: o.id,
                 tier,
                 status,
             });

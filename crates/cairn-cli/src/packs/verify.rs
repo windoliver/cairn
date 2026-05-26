@@ -25,7 +25,9 @@ pub enum Tier {
 /// Outcome of a single case.
 #[derive(Debug, Clone, Serialize)]
 pub struct CaseOutcome {
-    /// Case label.
+    /// Stable static id (`snake_case`; safe to embed in JSON wire output).
+    pub id: &'static str,
+    /// Case label (human-readable).
     pub name: String,
     /// Tier.
     pub tier: Tier,
@@ -44,6 +46,7 @@ pub fn run_pack_conformance(pack_id: &str) -> Vec<CaseOutcome> {
     let mut out = Vec::new();
     if pack_id != "cairn-claude-code" {
         out.push(CaseOutcome {
+            id: "pack_unknown",
             name: format!("pack `{pack_id}` is bundled"),
             tier: Tier::One,
             status: Err(format!("unknown bundled pack `{pack_id}`")),
@@ -63,6 +66,7 @@ pub fn run_pack_conformance(pack_id: &str) -> Vec<CaseOutcome> {
         Ok(m) => m,
         Err(e) => {
             out.push(CaseOutcome {
+                id: "pack_json_parses",
                 name: "pack.json parses".to_owned(),
                 tier: Tier::One,
                 status: Err(format!("{e:#}")),
@@ -71,22 +75,26 @@ pub fn run_pack_conformance(pack_id: &str) -> Vec<CaseOutcome> {
         }
     };
     out.push(CaseOutcome {
+        id: "pack_json_parses",
         name: "pack.json parses".to_owned(),
         tier: Tier::One,
         status: Ok(()),
     });
 
     out.push(CaseOutcome {
+        id: "pack_pass_a",
         name: "Pass A structural validation".to_owned(),
         tier: Tier::One,
         status: manifest.validate_pass_a().map_err(|e| format!("{e:#}")),
     });
     out.push(CaseOutcome {
+        id: "pack_pass_b",
         name: "Pass B cross-reference validation".to_owned(),
         tier: Tier::One,
         status: manifest.validate_pass_b().map_err(|e| format!("{e:#}")),
     });
     out.push(CaseOutcome {
+        id: "pack_paths_present",
         name: "all referenced paths present".to_owned(),
         tier: Tier::One,
         status: manifest
@@ -121,6 +129,7 @@ pub fn run_pack_conformance(pack_id: &str) -> Vec<CaseOutcome> {
         Ok(())
     };
     out.push(CaseOutcome {
+        id: "pack_install_round_trip",
         name: "install round-trip is idempotent".to_owned(),
         tier: Tier::Two,
         status: case().map_err(|e| format!("{e:#}")),
