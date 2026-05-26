@@ -42,8 +42,10 @@ async function pollHealth(address, timeoutMs = 15_000) {
 }
 
 // Sidecar binds to a fixed port (4000) so preload's hardcoded apiBaseUrl works.
-// Issue #XXX (file follow-up) will introduce IPC port discovery to support ephemeral binding.
-async function createWindow() {
+// Sidecar binds an ephemeral port; the discovered address is forwarded
+// to the renderer via webPreferences.additionalArguments so preload can
+// pick it up synchronously without an extra IPC roundtrip per fetch.
+async function createWindow(apiBase) {
   const win = new BrowserWindow({
     width: 1320,
     height: 860,
@@ -53,6 +55,7 @@ async function createWindow() {
       preload: join(__dirname, "preload.mjs"),
       contextIsolation: true,
       nodeIntegration: false,
+      additionalArguments: [`--cairn-api-base=${apiBase}`],
     },
   });
   if (process.env.NODE_ENV === "development") {
@@ -255,49 +258,72 @@ async function main() {
   }
 
   // Post-launch crash recovery: if the sidecar dies after we open the
-  // window, attempt one silent restart; on a second crash, surface a
-  // blocking dialog with the log path. Quitting via app.quit suppresses
-  // restart (the exit was intentional).
+  // window, attempt one silent restart with a fresh /health poll; on a
+  // second crash OR an unhealthy restart, surface a blocking dialog
+  // with the log path. Quitting via app.quit suppresses restart (the
+  // exit was intentional).
   let intentionalShutdown = false;
   app.on("before-quit", () => {
     intentionalShutdown = true;
   });
   let restartAttempted = false;
+  let openWindow = null;
+  function showCrashDialogAndExit(code, signal, why) {
+    dialog.showMessageBoxSync({
+      type: "error",
+      title: "Cairn backend stopped",
+      message:
+        `The sidecar exited unexpectedly (code=${code}, signal=${signal}).` +
+        (why ? ` ${why}` : ""),
+      detail: `Log: ${LOG_PATH}`,
+      buttons: ["Quit"],
+    });
+    app.exit(1);
+  }
   function wireCrashHandler(h) {
     h.onExit(async (code, signal) => {
       if (intentionalShutdown) return;
-      if (!restartAttempted) {
-        restartAttempted = true;
-        try {
-          const next = await spawnSidecar({
-            binary: sidecarBinary(),
-            vault: vaultPath,
-            logPath: LOG_PATH,
-          });
-          handle = next;
-          wireCrashHandler(next);
-          return;
-        } catch (err) {
-          // Restart failed; fall through to dialog.
-          console.error("sidecar restart failed:", err);
-        }
+      if (restartAttempted) {
+        showCrashDialogAndExit(code, signal, "Automatic restart failed.");
+        return;
       }
-      const choice = dialog.showMessageBoxSync({
-        type: "error",
-        title: "Cairn backend stopped",
-        message:
-          `The sidecar exited unexpectedly (code=${code}, signal=${signal}).` +
-          (restartAttempted ? " Automatic restart failed." : ""),
-        detail: `Log: ${LOG_PATH}`,
-        buttons: ["Quit"],
-      });
-      void choice;
-      app.exit(1);
+      restartAttempted = true;
+      let next;
+      try {
+        next = await spawnSidecar({
+          binary: sidecarBinary(),
+          vault: vaultPath,
+          logPath: LOG_PATH,
+        });
+      } catch (err) {
+        console.error("sidecar restart spawn failed:", err);
+        showCrashDialogAndExit(code, signal, "Restart spawn failed.");
+        return;
+      }
+      const ok = await pollHealth(next.address, 15_000);
+      if (!ok) {
+        await next.kill();
+        showCrashDialogAndExit(
+          code,
+          signal,
+          "Restart bound a port but /health did not respond.",
+        );
+        return;
+      }
+      handle = next;
+      wireCrashHandler(next);
+      // Tell the renderer the address changed so it can re-target fetch.
+      if (openWindow && !openWindow.isDestroyed()) {
+        openWindow.webContents.send(
+          "cairn:api-base",
+          `http://${next.address}`,
+        );
+      }
     });
   }
   wireCrashHandler(handle);
 
-  await createWindow();
+  openWindow = await createWindow(`http://${handle.address}`);
 }
 
 app.whenReady().then(() => {

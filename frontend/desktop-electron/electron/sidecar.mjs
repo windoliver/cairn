@@ -49,7 +49,12 @@ export async function spawnSidecar(opts) {
       [
         "serve",
         "--port",
-        String(opts.port ?? 4000),
+        // Default to ephemeral (port 0) so two Cairn instances or a
+        // stale sidecar on port 4000 don't cause a hard launch failure.
+        // The discovered address flows back via the stdout first-line
+        // protocol and is injected into the renderer through preload.
+        // Tests can pin a port via opts.port for deterministic asserts.
+        String(opts.port ?? 0),
         "--vault",
         opts.vault,
         // The alpha doesn't bind --vault to a real repository; serve refuses
