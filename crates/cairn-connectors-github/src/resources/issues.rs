@@ -150,16 +150,31 @@ impl GhResource for IssuesResource {
             // Record the event IDs emitted at `max_updated` so the next poll can
             // skip re-emitting them (the 1-second overlap re-serves them, but in a
             // no-update steady state that causes unnecessary churn).
-            let new_boundary_ids: Vec<String> = if let Some(m) = max_updated {
-                events_with_meta
-                    .iter()
-                    .filter(|(_, d)| *d == m)
-                    .map(|(e, _)| e.event_id.as_str().to_owned())
-                    .collect()
-            } else {
-                // No new events this tick — carry forward existing boundary IDs so
-                // the skip remains active.
-                sub_cursor.pending_boundary_event_ids.clone()
+            let new_boundary_ids: Vec<String> = match max_updated {
+                Some(m) => {
+                    let ids_at_max: Vec<String> = events_with_meta
+                        .iter()
+                        .filter(|(_, d)| *d == m)
+                        .map(|(e, _)| e.event_id.as_str().to_owned())
+                        .collect();
+                    if ids_at_max.is_empty() {
+                        // No NEW events were emitted at the high-water timestamp.
+                        // This happens in the all-skipped steady-state: the overlap
+                        // rewind re-served only items in the boundary skip set, so
+                        // `events_with_meta` is empty.  Carry the prior IDs forward
+                        // to keep suppressing them on the next poll.
+                        // It is also safe for the "boundary advanced" case: prior IDs
+                        // refer to a timestamp ≤ the new `since`, so they won't appear
+                        // in future polls and carrying them forward is harmless.
+                        sub_cursor.pending_boundary_event_ids.clone()
+                    } else {
+                        ids_at_max
+                    }
+                }
+                None => {
+                    // No rows at all this tick — carry forward so the skip stays active.
+                    sub_cursor.pending_boundary_event_ids.clone()
+                }
             };
             ResourceCursor {
                 since: max_updated
@@ -803,6 +818,104 @@ mod tests {
             result.next_cursor.since,
             Some(expected_since),
             "cursor must advance to max_updated - 1s even when all rows are PRs"
+        );
+    }
+
+    /// Fix 2 (round-8): steady-state — when three consecutive polls all return the
+    /// same boundary issue (no new updates), the skip set must persist across ALL
+    /// three polls so none of them re-emit.
+    #[tokio::test]
+    async fn issues_three_polls_no_new_updates_emits_each_issue_once() {
+        use cairn_connectors_core::CredentialHandle;
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let ts = "2026-05-25T12:00:00Z";
+
+        // All three polls return the identical boundary issue.
+        Mock::given(method("GET"))
+            .and(path("/repos/o/r/issues"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!([{
+                    "id": 1, "number": 1,
+                    "title": "Steady-state issue",
+                    "body": null, "state": "open",
+                    "user": {"login": "alice"},
+                    "created_at": ts,
+                    "updated_at": ts,
+                    "html_url": "https://github.com/o/r/issues/1"
+                }])),
+            )
+            .mount(&server)
+            .await;
+
+        let handle = CredentialHandle::from_bytes(
+            serde_json::json!({"kind": "pat", "token": "t"})
+                .to_string()
+                .into_bytes(),
+        );
+        let auth =
+            std::sync::Arc::new(crate::auth::GitHubAuth::from_handle(&handle).expect("auth"));
+        let base = url::Url::parse(&server.uri()).unwrap();
+        let repo = Repo {
+            owner: "o".into(),
+            name: "r".into(),
+        };
+
+        // Poll 1: emits 1 event (the issue), sets boundary_event_ids.
+        let r1 = IssuesResource
+            .poll(
+                &GhClient::new(auth.clone(), base.clone()),
+                &repo,
+                &ResourceCursor {
+                    page: Some(1),
+                    ..Default::default()
+                },
+                50,
+            )
+            .await
+            .expect("poll 1");
+        assert_eq!(r1.events.len(), 1, "first poll emits 1 event");
+        assert!(
+            !r1.next_cursor.pending_boundary_event_ids.is_empty(),
+            "boundary IDs must be recorded after poll 1"
+        );
+
+        // Poll 2: steady state — boundary skip must suppress re-emit.
+        let r2 = IssuesResource
+            .poll(
+                &GhClient::new(auth.clone(), base.clone()),
+                &repo,
+                &r1.next_cursor,
+                50,
+            )
+            .await
+            .expect("poll 2");
+        assert_eq!(
+            r2.events.len(),
+            0,
+            "poll 2 must skip already-emitted boundary issue"
+        );
+        assert!(
+            !r2.next_cursor.pending_boundary_event_ids.is_empty(),
+            "boundary IDs must still be in cursor after poll 2 (Fix 2, round-8)"
+        );
+
+        // Poll 3: steady state continues — boundary IDs must STILL be present.
+        let r3 = IssuesResource
+            .poll(
+                &GhClient::new(auth.clone(), base.clone()),
+                &repo,
+                &r2.next_cursor,
+                50,
+            )
+            .await
+            .expect("poll 3");
+        assert_eq!(
+            r3.events.len(),
+            0,
+            "poll 3 must continue skipping (Fix 2, round-8)"
         );
     }
 
