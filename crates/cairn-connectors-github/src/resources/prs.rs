@@ -107,6 +107,11 @@ impl GhResource for PrsResource {
         // from `pending_since` so exact-full-page windows accumulate correctly
         // across multiple poll calls before exhaustion.
         let mut max_updated = sub_cursor.pending_since.or(sub_cursor.since);
+        // Track whether we hit the stale break (updated_at <= since) — even on a
+        // full page this means all remaining pages are older, so we should treat
+        // this as window exhaustion and NOT advance page to N+1 (which would
+        // request older rows instead of re-starting from the head on the next poll).
+        let mut stale_break_hit = false;
         for dto in &prs {
             // Always advance the high-water timestamp for every returned row so
             // the cursor advances even for rows we won't emit.
@@ -119,6 +124,7 @@ impl GhResource for PrsResource {
             if let Some(since) = sub_cursor.since
                 && dto.updated_at <= since
             {
+                stale_break_hit = true;
                 break;
             }
             let event = pr_to_event(dto, repo, None);
@@ -133,7 +139,12 @@ impl GhResource for PrsResource {
 
         let events: Vec<ConnectorEvent> = events_with_meta.iter().map(|(e, _)| e.clone()).collect();
 
-        let exhausted = u32::try_from(prs.len()).unwrap_or(u32::MAX) < per_page;
+        let raw_exhausted = u32::try_from(prs.len()).unwrap_or(u32::MAX) < per_page;
+        // A stale break means all subsequent pages are also stale — treat it as
+        // window exhaustion so the cursor commits the high-water and resets to
+        // page=1 instead of advancing to page N+1 (which would walk older history
+        // and miss fresh updates at the head on the next poll).
+        let exhausted = stale_break_hit || raw_exhausted;
         // Only advance `since` when the current window is exhausted (partial
         // page).  Keeping `since` stable while paginating a full window prevents
         // the result set from shifting mid-pagination.  `pending_since` carries
@@ -791,6 +802,148 @@ mod tests {
         assert!(numbers.contains(&1), "PR_A (#1) must be emitted");
         assert!(numbers.contains(&2), "PR_B (#2) must be emitted");
         assert!(!numbers.contains(&3), "PR_C (#3) must not be emitted");
+    }
+
+    /// Fix 1 (round-7): when a full page contains a stale row, the stale break
+    /// must trigger window exhaustion so the cursor resets to page=1 rather than
+    /// advancing to page=2 (which would walk older history and miss fresh updates).
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)] // Wiremock fixture setup is verbose by nature.
+    async fn prs_full_page_with_stale_row_resets_to_page_1() {
+        use cairn_connectors_core::CredentialHandle;
+        use wiremock::matchers::{method, path, query_param};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+
+        // Five PRs returned newest-first (per_page=5 for simplicity).
+        // PR #1 at 2026-06-01 (newer than since=2026-05-15).
+        // PRs #2–#5 at 2026-05-01 (older than since=2026-05-15) — stale break fires on PR #2.
+        // The page is full (5 items == per_page), so without the stale_break_hit fix
+        // raw_exhausted would be false and page would advance to 2.
+        let prs = serde_json::json!([
+            {
+                "id": 1, "number": 1,
+                "title": "PR_fresh",
+                "body": null, "state": "open",
+                "user": {"login": "alice"},
+                "updated_at": "2026-06-01T00:00:00Z",
+                "html_url": "https://github.com/o/r/pull/1",
+                "head": {"sha": "aaa", "ref": "feat-a"},
+                "base": {"sha": "000", "ref": "main"},
+                "draft": false
+            },
+            {
+                "id": 2, "number": 2,
+                "title": "PR_stale_a",
+                "body": null, "state": "open",
+                "user": {"login": "bob"},
+                "updated_at": "2026-05-01T00:00:00Z",
+                "html_url": "https://github.com/o/r/pull/2",
+                "head": {"sha": "bbb", "ref": "feat-b"},
+                "base": {"sha": "000", "ref": "main"},
+                "draft": false
+            },
+            {
+                "id": 3, "number": 3,
+                "title": "PR_stale_b",
+                "body": null, "state": "open",
+                "user": {"login": "carol"},
+                "updated_at": "2026-05-01T00:00:00Z",
+                "html_url": "https://github.com/o/r/pull/3",
+                "head": {"sha": "ccc", "ref": "feat-c"},
+                "base": {"sha": "000", "ref": "main"},
+                "draft": false
+            },
+            {
+                "id": 4, "number": 4,
+                "title": "PR_stale_c",
+                "body": null, "state": "open",
+                "user": {"login": "dave"},
+                "updated_at": "2026-05-01T00:00:00Z",
+                "html_url": "https://github.com/o/r/pull/4",
+                "head": {"sha": "ddd", "ref": "feat-d"},
+                "base": {"sha": "000", "ref": "main"},
+                "draft": false
+            },
+            {
+                "id": 5, "number": 5,
+                "title": "PR_stale_d",
+                "body": null, "state": "open",
+                "user": {"login": "eve"},
+                "updated_at": "2026-05-01T00:00:00Z",
+                "html_url": "https://github.com/o/r/pull/5",
+                "head": {"sha": "eee", "ref": "feat-e"},
+                "base": {"sha": "000", "ref": "main"},
+                "draft": false
+            }
+        ]);
+
+        Mock::given(method("GET"))
+            .and(path("/repos/o/r/pulls"))
+            .and(query_param("page", "1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&prs))
+            .mount(&server)
+            .await;
+
+        let handle = CredentialHandle::from_bytes(
+            serde_json::json!({"kind": "pat", "token": "t"})
+                .to_string()
+                .into_bytes(),
+        );
+        let auth =
+            std::sync::Arc::new(crate::auth::GitHubAuth::from_handle(&handle).expect("auth"));
+        let client = GhClient::new(auth, url::Url::parse(&server.uri()).unwrap());
+
+        let since = chrono::DateTime::parse_from_rfc3339("2026-05-15T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+
+        let result = PrsResource
+            .poll(
+                &client,
+                &Repo {
+                    owner: "o".into(),
+                    name: "r".into(),
+                },
+                &ResourceCursor {
+                    since: Some(since),
+                    page: Some(1),
+                    ..Default::default()
+                },
+                5, // per_page=5 so 5 PRs == full page
+            )
+            .await
+            .expect("poll");
+
+        // Only PR #1 (fresh) emitted; stale break fires on PR #2.
+        assert_eq!(result.events.len(), 1, "only the fresh PR must be emitted");
+        let emitted_number = match &result.events[0].payload {
+            cairn_connectors_core::ConnectorPayload::Json { body, .. } => body
+                .get("number")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0),
+            _ => 0,
+        };
+        assert_eq!(emitted_number, 1, "emitted event must be PR #1");
+
+        // Cursor must reset to page=1, NOT advance to page=2.
+        assert_eq!(
+            result.next_cursor.page,
+            Some(1),
+            "stale_break_hit must trigger exhaustion and reset page to 1, not 2"
+        );
+
+        // `since` must have advanced past PR #1's timestamp.
+        assert!(
+            result.next_cursor.since.is_some(),
+            "since must be set after stale-break exhaustion"
+        );
+        let new_since = result.next_cursor.since.unwrap();
+        assert!(
+            new_since > since,
+            "since must advance beyond the original cursor since"
+        );
     }
 
     /// Fix 2 (round-5): in steady state (no new PRs), the boundary PR must NOT
