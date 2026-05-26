@@ -54,7 +54,7 @@ Channel pinning lives in two places:
 - **CLI:** nothing on disk. Channel = whichever artifact the user
   installed. `brew upgrade cairn` walks the stable tap;
   `brew tap cairn/beta && brew upgrade cairn` walks beta.
-  `cargo install cairn` is always stable unless `--version` overrides.
+  `cargo install --locked --bin cairn cairn-cli` is always stable.
 - **Desktop:** `desktop-config.json` `update.channel` field (under the
   desktop app's app-support dir per OS — `~/Library/Application
   Support/cairn/` on macOS, mirrors the `vault_registry.json` location

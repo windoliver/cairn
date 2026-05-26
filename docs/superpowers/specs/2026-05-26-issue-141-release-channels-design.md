@@ -84,8 +84,8 @@ table-driven off that one string.
 
 - **CLI:** nothing on disk. Channel = whichever artifact the user
   installed. `brew upgrade cairn` walks the stable tap;
-  `brew tap cairn/beta && brew upgrade cairn` walks beta. `cargo install
-  cairn` is always stable unless `--version` overrides.
+  `brew tap cairn/beta && brew upgrade cairn` walks beta.
+  `cargo install --locked --bin cairn cairn-cli` is always stable.
 - **Desktop:** `desktop-config.json` (under the desktop app's app-support dir per OS — `~/Library/Application Support/cairn/` on macOS, mirrors the `vault_registry.json` location from #139) `update.channel` field, default
   `stable`. Runtime channel switch triggers a one-shot fetch of the chosen
   feed; the change applies on next launch.

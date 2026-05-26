@@ -94,7 +94,7 @@ Channel pinning lives in two places:
 - **CLI:** nothing on disk. Channel = whichever artifact the user
   installed. `brew upgrade cairn` walks the stable tap;
   `brew tap cairn/beta && brew upgrade cairn` walks beta.
-  `cargo install cairn` is always stable unless `--version` overrides.
+  `cargo install --locked --bin cairn cairn-cli` is always stable.
 - **Desktop:** `desktop-config.json` `update.channel` field (under the
   desktop app's app-support dir per OS — `~/Library/Application
   Support/cairn/` on macOS, mirrors the `vault_registry.json` location
@@ -699,8 +699,8 @@ much stability and risk you want.
 
 | Channel | Who it's for | How you get it |
 |---|---|---|
-| **stable** (default) | Everyone. Tagged releases only. | `brew install cairn` · `cargo install cairn` · DMG / MSI / AppImage / deb from [GitHub Releases](https://github.com/windoliver/cairn/releases) |
-| **beta** | Users who want the next release with at least one tagged checkpoint of stability. | `brew tap cairn/beta && brew install cairn` · GitHub Pre-Releases · `cargo install cairn --version vX.Y.Z-beta.N` |
+| **stable** (default) | Everyone. Tagged releases only. | `brew install cairn` · `cargo install --locked --bin cairn cairn-cli` · DMG / MSI / AppImage / deb from [GitHub Releases](https://github.com/windoliver/cairn/releases) |
+| **beta** | Users who want the next release with at least one tagged checkpoint of stability. | `brew tap cairn/beta && brew install cairn` · GitHub Pre-Releases (no crates.io publish — pre-release versions not pushed to crates.io) |
 | **nightly** | Developers and dogfooders. No semver promise. Aged off after 30 days. | GitHub Releases "Nightly" section only — no package-manager publish. |
 
 ## Switching channels (desktop)
@@ -737,9 +737,9 @@ brew uninstall cairn
 brew untap cairn/beta
 brew install cairn
 
-# Stable → specific beta (cargo):
-cargo install cairn --force --version vX.Y.Z-beta.N
 ```
+
+> **Note:** Beta is not published to crates.io — pre-release builds are available only via Homebrew beta tap or GitHub Pre-Releases.
 
 Your vault is **not** touched by any of these — channel switches are
 binary-only.
@@ -835,8 +835,8 @@ Brew, cargo, winget, and scoop own their own update cadence:
 - `brew upgrade cairn` — pulls the latest from the tap you have
   installed (stable tap by default, beta tap if you ran `brew tap
   cairn/beta`).
-- `cargo install cairn --force` — pulls the latest non-pre-release
-  from crates.io. Pin a pre-release with `--version`.
+- `cargo install --locked --bin cairn cairn-cli --force` — pulls the
+  latest stable release from crates.io (beta not published there).
 - `winget upgrade cairn` / `scoop update cairn` — both walk the
   upstream feed.
 
@@ -1269,10 +1269,10 @@ Codifies the v1.0 release-channel + auto-update policy for issue #141
 
 - **ADR 0005** `docs/design/decisions/0005-release-channels.md` —
   stable / beta / nightly channel matrix, per-OS update mechanism
-  (electron-updater + Sparkle / Squirrel / AppImageUpdate + Cosign
+  (electron-updater native YAML feeds + AppImageUpdate + Cosign
   uniform layer), signature scheme, privacy / offline contract (off by
-  default, `CAIRN_OFFLINE` wins), channel migration (forward-only),
-  rollback (manual; auto deferred to v1.1).
+  default, `CAIRN_OFFLINE` wins), channel migration (bidirectional;
+  vault-schema downgrade blocked), rollback (manual; auto deferred to v1.1).
 - **Brief §16.b** new subsection summarizing the policy and pointing
   at ADR 0005.
 - **`docs/site/src/maintainers/release-channels.md`** — operator
@@ -1292,9 +1292,9 @@ Codifies the v1.0 release-channel + auto-update policy for issue #141
 
 No code, no schema, no CI workflow YAML, no Cargo touches.
 Implementation of signing infrastructure, electron-updater wiring,
-`cairn release verify` CLI, scheduled nightly cuts, and Sparkle
-feed publishing is tracked as named follow-up issues under parent
-epic #32.
+`cairn release verify` CLI, scheduled nightly cuts, and
+electron-updater YAML feed publishing is tracked as named follow-up
+issues under parent epic #32.
 
 ## Brief sections
 
