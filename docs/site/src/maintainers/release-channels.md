@@ -74,7 +74,7 @@ signed and uploaded, it stays for audit. Steps:
 
 For users on a broken release who cannot upgrade automatically:
 `cairn release rollback --to v1.0.2` (the recipe shipped with the
-verifier CLI) downloads + verifies + dropps the prior signed artifact
+verifier CLI) downloads + verifies + drops the prior signed artifact
 in place. Vault is untouched.
 
 ### Rotate signing keys
