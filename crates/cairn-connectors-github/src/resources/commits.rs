@@ -134,8 +134,7 @@ impl GhResource for CommitsResource {
         let mut budget_remaining = budget;
         // `oldest_walked_date` tracks the date of the oldest commit seen so far.
         // Used as the `until=` continuation parameter on resumption.
-        let mut oldest_walked_date: Option<DateTime<Utc>> = sub_cursor.pending_until_date;
-        let mut pages_walked = 0_u32;
+        let mut oldest_walked_date: Option<DateTime<Utc>> = None;
         // Track (sha, date) for every commit emitted this tick so we can build the
         // boundary SHA set for the next continuation.
         let mut walked: Vec<(String, DateTime<Utc>)> = Vec::new();
@@ -144,61 +143,49 @@ impl GhResource for CommitsResource {
         let boundary_filter: std::collections::BTreeSet<String> =
             sub_cursor.pending_boundary_shas.iter().cloned().collect();
         // Track SHAs emitted within this poll to dedupe same-timestamp commits
-        // across pages within a single tick. This is necessary when the `until=`
-        // date filter returns the same boundary items at the start of each page.
+        // across pages within a single tick.
         let mut in_poll_seen: std::collections::BTreeSet<String> =
             std::collections::BTreeSet::new();
-        // Whether this poll is continuing under a fixed `until=` bound.
-        // If so, we send both `until=` and `page=` so the result set is stable.
-        let in_continuation = sub_cursor.pending_until_date.is_some();
 
+        // Two-mode pagination: never mix `until=` with an unfiltered page counter.
+        //
+        // - Fresh walk  (pending_until_date == None): no `until=` param; walk
+        //   page=1, 2, 3, … of the unfiltered result set within this poll.
+        // - Continuation (pending_until_date == Some): always send `until=<date>`;
+        //   walk page=<pending_until_page>, page+1, page+2, … within this poll.
+        //   The `until=` value is FIXED for the entire continuation and never
+        //   changes mid-poll.  Switching fresh→continuation only happens BETWEEN
+        //   polls (at the page-cap boundary), not within a poll.
+        let in_continuation = sub_cursor.pending_until_date.is_some();
+        // The fixed `until=` date for the whole continuation (None on fresh walks).
+        let cont_until: Option<DateTime<Utc>> = sub_cursor.pending_until_date;
+        // Page number at which this poll starts.
+        let start_page: u32 = if in_continuation {
+            sub_cursor.pending_until_page.unwrap_or(1)
+        } else {
+            1
+        };
+
+        let mut pages_walked = 0_u32;
         loop {
-            if pages_walked >= MAX_PAGES_PER_POLL {
-                // Per-poll page cap hit: persist continuation state so the next
-                // tick can resume without re-walking already-seen commits.
-                break;
-            }
-            if budget_remaining == 0 {
-                // Out of budget mid-walk: do NOT advance last_sha so the next poll
-                // continues from the same point (no commits get skipped).
+            if pages_walked >= MAX_PAGES_PER_POLL || budget_remaining == 0 {
                 break;
             }
             let pp = per_page.min(budget_remaining);
-            let mut query: Vec<(&str, String)> =
-                vec![("sha", branch.clone()), ("per_page", pp.to_string())];
+            let current_page = start_page.saturating_add(pages_walked);
 
-            // Include `until=` when continuing under a fixed boundary date OR when
-            // we have already walked past the first page and have a date to anchor.
-            if let Some(until) = sub_cursor.pending_until_date.or(
-                // For non-continuation walks that have advanced `oldest_walked_date`
-                // past the first page, we also include `until=` so subsequent pages
-                // are consistently bounded.
-                if pages_walked > 0 {
-                    oldest_walked_date
-                } else {
-                    None
-                },
-            ) {
-                query.push(("until", until.to_rfc3339()));
-            }
-
-            // Include `page=` when continuing under a fixed `until=` boundary so
-            // that same-timestamp batches can be walked page-by-page without
-            // re-returning the same commits every poll.  The page number is stable
-            // across polls because the `until=` bound keeps the result set fixed.
-            let current_page = if in_continuation {
-                // Resume from where the prior poll left off, then advance by the
-                // number of pages walked this tick.
-                sub_cursor
-                    .pending_until_page
-                    .unwrap_or(1)
-                    .saturating_add(pages_walked)
-            } else {
-                // Fresh walk: first page is always 1.
-                1_u32.saturating_add(pages_walked)
-            };
-            if in_continuation || pages_walked > 0 {
-                query.push(("page", current_page.to_string()));
+            let mut query: Vec<(&str, String)> = vec![
+                ("sha", branch.clone()),
+                ("per_page", pp.to_string()),
+                ("page", current_page.to_string()),
+            ];
+            // Fresh walks must NOT include `until=`; the page numbers correspond
+            // to the unfiltered result set.  Continuation walks always include the
+            // fixed `until=` date so the bounded result set stays stable.
+            if in_continuation
+                && let Some(u) = cont_until
+            {
+                query.push(("until", u.to_rfc3339()));
             }
 
             let page_commits: Vec<CommitDto> = client.get_json(&path, &query).await?;
@@ -210,7 +197,8 @@ impl GhResource for CommitsResource {
                 break;
             }
 
-            if recorded_head.is_none() {
+            // Only the first page of a fresh walk identifies the new HEAD.
+            if recorded_head.is_none() && !in_continuation {
                 recorded_head = Some(page_commits[0].sha.clone());
             }
 
@@ -224,17 +212,7 @@ impl GhResource for CommitsResource {
                     continue;
                 }
                 // Skip SHAs already emitted within this tick's page sequence.
-                // Necessary when multiple pages under the same `until=` date return
-                // overlapping boundary commits.
                 if in_poll_seen.contains(&dto.sha) {
-                    continue;
-                }
-                // Skip the continuation boundary item: when `until=<date>` is
-                // inclusive, GitHub may return the same commit as the last item
-                // of the previous page (same date, same sha via pending_head).
-                if oldest_walked_date == Some(dto.commit.author.date)
-                    && sub_cursor.pending_head.as_deref() == Some(dto.sha.as_str())
-                {
                     continue;
                 }
                 if Some(dto.sha.as_str()) == last_seen {
@@ -254,7 +232,7 @@ impl GhResource for CommitsResource {
             if stop {
                 break;
             }
-            // Server-side end of history under the current `until` filter.
+            // Server-side end of history under the current filter.
             if u32::try_from(page_commits.len()).unwrap_or(u32::MAX) < pp {
                 closed_gap = true;
                 break;
@@ -262,17 +240,14 @@ impl GhResource for CommitsResource {
         }
 
         // Build the boundary SHA set for the next continuation: SHAs emitted this
-        // tick whose author date equals oldest_walked_date.  If the boundary date
-        // matches the prior `pending_until_date`, merge with the prior set so we
-        // don't re-emit commits from earlier ticks at the same boundary.
-        let boundary_shas = if closed_gap {
+        // tick whose author date equals oldest_walked_date.  If continuing under
+        // the same `until=` date, merge with the prior set so we don't re-emit
+        // commits from earlier ticks at the same boundary.
+        let boundary_shas: Vec<String> = if closed_gap {
             Vec::new()
-        } else {
-            let mut s: Vec<String> = if oldest_walked_date == sub_cursor.pending_until_date {
-                sub_cursor.pending_boundary_shas.clone()
-            } else {
-                Vec::new()
-            };
+        } else if in_continuation {
+            // Continuing under the same `until=` date — merge with prior set.
+            let mut s: Vec<String> = sub_cursor.pending_boundary_shas.clone();
             if let Some(d) = oldest_walked_date {
                 for (sha, date) in &walked {
                     if *date == d && !s.contains(sha) {
@@ -281,24 +256,17 @@ impl GhResource for CommitsResource {
                 }
             }
             s
-        };
-
-        // Compute the next page for the continuation cursor.  If we were already
-        // continuing under a fixed `until=` boundary, advance the page by the
-        // number of pages walked this tick.  On the first time we set a boundary,
-        // start from page 1 (the next poll will resume at page 2 after walking it).
-        let next_until_page = if closed_gap {
-            None
-        } else if in_continuation {
-            Some(
-                sub_cursor
-                    .pending_until_page
-                    .unwrap_or(1)
-                    .saturating_add(pages_walked),
-            )
         } else {
-            // Not yet in continuation but will be next tick — start at page 1.
-            Some(1_u32)
+            // Fresh walk that hit the page cap — record SHAs at the oldest date.
+            let mut s: Vec<String> = Vec::new();
+            if let Some(d) = oldest_walked_date {
+                for (sha, date) in &walked {
+                    if *date == d {
+                        s.push(sha.clone());
+                    }
+                }
+            }
+            s
         };
 
         // Only advance last_sha when the gap is closed; otherwise keep the prior
@@ -315,14 +283,26 @@ impl GhResource for CommitsResource {
                 pending_boundary_shas: Vec::new(),
                 ..ResourceCursor::default()
             }
+        } else if in_continuation {
+            // Continued same `until=` set; advance only the page counter.
+            let next_page = start_page.saturating_add(pages_walked);
+            ResourceCursor {
+                last_sha: sub_cursor.last_sha.clone(),
+                branch: Some(branch),
+                pending_until_date: cont_until,
+                pending_until_page: Some(next_page),
+                pending_head: recorded_head.or_else(|| sub_cursor.pending_head.clone()),
+                pending_boundary_shas: boundary_shas,
+                ..ResourceCursor::default()
+            }
         } else {
-            // Mid-walk: persist continuation state (until_date + until_page) so
-            // next poll can resume the bounded result set at the correct page.
+            // Fresh walk hit cap — record oldest_walked_date as the fixed `until=`
+            // so the next poll switches to continuation mode at page 1.
             ResourceCursor {
                 last_sha: sub_cursor.last_sha.clone(),
                 branch: Some(branch),
                 pending_until_date: oldest_walked_date,
-                pending_until_page: next_until_page,
+                pending_until_page: Some(1),
                 pending_head: recorded_head,
                 pending_boundary_shas: boundary_shas,
                 ..ResourceCursor::default()
@@ -1255,6 +1235,210 @@ mod tests {
         assert!(
             result3.next_cursor.pending_until_page.is_none(),
             "pending_until_page cleared on gap close"
+        );
+    }
+
+    /// Fix 1 (round-6): a fresh walk must NOT include `until=` in the request.
+    /// The page numbers of an unfiltered result set must not be mixed with a
+    /// `until=`-filtered result set — doing so skips real items.
+    #[tokio::test]
+    async fn commits_poll_fresh_walk_uses_no_until_param() {
+        use wiremock::matchers::{method, path, query_param};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+
+        // Mount a mock that only matches when `until` is NOT in the query.
+        // wiremock does not have a "query param absent" matcher, so we mount
+        // the expected response at the unfiltered path and a 500 at the
+        // `until`-bearing path.  If the code sends `until=`, the 500 fires and
+        // the test fails.
+        Mock::given(method("GET"))
+            .and(path("/repos/o/r/commits"))
+            .and(query_param("until", ".*")) // regex-style — matches any until value
+            .respond_with(ResponseTemplate::new(500)) // must not be reached
+            .with_priority(1) // wins over the catch-all below
+            .mount(&server)
+            .await;
+
+        Mock::given(method("GET"))
+            .and(path("/repos/o/r/commits"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                {"sha": "sha_a", "commit": {"author": {"name": "A", "email": "a@x.com", "date": "2026-05-25T10:00:00Z"}, "committer": {"name": "A", "email": "a@x.com", "date": "2026-05-25T10:00:00Z"}, "message": "a"}, "author": {"login": "a"}, "html_url": "u"},
+                {"sha": "sha_b", "commit": {"author": {"name": "A", "email": "a@x.com", "date": "2026-05-25T09:00:00Z"}, "committer": {"name": "A", "email": "a@x.com", "date": "2026-05-25T09:00:00Z"}, "message": "b"}, "author": {"login": "a"}, "html_url": "u2"}
+            ])))
+            .with_priority(5)
+            .mount(&server)
+            .await;
+
+        let auth = std::sync::Arc::new(
+            crate::auth::GitHubAuth::from_handle(&pat_handle("tok")).expect("auth"),
+        );
+        let client = GhClient::new(auth, url::Url::parse(&server.uri()).unwrap());
+        let repo = Repo {
+            owner: "o".into(),
+            name: "r".into(),
+        };
+        // No pending_until_date → fresh walk.
+        let sub = ResourceCursor {
+            branch: Some("main".into()),
+            ..ResourceCursor::default()
+        };
+        let result = CommitsResource
+            .poll(&client, &repo, &sub, 50)
+            .await
+            .expect("fresh walk must not send until= and must succeed");
+
+        // Two items returned as a partial page → gap closes; both emitted.
+        assert_eq!(result.events.len(), 2, "both commits emitted on fresh walk");
+        assert!(
+            result.next_cursor.pending_until_date.is_none(),
+            "gap closed — no continuation needed"
+        );
+    }
+
+    /// Fix 1 (round-6): a continuation poll must send the fixed `until=` value
+    /// and the correct `page=` from the cursor, never mixing unfiltered page
+    /// numbers with a `until=`-filtered result set.
+    #[tokio::test]
+    async fn commits_poll_continuation_uses_pinned_until() {
+        use wiremock::matchers::{method, path, query_param};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let until_date = "2026-05-24T12:00:00+00:00";
+
+        // The mock only responds successfully when BOTH `until=<date>` AND
+        // `page=3` are present — any other combination returns 500.
+        Mock::given(method("GET"))
+            .and(path("/repos/o/r/commits"))
+            .and(query_param("until", until_date))
+            .and(query_param("page", "3"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                {"sha": "cont_sha", "commit": {"author": {"name": "A", "email": "a@x.com", "date": "2026-05-24T10:00:00Z"}, "committer": {"name": "A", "email": "a@x.com", "date": "2026-05-24T10:00:00Z"}, "message": "resumed"}, "author": {"login": "a"}, "html_url": "u"}
+            ])))
+            .with_priority(1)
+            .mount(&server)
+            .await;
+
+        // Catch-all 500: any request that doesn't match the above fails the test.
+        Mock::given(method("GET"))
+            .and(path("/repos/o/r/commits"))
+            .respond_with(ResponseTemplate::new(500))
+            .with_priority(5)
+            .mount(&server)
+            .await;
+
+        let auth = std::sync::Arc::new(
+            crate::auth::GitHubAuth::from_handle(&pat_handle("tok")).expect("auth"),
+        );
+        let client = GhClient::new(auth, url::Url::parse(&server.uri()).unwrap());
+        let repo = Repo {
+            owner: "o".into(),
+            name: "r".into(),
+        };
+        let pending_date = chrono::DateTime::parse_from_rfc3339(until_date)
+            .unwrap()
+            .with_timezone(&Utc);
+        // Continuation cursor: pending_until_date set, pending_until_page = Some(3).
+        let sub = ResourceCursor {
+            branch: Some("main".into()),
+            pending_until_date: Some(pending_date),
+            pending_until_page: Some(3),
+            pending_head: Some("old_head".into()),
+            ..ResourceCursor::default()
+        };
+        let result = CommitsResource
+            .poll(&client, &repo, &sub, 50)
+            .await
+            .expect("continuation poll must use fixed until= and page=3");
+
+        // Single item < per_page → gap closes.
+        assert_eq!(result.events.len(), 1, "resumed commit emitted");
+        assert!(
+            result.next_cursor.pending_until_date.is_none(),
+            "continuation cleared after gap closes"
+        );
+    }
+
+    /// Fix 1 (round-6): a fresh walk must fetch page=2 of the unfiltered result
+    /// set WITHOUT including `until=` in the request.  Old buggy code sent
+    /// `until=<date_of_last_item_on_page_1>&page=2` which is "page 2 of the
+    /// filtered set" — a different set of rows that skips real items 51-99.
+    ///
+    /// Setup: page=1 contains the previously-seen commit as its LAST item
+    /// (sentinel `last_sha`).  The code must stop when it finds `last_sha` and
+    /// report a closed gap without ever requesting page=2.  This test verifies
+    /// that the page=1 request does NOT carry `until=`.  The complementary
+    /// guarantee — that a second page is fetched without `until=` — is covered
+    /// structurally by `commits_poll_caps_pages_per_call_and_persists_continuation`
+    /// (which mounts page-specific mocks for pages 2-10 without `until=`).
+    #[tokio::test]
+    async fn commits_poll_fresh_walk_does_not_skip_real_page_2() {
+        use wiremock::matchers::{method, path, query_param};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+
+        // Mount a 500 for any request that carries `until=` — this fires if the
+        // code incorrectly mixes `until=` into a fresh walk.
+        Mock::given(method("GET"))
+            .and(path("/repos/o/r/commits"))
+            .and(query_param("until", ".*"))
+            .respond_with(ResponseTemplate::new(500))
+            .with_priority(1)
+            .mount(&server)
+            .await;
+
+        // Page 1 (no `until=`): 3 new commits, then `last_sha` as the sentinel.
+        // The sentinel closes the gap so no page=2 request is made.
+        Mock::given(method("GET"))
+            .and(path("/repos/o/r/commits"))
+            .and(query_param("page", "1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                {"sha": "new1", "commit": {"author": {"name": "A", "email": "a@x.com", "date": "2026-05-25T20:00:00Z"}, "committer": {"name": "A", "email": "a@x.com", "date": "2026-05-25T20:00:00Z"}, "message": "new1"}, "author": {"login": "a"}, "html_url": "u1"},
+                {"sha": "new2", "commit": {"author": {"name": "A", "email": "a@x.com", "date": "2026-05-25T19:00:00Z"}, "committer": {"name": "A", "email": "a@x.com", "date": "2026-05-25T19:00:00Z"}, "message": "new2"}, "author": {"login": "a"}, "html_url": "u2"},
+                {"sha": "new3", "commit": {"author": {"name": "A", "email": "a@x.com", "date": "2026-05-25T18:00:00Z"}, "committer": {"name": "A", "email": "a@x.com", "date": "2026-05-25T18:00:00Z"}, "message": "new3"}, "author": {"login": "a"}, "html_url": "u3"},
+                {"sha": "sentinel", "commit": {"author": {"name": "A", "email": "a@x.com", "date": "2026-05-25T17:00:00Z"}, "committer": {"name": "A", "email": "a@x.com", "date": "2026-05-25T17:00:00Z"}, "message": "sentinel"}, "author": {"login": "a"}, "html_url": "u4"},
+            ])))
+            .with_priority(2)
+            .mount(&server)
+            .await;
+
+        let auth = std::sync::Arc::new(
+            crate::auth::GitHubAuth::from_handle(&pat_handle("tok")).expect("auth"),
+        );
+        let client = GhClient::new(auth, url::Url::parse(&server.uri()).unwrap());
+        let repo = Repo {
+            owner: "o".into(),
+            name: "r".into(),
+        };
+        // `last_sha = "sentinel"` simulates a previously-seen commit on the page.
+        let sub = ResourceCursor {
+            branch: Some("main".into()),
+            last_sha: Some("sentinel".into()),
+            ..ResourceCursor::default()
+        };
+        let result = CommitsResource
+            .poll(&client, &repo, &sub, 100)
+            .await
+            .expect("fresh walk must not send until= (would 500) and must succeed");
+
+        // 3 new commits emitted before hitting the sentinel; gap closed.
+        assert_eq!(
+            result.events.len(),
+            3,
+            "new1, new2, new3 emitted before sentinel closes the gap"
+        );
+        // Gap closed: last_sha advances to the new HEAD (new1).
+        assert_eq!(
+            result.next_cursor.last_sha.as_deref(),
+            Some("new1"),
+            "last_sha must advance to new HEAD"
+        );
+        assert!(
+            result.next_cursor.pending_until_date.is_none(),
+            "no continuation — gap closed on page 1"
         );
     }
 }
