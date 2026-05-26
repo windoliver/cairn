@@ -103,6 +103,11 @@ impl GhResource for CommitsResource {
         "commit"
     }
 
+    // The poll implementation is intentionally long: it manages a multi-page
+    // backward commit walk with budget caps, continuation state, and boundary-SHA
+    // deduplication.  Splitting it would scatter tightly coupled state across
+    // helper functions without improving readability.
+    #[allow(clippy::too_many_lines)]
     async fn poll(
         &self,
         client: &GhClient,
@@ -131,6 +136,13 @@ impl GhResource for CommitsResource {
         // Used as the `until=` continuation parameter on resumption.
         let mut oldest_walked_date: Option<DateTime<Utc>> = sub_cursor.pending_until_date;
         let mut pages_walked = 0_u32;
+        // Track (sha, date) for every commit emitted this tick so we can build the
+        // boundary SHA set for the next continuation.
+        let mut walked: Vec<(String, DateTime<Utc>)> = Vec::new();
+        // Build the set of boundary SHAs from the prior cursor (items already
+        // emitted at the pending_until_date boundary on a previous tick).
+        let boundary_filter: std::collections::BTreeSet<String> =
+            sub_cursor.pending_boundary_shas.iter().cloned().collect();
 
         loop {
             if pages_walked >= MAX_PAGES_PER_POLL {
@@ -150,7 +162,8 @@ impl GhResource for CommitsResource {
                 // Continuation: keep walking backward from where we left off.
                 // GitHub's `until` is inclusive on second granularity; the first
                 // commit of the resumed page may equal the last commit of the
-                // previous page.  We skip that duplicate below.
+                // previous page.  We skip duplicates via the boundary SHA set and
+                // the pending_head sentinel below.
                 query.push(("until", until.to_rfc3339()));
             }
 
@@ -169,6 +182,13 @@ impl GhResource for CommitsResource {
 
             let mut stop = false;
             for dto in &page_commits {
+                // Skip SHAs already emitted at the boundary timestamp on a prior
+                // tick.  This handles the case where > per_page commits share the
+                // same author date: the `until=<date>` continuation re-returns them
+                // but they must not be double-emitted.
+                if boundary_filter.contains(&dto.sha) {
+                    continue;
+                }
                 // Skip the continuation boundary item: when `until=<date>` is
                 // inclusive, GitHub may return the same commit as the last item
                 // of the previous page (same date, same sha via pending_head).
@@ -183,6 +203,7 @@ impl GhResource for CommitsResource {
                     break;
                 }
                 events.push(commit_to_event(dto, repo));
+                walked.push((dto.sha.clone(), dto.commit.author.date));
                 budget_remaining = budget_remaining.saturating_sub(1);
                 oldest_walked_date = Some(dto.commit.author.date);
                 if budget_remaining == 0 {
@@ -199,6 +220,28 @@ impl GhResource for CommitsResource {
             }
         }
 
+        // Build the boundary SHA set for the next continuation: SHAs emitted this
+        // tick whose author date equals oldest_walked_date.  If the boundary date
+        // matches the prior `pending_until_date`, merge with the prior set so we
+        // don't re-emit commits from earlier ticks at the same boundary.
+        let boundary_shas = if closed_gap {
+            Vec::new()
+        } else {
+            let mut s: Vec<String> = if oldest_walked_date == sub_cursor.pending_until_date {
+                sub_cursor.pending_boundary_shas.clone()
+            } else {
+                Vec::new()
+            };
+            if let Some(d) = oldest_walked_date {
+                for (sha, date) in &walked {
+                    if *date == d && !s.contains(sha) {
+                        s.push(sha.clone());
+                    }
+                }
+            }
+            s
+        };
+
         // Only advance last_sha when the gap is closed; otherwise keep the prior
         // sha so the next poll resumes correctly (prevents permanent history skip
         // when > per_page commits accumulate between polls).
@@ -209,6 +252,7 @@ impl GhResource for CommitsResource {
                 branch: Some(branch),
                 pending_until_date: None,
                 pending_head: None,
+                pending_boundary_shas: Vec::new(),
                 ..ResourceCursor::default()
             }
         } else {
@@ -218,6 +262,7 @@ impl GhResource for CommitsResource {
                 branch: Some(branch),
                 pending_until_date: oldest_walked_date,
                 pending_head: recorded_head,
+                pending_boundary_shas: boundary_shas,
                 ..ResourceCursor::default()
             }
         };
@@ -317,10 +362,13 @@ fn push_commit_to_event(
         format!("gh:{}/{}@{}", repo.owner, repo.name, dto.id),
         None,
     );
-    // Push delivery: include both the delivery_id (unique per webhook delivery)
-    // and the commit SHA so each commit in a multi-commit push gets a distinct id.
-    let event_id =
-        crate::event_id::from_parts("commit", &source_ref.system_id, &[delivery_id, &dto.id]);
+    // Use the same SHA-only revision as `commit_to_event` so that a commit
+    // observed via poll and then re-delivered via push webhook (or vice-versa)
+    // produces the same event_id and is deduplicated by the substrate.
+    // `delivery_id` is NOT used here — it changes per-delivery and would break
+    // cross-channel dedup.  The `DeliveryMode::Webhook { signature_id }` field
+    // separately carries the per-delivery UUID for the replay guard.
+    let event_id = crate::event_id::from_parts("commit", &source_ref.system_id, &[&dto.id]);
 
     let payload = ConnectorPayload::Json {
         mime: "application/json".into(),
@@ -751,6 +799,174 @@ mod tests {
         assert!(
             result.next_cursor.pending_until_date.is_none(),
             "continuation cleared on gap close"
+        );
+    }
+
+    /// Fix 1 (round-4): `push_commit_to_event` and `commit_to_event` must produce
+    /// the same `event_id` for the same commit SHA (cross-channel dedup).
+    #[test]
+    fn poll_and_webhook_paths_produce_same_event_id_for_same_commit() {
+        let repo = Repo {
+            owner: "o".into(),
+            name: "r".into(),
+        };
+        // Build a CommitDto (poll path).
+        let poll_dto: CommitDto = serde_json::from_value(serde_json::json!({
+            "sha": "deadbeef",
+            "commit": {
+                "author": {"name": "A", "email": "a@x.com", "date": "2026-05-25T10:00:00Z"},
+                "committer": {"name": "A", "email": "a@x.com", "date": "2026-05-25T10:00:00Z"},
+                "message": "feat: add something"
+            },
+            "author": {"login": "alice"},
+            "html_url": "https://github.com/o/r/commit/deadbeef"
+        }))
+        .expect("poll dto");
+
+        // Build a PushCommitDto (webhook push path) for the same SHA.
+        let push_dto: PushCommitDto = serde_json::from_value(serde_json::json!({
+            "id": "deadbeef",
+            "message": "feat: add something",
+            "timestamp": "2026-05-25T10:00:00Z",
+            "url": "https://github.com/o/r/commit/deadbeef"
+        }))
+        .expect("push dto");
+
+        let poll_event = commit_to_event(&poll_dto, &repo);
+        let push_event =
+            push_commit_to_event(&push_dto, &repo, "refs/heads/main", "delivery-1", "sig-1");
+
+        assert_eq!(
+            poll_event.event_id.as_str(),
+            push_event.event_id.as_str(),
+            "poll and webhook-push must produce the same event_id for the same commit SHA"
+        );
+        assert!(matches!(poll_event.delivery, DeliveryMode::Poll { .. }));
+        assert!(matches!(push_event.delivery, DeliveryMode::Webhook { .. }));
+    }
+
+    /// Fix 2 (round-4): when all commits in a continuation page share the
+    /// boundary timestamp (same-second batch), the boundary SHA set filters
+    /// already-emitted SHAs and only new ones are emitted.
+    #[tokio::test]
+    async fn commits_poll_handles_same_timestamp_page_boundary() {
+        let server = MockServer::start().await;
+        let boundary_ts = "2026-05-01T00:00:00Z";
+
+        // Build 4 commits all at the same timestamp.
+        let make_commit = |sha: &str| {
+            serde_json::json!({
+                "sha": sha,
+                "commit": {
+                    "author": {"name": "A", "email": "a@x.com", "date": boundary_ts},
+                    "committer": {"name": "A", "email": "a@x.com", "date": boundary_ts},
+                    "message": format!("commit {sha}")
+                },
+                "author": {"login": "a"},
+                "html_url": format!("https://github.com/o/r/commit/{sha}")
+            })
+        };
+
+        // First request (no `until`): 2 commits at boundary_ts — "full" page
+        // because per_page=2 (budget=2).
+        Mock::given(method("GET"))
+            .and(path("/repos/o/r/commits"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                make_commit("sha001"),
+                make_commit("sha002"),
+            ])))
+            .mount(&server)
+            .await;
+
+        let auth = std::sync::Arc::new(
+            crate::auth::GitHubAuth::from_handle(&pat_handle("tok")).expect("auth"),
+        );
+        let client = GhClient::new(auth.clone(), url::Url::parse(&server.uri()).unwrap());
+        let repo = Repo {
+            owner: "o".into(),
+            name: "r".into(),
+        };
+
+        // First poll: budget=2, per_page=2 → full page → no gap close.
+        let sub1 = ResourceCursor {
+            branch: Some("main".into()),
+            ..ResourceCursor::default()
+        };
+        let result1 = CommitsResource
+            .poll(&client, &repo, &sub1, 2)
+            .await
+            .expect("poll 1");
+        assert_eq!(
+            result1.events.len(),
+            2,
+            "both commits emitted on first poll"
+        );
+        assert!(
+            result1.next_cursor.pending_until_date.is_some(),
+            "continuation set"
+        );
+        // Both SHAs at boundary_ts should be in pending_boundary_shas.
+        assert_eq!(
+            result1.next_cursor.pending_boundary_shas.len(),
+            2,
+            "boundary SHAs recorded"
+        );
+        assert!(
+            result1
+                .next_cursor
+                .pending_boundary_shas
+                .contains(&"sha001".to_string())
+        );
+        assert!(
+            result1
+                .next_cursor
+                .pending_boundary_shas
+                .contains(&"sha002".to_string())
+        );
+
+        // Second poll uses the continuation cursor.  The server returns a page
+        // with the 2 already-seen SHAs plus 1 new one.  The already-seen SHAs
+        // must be filtered via pending_boundary_shas; only the new one is emitted.
+        //
+        // Note: wiremock already has a catch-all mount above; we need a new server
+        // or a priority mount.  Since the catch-all returns the original page,
+        // and we filtered sha001/sha002, a third commit sha003 must appear.
+        // Use a separate mock server for the second poll to get a different response.
+        let server2 = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/repos/o/r/commits"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                make_commit("sha001"),
+                make_commit("sha002"),
+                make_commit("sha003"),
+            ])))
+            .mount(&server2)
+            .await;
+
+        let client2 = GhClient::new(auth, url::Url::parse(&server2.uri()).unwrap());
+        let result2 = CommitsResource
+            .poll(&client2, &repo, &result1.next_cursor, 10)
+            .await
+            .expect("poll 2");
+
+        // sha001 and sha002 filtered; sha003 is new.
+        // The page has 3 items < per_page=10 → gap closes.
+        assert_eq!(
+            result2.events.len(),
+            1,
+            "only sha003 emitted; sha001/sha002 filtered"
+        );
+        let emitted_sha = match &result2.events[0].payload {
+            cairn_connectors_core::ConnectorPayload::Json { body, .. } => {
+                body.get("sha").and_then(|v| v.as_str()).unwrap_or("")
+            }
+            _ => "",
+        };
+        assert_eq!(emitted_sha, "sha003", "emitted event must be sha003");
+        // Gap closed: boundary_shas must be cleared.
+        assert!(
+            result2.next_cursor.pending_boundary_shas.is_empty(),
+            "boundary SHAs cleared on gap close"
         );
     }
 }

@@ -32,6 +32,15 @@ pub struct ResourceCursor {
     /// On exhaustion, promoted to `since` and cleared.
     #[serde(default)]
     pub pending_since: Option<DateTime<Utc>>,
+    /// SHAs already emitted at the boundary timestamp (`pending_until_date`).
+    ///
+    /// When `> per_page` commits share the same author date (scripted commits,
+    /// force-pushes, monorepo batches), the `until=<date>` continuation request
+    /// may re-return commits we already walked.  This set records the SHAs emitted
+    /// at the current boundary date; items in the set are skipped on the next page.
+    /// Cleared when the walk moves past the boundary date or the gap is closed.
+    #[serde(default)]
+    pub pending_boundary_shas: Vec<String>,
 }
 
 /// Connector-level cursor: per-resource map.
