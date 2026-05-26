@@ -106,12 +106,7 @@ mod tests {
             Ok(self.is_op)
         }
 
-        fn grant_role(
-            &self,
-            _: &Identity,
-            _: AdminRole,
-            _: &Identity,
-        ) -> Result<(), StoreError> {
+        fn grant_role(&self, _: &Identity, _: AdminRole, _: &Identity) -> Result<(), StoreError> {
             Ok(())
         }
 
@@ -135,10 +130,7 @@ mod tests {
             ))
         }
 
-        fn get_connector_state(
-            &self,
-            _: &str,
-        ) -> Result<Option<ConnectorStateRow>, StoreError> {
+        fn get_connector_state(&self, _: &str) -> Result<Option<ConnectorStateRow>, StoreError> {
             Ok(None)
         }
 
