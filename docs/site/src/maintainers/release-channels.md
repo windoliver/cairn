@@ -27,13 +27,13 @@ the user-facing summary lives in [Updates](../usage/updates.md).
    any artifacts before this completes.**
 6. Run `scripts/beta-readiness.sh --full` locally. All automatable
    gates must pass.
-7. Walk Gates 9–15 of [Beta Readiness](beta-readiness.md) manually,
+7. Walk Gates 9–16 of [Beta Readiness](beta-readiness.md) manually,
    including Gate 11 (this page is the evidence for Gate 11 — confirm
    ADR 0005 status is `Accepted`).
 8. Trigger the `release-stable.yml` workflow (added in follow-up
    under #32) with the tag as input. It builds + signs + publishes
    to all stable destinations + updates the `homebrew-cairn` tap +
-   updates `updates/stable.xml` Sparkle feed.
+   updates `updates/stable/latest-<platform>.yml` electron-updater feed.
 9. Verify artifacts on a clean machine: `cairn release verify
    <downloaded>.dmg` must print `ok: cosign + apple-developer-id`.
 10. Post the release notes to GitHub Releases; mark as latest.
@@ -46,7 +46,7 @@ the user-facing summary lives in [Updates](../usage/updates.md).
    in `release-dry-run`).
 3. Trigger `release-beta.yml` workflow — builds, signs, publishes to
    the `homebrew-cairn-beta` tap, marks the GitHub Release as
-   "Pre-release", updates `updates/beta.xml`.
+   "Pre-release", updates `updates/beta/latest-<platform>.yml`.
 4. Announce in the release thread; ask beta testers for feedback.
 
 ### Promote a nightly to beta

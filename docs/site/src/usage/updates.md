@@ -67,7 +67,7 @@ The desktop app's onboarding asks once whether you want update
 checks. You can change your mind any time in Settings → Updates.
 
 When checks are enabled, the desktop app polls
-`https://windoliver.github.io/cairn/updates/<channel>.xml` once per
+`https://windoliver.github.io/cairn/updates/<channel>/latest-<platform>.yml` once per
 24 hours. The payload it sends is metadata-only: channel name,
 current version, OS, arch, and an opaque rotating install ID that
 resets weekly. No vault content, no user identity, no IP-derived
@@ -78,6 +78,8 @@ geo.
 Every artifact on a Cairn GitHub Release ships with a Cosign keyless
 OIDC signature (`<artifact>.sig` + `<artifact>.pem`) committed to the
 Sigstore Rekor transparency log. The shipped CLI verifier:
+
+*Note: `cairn release verify` and `cairn release rollback` ship with v1.0. Check your installed version with `cairn --version`. Until then, use the manual `cosign verify-blob` recipe in the next subsection.*
 
 ```bash
 cairn release verify ~/Downloads/Cairn-1.0.0-universal.dmg
@@ -117,6 +119,8 @@ under "Rotate signing keys".
 ## Rolling back to a previous version
 
 If a release breaks something for you, the supported recipe is:
+
+*Note: the `cairn release rollback` recipe ships with v1.0 alongside the verifier CLI. Until then, download the prior signed artifact from [GitHub Releases](https://github.com/windoliver/cairn/releases) and install it via your package manager or by replacing `/Applications/Cairn.app` directly.*
 
 ```bash
 cairn release rollback --to v1.0.3

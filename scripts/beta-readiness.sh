@@ -3,7 +3,7 @@
 #
 # Wraps every automatable gate from CLAUDE.md §8 plus the
 # docs/site/src/maintainers/beta-readiness.md runbook. Exits 0 only when
-# every required gate passes; manual gates (9-15) are listed at the end of
+# every required gate passes; manual gates (9-16) are listed at the end of
 # the run and never claimed as passed.
 #
 # Modes:
@@ -35,7 +35,7 @@ Usage: beta-readiness.sh [--quick|--full]
 
 Honors CAIRN_BIN, CARGO_TARGET_DIR, RUST_LOG.
 
-Manual gates (9-15 in docs/site/src/maintainers/beta-readiness.md) are
+Manual gates (9-16 in docs/site/src/maintainers/beta-readiness.md) are
 listed after the automated run and never claimed as passed.
 EOF
     exit 0

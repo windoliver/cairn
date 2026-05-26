@@ -28,7 +28,7 @@ readiness across three harnesses") can certify a release.
 
 This ADR is that policy. Implementation (signing infrastructure,
 electron-updater wiring, `cairn release verify` CLI, GHA release
-workflows, Sparkle feed publishing) is tracked as named follow-up
+workflows, electron-updater YAML feed publishing) is tracked as named follow-up
 issues under parent epic #32 — each cites this ADR for shape.
 
 ## Decision
@@ -39,9 +39,9 @@ The following rules govern Cairn releases from v1.0 forward.
 
 | Channel | Trigger | Artifact destinations | Update poll feed | Cosign tag | Audience |
 |---|---|---|---|---|---|
-| **stable** | git tag `vX.Y.Z` (no pre-release suffix) | crates.io · `homebrew-cairn` main tap · winget · scoop · GitHub Releases (DMG/MSI/AppImage/deb/tarball) | `updates/stable.xml` (Sparkle feed) on github.io | `cairn-stable` | Default for everyone; what `brew install cairn` gives you |
-| **beta** | git tag `vX.Y.Z-beta.N` or `vX.Y.Z-rc.N` | `homebrew-cairn-beta` tap · GitHub Pre-Releases · no crates.io publish (pre-release versions auto-skipped by `cargo install` unless `--version` pinned) | `updates/beta.xml` | `cairn-beta` | Opt-in. Users who want the next release with at least one tagged checkpoint of stability |
-| **nightly** | scheduled GHA every 24h off `main`, tagged `nightly-YYYYMMDD` | GitHub Releases ("Nightly" section), **no** package-manager publish | `updates/nightly.xml` | `cairn-nightly` | Developers + dogfooders. No semver promise. Aged off after 30 days. |
+| **stable** | git tag `vX.Y.Z` (no pre-release suffix) | crates.io · `homebrew-cairn` main tap · winget · scoop · GitHub Releases (DMG/MSI/AppImage/deb/tarball) | `updates/stable/latest-<platform>.yml` on github.io | `cairn-stable` | Default for everyone; what `brew install cairn` gives you |
+| **beta** | git tag `vX.Y.Z-beta.N` or `vX.Y.Z-rc.N` | `homebrew-cairn-beta` tap · GitHub Pre-Releases · no crates.io publish (pre-release versions auto-skipped by `cargo install` unless `--version` pinned) | `updates/beta/latest-<platform>.yml` on github.io | `cairn-beta` | Opt-in. Users who want the next release with at least one tagged checkpoint of stability |
+| **nightly** | scheduled GHA every 24h off `main`, tagged `nightly-YYYYMMDD` | GitHub Releases ("Nightly" section), **no** package-manager publish | `updates/nightly/latest-<platform>.yml` on github.io | `cairn-nightly` | Developers + dogfooders. No semver promise. Aged off after 30 days. |
 
 One binary per platform per channel. The Rust core compiles
 identically; the only difference is the build-time `CAIRN_CHANNEL`
@@ -65,8 +65,8 @@ Channel pinning lives in two places:
 
 | OS | Updater | Feed format | Platform signature |
 |---|---|---|---|
-| macOS | `electron-updater` reading a Sparkle appcast XML | `updates/<channel>.xml` on github.io | Apple Developer ID + notarization (wired in [#139](https://github.com/windoliver/cairn/issues/139)). Cosign `.sig` sidecar as defence-in-depth. |
-| Windows | `electron-updater` Squirrel | `updates/<channel>.xml` | Authenticode signed MSI (EV cert deferred until v1.0-rc). Cosign sidecar. |
+| macOS | `electron-updater` reading its native YAML feed | `updates/<channel>/latest-mac.yml` on github.io | Apple Developer ID + notarization (wired in [#139](https://github.com/windoliver/cairn/issues/139)). Cosign `.sig` sidecar as defence-in-depth. |
+| Windows | `electron-updater` Squirrel | `updates/<channel>/latest.yml` on github.io | Authenticode signed MSI (EV cert deferred until v1.0-rc). Cosign sidecar. |
 | Linux AppImage | AppImageUpdate (zsync over HTTPS) | embedded `update-information` field | GPG-signed `.sig` next to artifact. Cosign sidecar. |
 | brew / cargo / winget / scoop | Owned by the package manager; we publish artifacts + sidecars. | n/a | Package manager's existing verification + Cosign sidecar for users who want to double-check via `cairn release verify`. |
 
@@ -98,12 +98,12 @@ Fail-closed: any verification failure → non-zero exit + the
   is set, the update poller is dead code regardless of `update.check`.
   Evaluated at config-load time, not at poll time.
 - **Payload is metadata-only.** Channel name, current version, OS,
-  arch, and an opaque rotating install salt (regenerated weekly via the
-  identity service, never linked to vault contents). No vault data, no
+  arch, and an opaque rotating install ID (generated locally by the desktop
+  shell and rotated weekly; never linked to vault contents). No vault data, no
   record IDs, no user identifiers, no IP-derived geo. Logged at `trace`
   only. The `CLAUDE.md` §6.6 rule ("never log raw record bodies above
   `debug`") is extended here to also cover update-poll payloads.
-- **Endpoint is a static file** (`updates/<channel>.xml` on github.io /
+- **Endpoint is a static file** (`updates/<channel>/latest-<platform>.yml` on github.io /
   optional Cloudflare Pages mirror). No server-side application
   logging beyond the hoster's standard access logs.
 - **CLI never polls.** Only the desktop shell can be opted in. CLI users
@@ -122,8 +122,7 @@ Fail-closed: any verification failure → non-zero exit + the
    switch — channel is a binary-install concept, not a vault concept.
 5. Downgrade across a vault-schema bump is **blocked at startup** with
    `VaultSchemaNewerThanBinary` error and a dialog suggesting either
-   reinstalling the newer version or picking a different vault (same
-   shape as the [#139 desktop packaging spec §6.3](../../superpowers/specs/2026-05-25-desktop-packaging-macos-design.md)).
+   reinstalling the newer version or picking a different vault.
 
 ### 6. Rollback
 
@@ -153,11 +152,12 @@ operations, not to compiled code. Enforcement is reviewer-driven via
 the beta-readiness runbook (new Gate 11 "release channel policy frozen" added by this ADR's PR, which renumbers the existing manual gates 11–15 to 12–16). Concrete
 runtime gates ship in named follow-up issues:
 
-- Signed Sparkle feeds + Cosign sidecars per channel — follow-up under
+- Signed electron-updater YAML feeds + Cosign sidecars per channel — follow-up under
   parent epic #32.
 - `cairn release verify` CLI — follow-up under parent epic #32.
 - `electron-updater` wiring + `update.channel` config + onboarding
   prompt — follow-up under parent epic #32.
+- `cairn config set update.channel <name>` and `cairn status --check-updates` CLI subcommands — follow-up under parent epic #32.
 - GHA scheduled nightly cut + 30-day age-off — follow-up under parent
   epic #32.
 - Boot-probe automatic rollback — v1.1 follow-up.

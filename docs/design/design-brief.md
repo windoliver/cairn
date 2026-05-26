@@ -3929,9 +3929,9 @@ by which artifact / package-manager tap they installed.
 **Update checks are off by default.** No outbound poll runs until the
 user opts in (`update.check: true`), and `CAIRN_OFFLINE=1` or
 `agent.offline: true` always wins. When enabled, the desktop shell
-reads a Sparkle appcast at `updates/<channel>.xml`; per-OS native
-updaters (electron-updater on macOS / Windows, AppImageUpdate on
-Linux) handle the download. Every artifact additionally carries a
+reads electron-updater's native YAML feed at
+`updates/<channel>/latest-<platform>.yml`; AppImageUpdate handles
+Linux via its own zsync side-file. Every artifact additionally carries a
 Cosign keyless OIDC signature on the Sigstore Rekor transparency log;
 the shipped `cairn release verify <path>` CLI checks both the platform
 signature and the Cosign sidecar. Verification is fail-closed.
