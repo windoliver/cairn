@@ -70,9 +70,9 @@ Six files; doc-only PR.
 
 | Channel | Trigger | Artifact destinations | Update poll feed | Cosign tag | Audience |
 |---|---|---|---|---|---|
-| **stable** | git tag `vX.Y.Z` (no pre-release suffix) | crates.io · `homebrew-cairn` main tap · winget · scoop · GitHub Releases (DMG/MSI/AppImage/deb/tarball) | `updates/stable.xml` (Sparkle feed) on github.io | `cairn-stable` | Default for everyone; what `brew install cairn` gives you |
-| **beta** | git tag `vX.Y.Z-beta.N` or `vX.Y.Z-rc.N` | `homebrew-cairn-beta` tap · GitHub Pre-Releases · no crates.io publish (pre-release versions auto-skipped by `cargo install` unless `--version` pinned) | `updates/beta.xml` | `cairn-beta` | Opt-in. Users who want the next release with at least one tagged checkpoint of stability |
-| **nightly** | scheduled GHA every 24h off `main`, tagged `nightly-YYYYMMDD` | GitHub Releases ("Nightly" section), **no** package-manager publish | `updates/nightly.xml` | `cairn-nightly` | Developers + dogfooders. No semver promise. Aged off after 30 days |
+| **stable** | git tag `vX.Y.Z` (no pre-release suffix) | crates.io · `homebrew-cairn` main tap · winget · scoop · GitHub Releases (DMG/MSI/AppImage/deb/tarball) | `updates/stable/latest-<platform>.yml` on github.io | `cairn-stable` | Default for everyone; what `brew install cairn` gives you |
+| **beta** | git tag `vX.Y.Z-beta.N` or `vX.Y.Z-rc.N` | `homebrew-cairn-beta` tap · GitHub Pre-Releases · no crates.io publish (pre-release versions auto-skipped by `cargo install` unless `--version` pinned) | `updates/beta/latest-<platform>.yml` | `cairn-beta` | Opt-in. Users who want the next release with at least one tagged checkpoint of stability |
+| **nightly** | scheduled GHA every 24h off `main`, tagged `nightly-YYYYMMDD` | GitHub Releases ("Nightly" section), **no** package-manager publish | `updates/nightly/latest-<platform>.yml` | `cairn-nightly` | Developers + dogfooders. No semver promise. Aged off after 30 days |
 
 **One binary per platform per channel.** The Rust core compiles
 identically; the only difference is the build-time `CAIRN_CHANNEL` env
@@ -94,8 +94,8 @@ table-driven off that one string.
 
 | OS | Updater | Feed format | Platform signature |
 |---|---|---|---|
-| macOS | `electron-updater` reading a Sparkle appcast XML | `updates/<channel>.xml` on github.io | Apple Developer ID + notarization (already wired in #139). Cosign `.sig` sidecar as defence-in-depth. |
-| Windows | `electron-updater` Squirrel | `updates/<channel>.xml` | Authenticode signed MSI (EV cert deferred to v1.0-rc). Cosign sidecar. |
+| macOS | `electron-updater` reading its native YAML feed | `updates/<channel>/latest-mac.yml` on github.io | Apple Developer ID + notarization (already wired in #139). Cosign `.sig` sidecar as defence-in-depth. |
+| Windows | `electron-updater` Squirrel | `updates/<channel>/latest.yml` on github.io | Authenticode signed MSI (EV cert deferred to v1.0-rc). Cosign sidecar. |
 | Linux AppImage | AppImageUpdate (zsync over HTTPS) | embedded `update-information` field | GPG-signed `.sig` next to artifact. Cosign sidecar. |
 | brew / cargo / winget / scoop | Owned by the package manager; we publish artifacts + sidecars. | n/a | Package manager's existing verification + Cosign sidecar for users who want to double-check via `cairn release verify`. |
 
@@ -129,7 +129,7 @@ Fail-closed: any verification failure → non-zero exit + the
   record IDs, no user identifiers, no IP-derived geo. Logged at `trace`
   only (brief §6.6 rule: never log raw record bodies above `debug`; the
   rule is extended here to also cover update-poll payloads).
-- **Endpoint is a static file** (`updates/<channel>.xml` on
+- **Endpoint is a static file** (`updates/<channel>/latest-<platform>.yml` on
   github.io / a Cloudflare Pages mirror). No server-side application
   logging beyond the hoster's standard access logs, which the user-facing
   doc names so users know what to expect.
@@ -202,7 +202,7 @@ What this PR deliberately does **not** test:
 
 - The update poller code path — doesn't exist yet.
 - `cairn release verify` — doesn't exist yet.
-- Sparkle feed XML — doesn't exist yet.
+- electron-updater YAML feed — doesn't exist yet.
 - Cosign sidecar layout — doesn't exist yet.
 
 Each is a named follow-up issue under #32 cited from the ADR.
@@ -230,7 +230,7 @@ ships the **specs they test against**, not the tests themselves.
   every update and a state machine for "first launch after update". The
   design noise is real engineering; deferring to v1.1 keeps #141 in the
   doc-only lane. A follow-up issue under #32 captures this.
-- **Cloudflare Pages mirror of `updates/<channel>.xml`.** Default is
+- **Cloudflare Pages mirror of `updates/<channel>/latest-<platform>.yml`.** Default is
   github.io directly. If GitHub Pages bandwidth becomes a concern, the
   mirror is a one-line DNS change; named in the ADR as a permitted
   variant.

@@ -68,7 +68,7 @@ readiness across three harnesses") can certify a release.
 
 This ADR is that policy. Implementation (signing infrastructure,
 electron-updater wiring, `cairn release verify` CLI, GHA release
-workflows, Sparkle feed publishing) is tracked as named follow-up
+workflows, electron-updater YAML feed publishing) is tracked as named follow-up
 issues under parent epic #32 — each cites this ADR for shape.
 
 ## Decision
@@ -79,9 +79,9 @@ The following rules govern Cairn releases from v1.0 forward.
 
 | Channel | Trigger | Artifact destinations | Update poll feed | Cosign tag | Audience |
 |---|---|---|---|---|---|
-| **stable** | git tag `vX.Y.Z` (no pre-release suffix) | crates.io · `homebrew-cairn` main tap · winget · scoop · GitHub Releases (DMG/MSI/AppImage/deb/tarball) | `updates/stable.xml` (Sparkle feed) on github.io | `cairn-stable` | Default for everyone; what `brew install cairn` gives you |
-| **beta** | git tag `vX.Y.Z-beta.N` or `vX.Y.Z-rc.N` | `homebrew-cairn-beta` tap · GitHub Pre-Releases · no crates.io publish (pre-release versions auto-skipped by `cargo install` unless `--version` pinned) | `updates/beta.xml` | `cairn-beta` | Opt-in. Users who want the next release with at least one tagged checkpoint of stability |
-| **nightly** | scheduled GHA every 24h off `main`, tagged `nightly-YYYYMMDD` | GitHub Releases ("Nightly" section), **no** package-manager publish | `updates/nightly.xml` | `cairn-nightly` | Developers + dogfooders. No semver promise. Aged off after 30 days. |
+| **stable** | git tag `vX.Y.Z` (no pre-release suffix) | crates.io · `homebrew-cairn` main tap · winget · scoop · GitHub Releases (DMG/MSI/AppImage/deb/tarball) | `updates/stable/latest-<platform>.yml` on github.io | `cairn-stable` | Default for everyone; what `brew install cairn` gives you |
+| **beta** | git tag `vX.Y.Z-beta.N` or `vX.Y.Z-rc.N` | `homebrew-cairn-beta` tap · GitHub Pre-Releases · no crates.io publish (pre-release versions auto-skipped by `cargo install` unless `--version` pinned) | `updates/beta/latest-<platform>.yml` | `cairn-beta` | Opt-in. Users who want the next release with at least one tagged checkpoint of stability |
+| **nightly** | scheduled GHA every 24h off `main`, tagged `nightly-YYYYMMDD` | GitHub Releases ("Nightly" section), **no** package-manager publish | `updates/nightly/latest-<platform>.yml` | `cairn-nightly` | Developers + dogfooders. No semver promise. Aged off after 30 days. |
 
 One binary per platform per channel. The Rust core compiles
 identically; the only difference is the build-time `CAIRN_CHANNEL`
@@ -105,8 +105,8 @@ Channel pinning lives in two places:
 
 | OS | Updater | Feed format | Platform signature |
 |---|---|---|---|
-| macOS | `electron-updater` reading a Sparkle appcast XML | `updates/<channel>.xml` on github.io | Apple Developer ID + notarization (wired in [#139](https://github.com/windoliver/cairn/issues/139)). Cosign `.sig` sidecar as defence-in-depth. |
-| Windows | `electron-updater` Squirrel | `updates/<channel>.xml` | Authenticode signed MSI (EV cert deferred until v1.0-rc). Cosign sidecar. |
+| macOS | `electron-updater` reading its native YAML feed | `updates/<channel>/latest-mac.yml` on github.io | Apple Developer ID + notarization (wired in [#139](https://github.com/windoliver/cairn/issues/139)). Cosign `.sig` sidecar as defence-in-depth. |
+| Windows | `electron-updater` Squirrel | `updates/<channel>/latest.yml` on github.io | Authenticode signed MSI (EV cert deferred until v1.0-rc). Cosign sidecar. |
 | Linux AppImage | AppImageUpdate (zsync over HTTPS) | embedded `update-information` field | GPG-signed `.sig` next to artifact. Cosign sidecar. |
 | brew / cargo / winget / scoop | Owned by the package manager; we publish artifacts + sidecars. | n/a | Package manager's existing verification + Cosign sidecar for users who want to double-check via `cairn release verify`. |
 
@@ -143,7 +143,7 @@ Fail-closed: any verification failure → non-zero exit + the
   record IDs, no user identifiers, no IP-derived geo. Logged at `trace`
   only. The brief §6.6 rule ("never log raw record bodies above
   `debug`") is extended here to also cover update-poll payloads.
-- **Endpoint is a static file** (`updates/<channel>.xml` on github.io /
+- **Endpoint is a static file** (`updates/<channel>/latest-<platform>.yml` on github.io /
   optional Cloudflare Pages mirror). No server-side application
   logging beyond the hoster's standard access logs.
 - **CLI never polls.** Only the desktop shell can be opted in. CLI users
@@ -193,7 +193,7 @@ operations, not to compiled code. Enforcement is reviewer-driven via
 the beta-readiness runbook (Gate 11 added by this ADR's PR). Concrete
 runtime gates ship in named follow-up issues:
 
-- Signed Sparkle feeds + Cosign sidecars per channel — follow-up under
+- Signed electron-updater YAML feeds + Cosign sidecars per channel — follow-up under
   parent epic #32.
 - `cairn release verify` CLI — follow-up under parent epic #32.
 - `electron-updater` wiring + `update.channel` config + onboarding
@@ -340,7 +340,7 @@ by which artifact / package-manager tap they installed.
 **Update checks are off by default.** No outbound poll runs until the
 user opts in (`update.check: true`), and `CAIRN_OFFLINE=1` or
 `agent.offline: true` always wins. When enabled, the desktop shell
-reads a Sparkle appcast at `updates/<channel>.xml`; per-OS native
+reads electron-updater's native YAML feed at `updates/<channel>/latest-<platform>.yml`; per-OS native
 updaters (electron-updater on macOS / Windows, AppImageUpdate on
 Linux) handle the download. Every artifact additionally carries a
 Cosign keyless OIDC signature on the Sigstore Rekor transparency log;
@@ -389,7 +389,7 @@ by which artifact / package-manager tap they installed.
 **Update checks are off by default.** No outbound poll runs until the
 user opts in (`update.check: true`), and `CAIRN_OFFLINE=1` or
 `agent.offline: true` always wins. When enabled, the desktop shell
-reads a Sparkle appcast at `updates/<channel>.xml`; per-OS native
+reads electron-updater's native YAML feed at `updates/<channel>/latest-<platform>.yml`; per-OS native
 updaters (electron-updater on macOS / Windows, AppImageUpdate on
 Linux) handle the download. Every artifact additionally carries a
 Cosign keyless OIDC signature on the Sigstore Rekor transparency log;
@@ -559,7 +559,7 @@ the user-facing summary lives in [Updates](../usage/updates.md).
 8. Trigger the `release-stable.yml` workflow (added in follow-up
    under #32) with the tag as input. It builds + signs + publishes
    to all stable destinations + updates the `homebrew-cairn` tap +
-   updates `updates/stable.xml` Sparkle feed.
+   updates the `updates/stable/latest-<platform>.yml` electron-updater feed.
 9. Verify artifacts on a clean machine: `cairn release verify
    <downloaded>.dmg` must print `ok: cosign + apple-developer-id`.
 10. Post the release notes to GitHub Releases; mark as latest.
@@ -572,7 +572,7 @@ the user-facing summary lives in [Updates](../usage/updates.md).
    in `release-dry-run`).
 3. Trigger `release-beta.yml` workflow — builds, signs, publishes to
    the `homebrew-cairn-beta` tap, marks the GitHub Release as
-   "Pre-release", updates `updates/beta.xml`.
+   "Pre-release", updates `updates/beta/latest-<platform>.yml`.
 4. Announce in the release thread; ask beta testers for feedback.
 
 ### Promote a nightly to beta
@@ -761,7 +761,7 @@ The desktop app's onboarding asks once whether you want update
 checks. You can change your mind any time in Settings → Updates.
 
 When checks are enabled, the desktop app polls
-`https://windoliver.github.io/cairn/updates/<channel>.xml` once per
+`https://windoliver.github.io/cairn/updates/<channel>/latest-<platform>.yml` once per
 24 hours. The payload it sends is metadata-only: channel name,
 current version, OS, arch, and an opaque rotating install ID that
 resets weekly. No vault content, no user identity, no IP-derived

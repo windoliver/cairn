@@ -5,8 +5,8 @@ much stability and risk you want.
 
 | Channel | Who it's for | How you get it |
 |---|---|---|
-| **stable** (default) | Everyone. Tagged releases only. | `brew install cairn` · `cargo install cairn` · DMG / MSI / AppImage / deb from [GitHub Releases](https://github.com/windoliver/cairn/releases) |
-| **beta** | Users who want the next release with at least one tagged checkpoint of stability. | `brew tap cairn/beta && brew install cairn` · GitHub Pre-Releases · `cargo install cairn --version vX.Y.Z-beta.N` |
+| **stable** (default) | Everyone. Tagged releases only. | `brew install cairn` · `cargo install --locked --bin cairn cairn-cli` · DMG / MSI / AppImage / deb from [GitHub Releases](https://github.com/windoliver/cairn/releases) |
+| **beta** | Users who want the next release with at least one tagged checkpoint of stability. | `brew tap cairn/beta && brew install cairn` · GitHub Pre-Releases |
 | **nightly** | Developers and dogfooders. No semver promise. Aged off after 30 days. | GitHub Releases "Nightly" section only — no package-manager publish. |
 
 ## Switching channels (desktop)
@@ -42,10 +42,9 @@ brew install cairn
 brew uninstall cairn
 brew untap cairn/beta
 brew install cairn
-
-# Stable → specific beta (cargo):
-cargo install cairn --force --version vX.Y.Z-beta.N
 ```
+
+Beta releases are not published to crates.io (per ADR 0005 §1). To switch the CLI to beta, use the Homebrew tap shown above, or download the signed beta artifact from [GitHub Pre-Releases](https://github.com/windoliver/cairn/releases) and verify it manually.
 
 Your vault is **not** touched by any of these — channel switches are
 binary-only.
@@ -145,8 +144,8 @@ Brew, cargo, winget, and scoop own their own update cadence:
 - `brew upgrade cairn` — pulls the latest from the tap you have
   installed (stable tap by default, beta tap if you ran `brew tap
   cairn/beta`).
-- `cargo install cairn --force` — pulls the latest non-pre-release
-  from crates.io. Pin a pre-release with `--version`.
+- `cargo install --locked --bin cairn cairn-cli --force` — pulls the latest non-pre-release
+  from crates.io.
 - `winget upgrade cairn` / `scoop update cairn` — both walk the
   upstream feed.
 
