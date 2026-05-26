@@ -25,7 +25,12 @@ const DEFAULT_BOOT_TIMEOUT_MS = 10_000;
  * @typedef {object} SidecarHandle
  * @property {string} address      e.g. "127.0.0.1:54321"
  * @property {boolean} exited
+ * @property {(cb: (code: number|null, signal: string|null) => void) => void} onExit
+ *   Subscribe to child exit. Fires once with the exit code + signal. If
+ *   the child has already exited, the callback fires on the next tick.
  * @property {() => Promise<void>} kill
+ *   SIGTERM, escalate to SIGKILL after 5s, resolve when the child has
+ *   actually exited. Idempotent.
  */
 
 /**
@@ -88,6 +93,47 @@ export async function spawnSidecar(opts) {
     });
   });
 
+  // Persistent exit-observer attached BEFORE the boot race so both
+  // boot-failure cleanup AND post-boot kill() share the same await
+  // path. Without this, a child that exits between any guard check
+  // and a later-attached "exit" listener would leave the cleanup
+  // promise pending forever.
+  //
+  // Resolves on either "exit" (normal child lifecycle) OR "error"
+  // (ENOENT — spawn produced a child object but it never actually
+  // started; no "exit" event will ever arrive in that case).
+  let exited = child.exitCode !== null || child.signalCode !== null;
+  const exitPromise = new Promise((resolve) => {
+    if (exited) {
+      resolve();
+      return;
+    }
+    const done = () => {
+      exited = true;
+      resolve();
+    };
+    child.once("exit", done);
+    child.once("error", done);
+  });
+
+  /** Send SIGTERM, escalate to SIGKILL after 5s, await actual exit. */
+  async function terminate() {
+    if (exited) return;
+    try {
+      child.kill("SIGTERM");
+    } catch {}
+    const grace = setTimeout(() => {
+      try {
+        child.kill("SIGKILL");
+      } catch {}
+    }, 5000);
+    try {
+      await exitPromise;
+    } finally {
+      clearTimeout(grace);
+    }
+  }
+
   let bootTimeoutId;
   const timeout = new Promise((_, reject) => {
     bootTimeoutId = setTimeout(
@@ -102,30 +148,15 @@ export async function spawnSidecar(opts) {
     errPromise.catch(() => {});
     clearTimeout(bootTimeoutId);
   } catch (err) {
-    try {
-      child.kill("SIGTERM");
-    } catch {}
+    clearTimeout(bootTimeoutId);
+    // Use the same awaited terminate path; do not throw until the
+    // child has actually exited, otherwise port/log resources can leak.
+    await terminate();
     await new Promise((resolve) => {
       logStream.end(() => resolve());
     });
     throw err;
   }
-
-  // Single, persistent exit-observer attached BEFORE returning the handle.
-  // Without this, a child that exits in the window between the kill() guard
-  // check and the kill()-local "exit" listener registration would leave the
-  // kill() promise pending forever, hanging app shutdown.
-  let exited = child.exitCode !== null || child.signalCode !== null;
-  const exitPromise = new Promise((resolve) => {
-    if (exited) {
-      resolve();
-      return;
-    }
-    child.once("exit", () => {
-      exited = true;
-      resolve();
-    });
-  });
 
   /** @type {SidecarHandle} */
   const handle = {
@@ -133,21 +164,18 @@ export async function spawnSidecar(opts) {
     get exited() {
       return exited;
     },
-    async kill() {
-      if (exited) return;
-      try {
-        child.kill("SIGTERM");
-      } catch {}
-      const grace = setTimeout(() => {
-        try {
-          child.kill("SIGKILL");
-        } catch {}
-      }, 5000);
-      try {
-        await exitPromise;
-      } finally {
-        clearTimeout(grace);
+    /** Resolves when the child has actually exited. */
+    onExit(callback) {
+      if (exited) {
+        // Already exited before the consumer attached — fire next tick
+        // so consumers can install other handlers first.
+        setImmediate(callback);
+      } else {
+        child.once("exit", (code, signal) => callback(code, signal));
       }
+    },
+    async kill() {
+      await terminate();
     },
   };
   return handle;

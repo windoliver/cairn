@@ -65,11 +65,16 @@ export async function readRegistry(path) {
     err.backupPath = backupPath;
     throw err;
   }
-  if (parsed.version > CURRENT_VERSION) {
+  if (parsed.version !== CURRENT_VERSION) {
+    // Pre-v1 (legacy, ≤0) AND newer-than-v1 (future) both refused here.
+    // v1 is the initial schema; no migration path exists yet. When v2+
+    // lands, this is the function that grows a migration table.
     const err = new Error(
-      `vault_registry.json was written by a newer Cairn (version ${parsed.version}). ` +
-        `This build only understands version ${CURRENT_VERSION}. ` +
-        `Upgrade Cairn or point at a different vault.`,
+      `vault_registry.json reports version ${parsed.version}; this build ` +
+        `only understands version ${CURRENT_VERSION}. ` +
+        (parsed.version > CURRENT_VERSION
+          ? "Upgrade Cairn or point at a different vault."
+          : "No migration path is defined for older versions."),
     );
     err.code = "UNSUPPORTED_VERSION";
     err.version = parsed.version;

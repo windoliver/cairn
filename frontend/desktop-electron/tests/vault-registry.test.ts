@@ -97,6 +97,27 @@ describe("vault-registry", () => {
     });
   });
 
+  it("throws UNSUPPORTED_VERSION for lower (pre-v1) version", async () => {
+    writeFileSync(
+      path,
+      JSON.stringify({ version: 0, vaults: [], active: null }),
+    );
+    await expect(readRegistry(path)).rejects.toMatchObject({
+      code: "UNSUPPORTED_VERSION",
+      version: 0,
+    });
+  });
+
+  it("throws UNSUPPORTED_VERSION for fractional version", async () => {
+    writeFileSync(
+      path,
+      JSON.stringify({ version: 1.5, vaults: [], active: null }),
+    );
+    await expect(readRegistry(path)).rejects.toMatchObject({
+      code: "UNSUPPORTED_VERSION",
+    });
+  });
+
   it("throws UNSUPPORTED_VERSION for future schema version", async () => {
     writeFileSync(
       path,

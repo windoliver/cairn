@@ -254,6 +254,49 @@ async function main() {
     return;
   }
 
+  // Post-launch crash recovery: if the sidecar dies after we open the
+  // window, attempt one silent restart; on a second crash, surface a
+  // blocking dialog with the log path. Quitting via app.quit suppresses
+  // restart (the exit was intentional).
+  let intentionalShutdown = false;
+  app.on("before-quit", () => {
+    intentionalShutdown = true;
+  });
+  let restartAttempted = false;
+  function wireCrashHandler(h) {
+    h.onExit(async (code, signal) => {
+      if (intentionalShutdown) return;
+      if (!restartAttempted) {
+        restartAttempted = true;
+        try {
+          const next = await spawnSidecar({
+            binary: sidecarBinary(),
+            vault: vaultPath,
+            logPath: LOG_PATH,
+          });
+          handle = next;
+          wireCrashHandler(next);
+          return;
+        } catch (err) {
+          // Restart failed; fall through to dialog.
+          console.error("sidecar restart failed:", err);
+        }
+      }
+      const choice = dialog.showMessageBoxSync({
+        type: "error",
+        title: "Cairn backend stopped",
+        message:
+          `The sidecar exited unexpectedly (code=${code}, signal=${signal}).` +
+          (restartAttempted ? " Automatic restart failed." : ""),
+        detail: `Log: ${LOG_PATH}`,
+        buttons: ["Quit"],
+      });
+      void choice;
+      app.exit(1);
+    });
+  }
+  wireCrashHandler(handle);
+
   await createWindow();
 }
 

@@ -93,4 +93,62 @@ describe("sidecar", () => {
     expect(handle.exited).toBe(true);
     handle = null; // afterEach skip
   });
+
+  it("onExit fires when the child exits after discovery", async () => {
+    // Fake binary: print the discovery line, then exit 0 after 50ms.
+    const p = join(dir, "die-after-discovery");
+    writeFileSync(
+      p,
+      [
+        "#!/bin/sh",
+        'echo "cairn-desktop listening on http://127.0.0.1:54322"',
+        "sleep 0.05",
+        "exit 0",
+      ].join("\n"),
+    );
+    chmodSync(p, 0o755);
+    handle = await spawnSidecar({
+      binary: p,
+      vault: "/tmp/v",
+      logPath: join(dir, "log"),
+    });
+    expect(handle.address).toBe("127.0.0.1:54322");
+    const exitInfo = await new Promise<{ code: number | null; signal: string | null }>(
+      (resolve) => handle.onExit((code, signal) => resolve({ code, signal })),
+    );
+    expect(handle.exited).toBe(true);
+    expect(exitInfo.code).toBe(0);
+    handle = null;
+  });
+
+  it("boot-timeout cleanup waits for child exit (does not leak)", async () => {
+    // Fake binary: trap TERM, sleep forever. spawnSidecar must wait for
+    // the SIGKILL escalation rather than throwing while the child is
+    // still alive.
+    const p = join(dir, "trap-term");
+    writeFileSync(
+      p,
+      [
+        "#!/bin/sh",
+        "trap '' TERM",
+        "sleep 30",
+      ].join("\n"),
+    );
+    chmodSync(p, 0o755);
+    const start = Date.now();
+    await expect(
+      spawnSidecar({
+        binary: p,
+        vault: "/tmp/v",
+        logPath: join(dir, "log"),
+        bootTimeoutMs: 200,
+      }),
+    ).rejects.toThrow(/timeout/i);
+    const elapsed = Date.now() - start;
+    // Must wait long enough for the 5s SIGKILL escalation in terminate().
+    // Allow generous bounds (CI runners are slow); the key check is
+    // that we don't return immediately at ~200ms timeout.
+    expect(elapsed).toBeGreaterThanOrEqual(5_000);
+    expect(elapsed).toBeLessThan(10_000);
+  }, 15_000);
 });
