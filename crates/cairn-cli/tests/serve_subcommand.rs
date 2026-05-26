@@ -118,7 +118,10 @@ fn serve_cors_preflight_for_authenticated_origin() {
     let resp = ureq::request("OPTIONS", &format!("http://{addr}/api/v1/vault"))
         .set("Origin", "null")
         .set("Access-Control-Request-Method", "GET")
-        .set("Access-Control-Request-Headers", "authorization,content-type")
+        .set(
+            "Access-Control-Request-Headers",
+            "authorization,content-type",
+        )
         .call()
         .expect("OPTIONS preflight");
     assert!(

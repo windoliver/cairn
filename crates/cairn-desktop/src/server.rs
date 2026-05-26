@@ -60,9 +60,7 @@ pub fn router_with_auth(repo: DesktopRepository, token: Option<String>) -> Route
         .with_state(state.clone());
 
     let (api_routes, cors) = if let Some(t) = token {
-        let auth_state = AuthState {
-            token: Arc::new(t),
-        };
+        let auth_state = AuthState { token: Arc::new(t) };
         let guarded = api_routes.layer(from_fn_with_state(auth_state, require_bearer));
         // Packaged renderer is the only legitimate caller; lock to its
         // origins. Electron's file:// renderer reports Origin: null;

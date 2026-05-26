@@ -65,10 +65,10 @@ pub fn subcommand() -> clap::Command {
                      tests / local dev only.",
                 ),
         )
-        // NB: `--vault` is supplied by the top-level `cairn` command as a
-        // global arg (see command.rs); we do not redeclare it here. clap
-        // panics on first access if the same arg name appears with a
-        // different `value_parser` at both levels.
+    // NB: `--vault` is supplied by the top-level `cairn` command as a
+    // global arg (see command.rs); we do not redeclare it here. clap
+    // panics on first access if the same arg name appears with a
+    // different `value_parser` at both levels.
 }
 
 /// Entry point. Returns an `ExitCode` so `main` can propagate.
@@ -221,8 +221,7 @@ fn generate_token() -> String {
 }
 
 fn base64url_no_pad(input: &[u8]) -> String {
-    const ALPHA: &[u8] =
-        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    const ALPHA: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
     let mut out = String::with_capacity(input.len().div_ceil(3) * 4);
     let mut i = 0;
     while i + 3 <= input.len() {
@@ -263,8 +262,7 @@ async fn shutdown_signal() {
     #[cfg(unix)]
     let terminate = async {
         use tokio::signal::unix::{SignalKind, signal};
-        let mut term = signal(SignalKind::terminate())
-            .expect("invariant: install SIGTERM handler");
+        let mut term = signal(SignalKind::terminate()).expect("invariant: install SIGTERM handler");
         term.recv().await;
     };
 
