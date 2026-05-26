@@ -86,11 +86,7 @@ pub trait SnapshotArtifactReader: Send + Sync {
 pub trait SnapshotApplier: Send + Sync {
     /// Stage the artifact's contents into a transient location. Returns
     /// the staging root for diagnostic/audit logging.
-    fn stage(
-        &self,
-        artifact_path: &Path,
-        backup_id: &str,
-    ) -> Result<PathBuf, StoreError>;
+    fn stage(&self, artifact_path: &Path, backup_id: &str) -> Result<PathBuf, StoreError>;
 
     /// Atomically swap the staged contents in as the live vault DB.
     /// After this returns Ok, readers see the restored vault. Idempotent

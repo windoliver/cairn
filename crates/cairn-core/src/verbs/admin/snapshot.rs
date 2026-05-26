@@ -12,7 +12,7 @@ use crate::domain::admin::{AdminContext, AdminError, AdminRole};
 use crate::domain::backup::BackupRegistryEntry;
 use crate::domain::{Rfc3339Timestamp, TargetId};
 use crate::verbs::admin::manifest::{
-    sha256_hex, IntegrityEnvelope, SnapshotManifest, MANIFEST_SCHEMA_VERSION,
+    IntegrityEnvelope, MANIFEST_SCHEMA_VERSION, SnapshotManifest, sha256_hex,
 };
 use std::path::PathBuf;
 
@@ -80,7 +80,12 @@ pub fn run(
         .map_err(|e| AdminError::Store(Box::new(e)))?;
 
     let materialized = producer
-        .materialize(&req.out_dir, &backup_id, &manifest_bytes, req.label.as_deref())
+        .materialize(
+            &req.out_dir,
+            &backup_id,
+            &manifest_bytes,
+            req.label.as_deref(),
+        )
         .map_err(AdminError::Store)?;
 
     let envelope = IntegrityEnvelope {
@@ -154,12 +159,7 @@ mod tests {
             Ok(self.is_op)
         }
 
-        fn grant_role(
-            &self,
-            _: &Identity,
-            _: AdminRole,
-            _: &Identity,
-        ) -> Result<(), StoreError> {
+        fn grant_role(&self, _: &Identity, _: AdminRole, _: &Identity) -> Result<(), StoreError> {
             Ok(())
         }
 
@@ -183,10 +183,7 @@ mod tests {
             ))
         }
 
-        fn get_connector_state(
-            &self,
-            _: &str,
-        ) -> Result<Option<ConnectorStateRow>, StoreError> {
+        fn get_connector_state(&self, _: &str) -> Result<Option<ConnectorStateRow>, StoreError> {
             Ok(None)
         }
 
@@ -214,9 +211,7 @@ mod tests {
             Ok("vault-x".into())
         }
 
-        fn migration_heads(
-            &self,
-        ) -> Result<std::collections::BTreeMap<String, u32>, StoreError> {
+        fn migration_heads(&self) -> Result<std::collections::BTreeMap<String, u32>, StoreError> {
             Ok([("store".to_string(), 4u32)].into_iter().collect())
         }
     }
@@ -272,7 +267,9 @@ mod tests {
     }
 
     fn fake_registry() -> FakeRegistry {
-        FakeRegistry { entries: Mutex::new(Vec::new()) }
+        FakeRegistry {
+            entries: Mutex::new(Vec::new()),
+        }
     }
 
     #[test]
@@ -305,8 +302,7 @@ mod tests {
         let producer = FakeProducer;
         let registry = fake_registry();
 
-        let err =
-            run(&op_ctx(), &req, &admin, &meta, &producer, &registry).unwrap_err();
+        let err = run(&op_ctx(), &req, &admin, &meta, &producer, &registry).unwrap_err();
 
         assert!(
             matches!(err, AdminError::NotAuthorized { .. }),

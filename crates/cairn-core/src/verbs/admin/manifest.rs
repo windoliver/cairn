@@ -205,7 +205,10 @@ mod tests {
             db_sha256: "bb".into(),
             tree_sha256: "cc".into(),
         };
-        let env_b = IntegrityEnvelope { db_sha256: "ff".into(), ..env_a.clone() };
+        let env_b = IntegrityEnvelope {
+            db_sha256: "ff".into(),
+            ..env_a.clone()
+        };
         assert_ne!(env_a.artifact_sha256(), env_b.artifact_sha256());
     }
 

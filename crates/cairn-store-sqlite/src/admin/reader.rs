@@ -24,8 +24,7 @@ impl SnapshotArtifactReader for SqliteSnapshotReader {
     /// Returns `StoreError` if the file cannot be opened, the tarball is
     /// malformed, or `manifest.json` is not present.
     fn read_manifest(&self, artifact_path: &Path) -> Result<SnapshotManifest, StoreError> {
-        let file = std::fs::File::open(artifact_path)
-            .map_err(|e| Box::new(e) as StoreError)?;
+        let file = std::fs::File::open(artifact_path).map_err(|e| Box::new(e) as StoreError)?;
         let mut archive = tar::Archive::new(file);
         for entry in archive.entries().map_err(|e| Box::new(e) as StoreError)? {
             let mut e = entry.map_err(|e| Box::new(e) as StoreError)?;
@@ -64,8 +63,7 @@ impl SnapshotArtifactReader for SqliteSnapshotReader {
     ///
     /// [`SqliteSnapshotProducer::materialize`]: super::producer::SqliteSnapshotProducer::materialize
     fn read_envelope(&self, artifact_path: &Path) -> Result<IntegrityEnvelope, StoreError> {
-        let file = std::fs::File::open(artifact_path)
-            .map_err(|e| Box::new(e) as StoreError)?;
+        let file = std::fs::File::open(artifact_path).map_err(|e| Box::new(e) as StoreError)?;
         let mut archive = tar::Archive::new(file);
 
         let mut manifest_sha = String::new();

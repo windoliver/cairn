@@ -28,7 +28,10 @@ impl SqliteSnapshotProducer {
     /// `wiki/`, `.cairn/`). `db_path` is the path to the live `cairn.db`.
     #[must_use]
     pub fn new(vault_root: PathBuf, db_path: PathBuf) -> Self {
-        Self { vault_root, db_path }
+        Self {
+            vault_root,
+            db_path,
+        }
     }
 }
 
@@ -46,8 +49,7 @@ impl SnapshotArtifactProducer for SqliteSnapshotProducer {
 
         std::fs::create_dir_all(out_dir).map_err(|e| Box::new(e) as StoreError)?;
 
-        let file = std::fs::File::create(&artifact_path)
-            .map_err(|e| Box::new(e) as StoreError)?;
+        let file = std::fs::File::create(&artifact_path).map_err(|e| Box::new(e) as StoreError)?;
         let mut tar = tar::Builder::new(file);
 
         let mut db_hasher = Sha256::new();
@@ -68,8 +70,7 @@ impl SnapshotArtifactProducer for SqliteSnapshotProducer {
         // ── 2. cairn.db ──────────────────────────────────────────────────────
         // Read once into memory — vaults are small enough for v0.2.
         // TODO(perf): stream-while-hashing for large vaults (follow-up).
-        let db_bytes =
-            std::fs::read(&self.db_path).map_err(|e| Box::new(e) as StoreError)?;
+        let db_bytes = std::fs::read(&self.db_path).map_err(|e| Box::new(e) as StoreError)?;
         db_hasher.update(&db_bytes);
         let db_len = db_bytes.len() as u64;
         let mut db_header = tar::Header::new_gnu();
@@ -106,14 +107,8 @@ impl SnapshotArtifactProducer for SqliteSnapshotProducer {
 /// Recursively walk `dir` in deterministic (sorted) order and update
 /// `hasher` with `"<prefix>/<filename>"` bytes + file size as `u64`
 /// little-endian for every regular file.
-fn walk_for_tree_hash(
-    dir: &Path,
-    prefix: &str,
-    hasher: &mut Sha256,
-) -> std::io::Result<()> {
-    let mut entries: Vec<_> = std::fs::read_dir(dir)?
-        .filter_map(Result::ok)
-        .collect();
+fn walk_for_tree_hash(dir: &Path, prefix: &str, hasher: &mut Sha256) -> std::io::Result<()> {
+    let mut entries: Vec<_> = std::fs::read_dir(dir)?.filter_map(Result::ok).collect();
     // Sort by path for determinism across platforms.
     entries.sort_by_key(std::fs::DirEntry::path);
     for entry in entries {

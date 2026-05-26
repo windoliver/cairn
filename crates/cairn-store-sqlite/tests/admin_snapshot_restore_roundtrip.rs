@@ -125,8 +125,8 @@ fn snapshot_restore_roundtrip_preserves_records() {
         local_machine_id: TEST_MACHINE.into(),
         backup_kind: "snapshot".into(),
     };
-    let snap_resp = snapshot::run(&ctx, &snap_req, &admin, &meta, &producer, &registry)
-        .expect("snapshot run");
+    let snap_resp =
+        snapshot::run(&ctx, &snap_req, &admin, &meta, &producer, &registry).expect("snapshot run");
 
     // Snapshot manifest record count should equal active-non-tombstoned rows.
     assert_eq!(
@@ -143,8 +143,7 @@ fn snapshot_restore_roundtrip_preserves_records() {
     // Write a new row that should NOT appear in the post-restore fingerprint.
     // This shows the restore overwrites the mutated DB with the snapshot copy.
     {
-        let conn_mut =
-            cairn_store_sqlite::open_sync(&db_path).expect("reopen db for mutation");
+        let conn_mut = cairn_store_sqlite::open_sync(&db_path).expect("reopen db for mutation");
         conn_mut
             .execute(
                 "INSERT INTO records \
@@ -190,9 +189,16 @@ fn snapshot_restore_roundtrip_preserves_records() {
         local_machine_id: TEST_MACHINE.into(),
     };
 
-    let restore_resp =
-        restore::run(&ctx, &restore_req, &admin, &meta2, &reader, &applier, &consent)
-            .expect("restore run");
+    let restore_resp = restore::run(
+        &ctx,
+        &restore_req,
+        &admin,
+        &meta2,
+        &reader,
+        &applier,
+        &consent,
+    )
+    .expect("restore run");
 
     // ── 6. Verify ──────────────────────────────────────────────────────────
     // After swap_in the live DB is the restored copy; open it and fingerprint.

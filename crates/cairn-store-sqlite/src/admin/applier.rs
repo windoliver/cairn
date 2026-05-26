@@ -42,8 +42,7 @@ impl SnapshotApplier for SqliteSnapshotApplier {
         }
         std::fs::create_dir_all(&staging).map_err(|e| Box::new(e) as StoreError)?;
 
-        let file = std::fs::File::open(artifact_path)
-            .map_err(|e| Box::new(e) as StoreError)?;
+        let file = std::fs::File::open(artifact_path).map_err(|e| Box::new(e) as StoreError)?;
         let mut archive = tar::Archive::new(file);
         archive
             .unpack(&staging)
@@ -75,13 +74,11 @@ impl SnapshotApplier for SqliteSnapshotApplier {
             )) as StoreError);
         }
 
-        std::fs::create_dir_all(&live_cairn_dir)
-            .map_err(|e| Box::new(e) as StoreError)?;
+        std::fs::create_dir_all(&live_cairn_dir).map_err(|e| Box::new(e) as StoreError)?;
 
         // Atomic rename of the DB. On most POSIX filesystems this is a
         // single syscall when source and destination are on the same device.
-        std::fs::rename(&staged_db, &live_db)
-            .map_err(|e| Box::new(e) as StoreError)?;
+        std::fs::rename(&staged_db, &live_db).map_err(|e| Box::new(e) as StoreError)?;
 
         // Restore markdown vault trees if present.
         for sub in ["wiki", "raw"] {
@@ -89,11 +86,9 @@ impl SnapshotApplier for SqliteSnapshotApplier {
             let live = self.vault_root.join(sub);
             if staged.exists() {
                 if live.exists() {
-                    std::fs::remove_dir_all(&live)
-                        .map_err(|e| Box::new(e) as StoreError)?;
+                    std::fs::remove_dir_all(&live).map_err(|e| Box::new(e) as StoreError)?;
                 }
-                std::fs::rename(&staged, &live)
-                    .map_err(|e| Box::new(e) as StoreError)?;
+                std::fs::rename(&staged, &live).map_err(|e| Box::new(e) as StoreError)?;
             }
         }
 
@@ -132,7 +127,9 @@ mod tests {
         std::fs::write(&db_path, b"mutated-db").expect("mutate db");
 
         let applier = SqliteSnapshotApplier::new(vault_root.clone());
-        let staging = applier.stage(&artifact.path, "apply-test-001").expect("stage");
+        let staging = applier
+            .stage(&artifact.path, "apply-test-001")
+            .expect("stage");
         assert!(staging.exists(), "staging dir must exist after stage");
 
         applier.swap_in(&staging).expect("swap_in");
@@ -146,6 +143,9 @@ mod tests {
         );
 
         // Staging dir should be cleaned up.
-        assert!(!staging.exists(), "staging dir must be removed after swap_in");
+        assert!(
+            !staging.exists(),
+            "staging dir must be removed after swap_in"
+        );
     }
 }

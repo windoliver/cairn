@@ -6,7 +6,7 @@ use crate::contract::snapshot_artifact::{
     ConsentLog, SnapshotApplier, SnapshotArtifactReader, SnapshotMetadataProvider,
 };
 use crate::domain::admin::{AdminContext, AdminError, AdminRole};
-use crate::verbs::admin::manifest::{sha256_hex, SnapshotManifest, MANIFEST_SCHEMA_VERSION};
+use crate::verbs::admin::manifest::{MANIFEST_SCHEMA_VERSION, SnapshotManifest, sha256_hex};
 use std::path::PathBuf;
 
 /// Request to restore a snapshot artifact into the local vault.
@@ -166,7 +166,9 @@ mod tests {
         SnapshotArtifactReader as ReaderT, SnapshotMetadataProvider as MetaT,
     };
     use crate::domain::Identity;
-    use crate::verbs::admin::manifest::{IntegrityEnvelope, SnapshotManifest, MANIFEST_SCHEMA_VERSION};
+    use crate::verbs::admin::manifest::{
+        IntegrityEnvelope, MANIFEST_SCHEMA_VERSION, SnapshotManifest,
+    };
     use std::collections::{BTreeMap, HashSet};
     use std::path::Path;
     use std::sync::{Arc, Mutex};
@@ -199,12 +201,7 @@ mod tests {
             Ok(self.is_op)
         }
 
-        fn grant_role(
-            &self,
-            _: &Identity,
-            _: AdminRole,
-            _: &Identity,
-        ) -> Result<(), StoreError> {
+        fn grant_role(&self, _: &Identity, _: AdminRole, _: &Identity) -> Result<(), StoreError> {
             Ok(())
         }
 
@@ -228,10 +225,7 @@ mod tests {
             ))
         }
 
-        fn get_connector_state(
-            &self,
-            _: &str,
-        ) -> Result<Option<ConnectorStateRow>, StoreError> {
+        fn get_connector_state(&self, _: &str) -> Result<Option<ConnectorStateRow>, StoreError> {
             Ok(None)
         }
 
@@ -354,12 +348,14 @@ mod tests {
             heads: m.schema_versions.clone(),
             frontier: "step:9".into(),
         };
-        let reader = StubReader { manifest: m, envelope: env };
+        let reader = StubReader {
+            manifest: m,
+            envelope: env,
+        };
         let applier = default_applier();
         let consent = StubConsent { purged: 0 };
 
-        let err = run(&op_ctx(), &req, &admin, &meta, &reader, &applier, &consent)
-            .unwrap_err();
+        let err = run(&op_ctx(), &req, &admin, &meta, &reader, &applier, &consent).unwrap_err();
         assert!(
             matches!(err, AdminError::NotAuthorized { .. }),
             "expected NotAuthorized, got {err:?}",
@@ -385,12 +381,14 @@ mod tests {
             heads: m.schema_versions.clone(),
             frontier: "step:9".into(),
         };
-        let reader = StubReader { manifest: m, envelope: env };
+        let reader = StubReader {
+            manifest: m,
+            envelope: env,
+        };
         let applier = default_applier();
         let consent = StubConsent { purged: 0 };
 
-        let err = run(&op_ctx(), &req, &admin, &meta, &reader, &applier, &consent)
-            .unwrap_err();
+        let err = run(&op_ctx(), &req, &admin, &meta, &reader, &applier, &consent).unwrap_err();
         assert!(
             matches!(
                 err,
@@ -420,12 +418,14 @@ mod tests {
             heads: m.schema_versions.clone(),
             frontier: "step:9".into(),
         };
-        let reader = StubReader { manifest: m, envelope: env };
+        let reader = StubReader {
+            manifest: m,
+            envelope: env,
+        };
         let applier = default_applier();
         let consent = StubConsent { purged: 0 };
 
-        let err = run(&op_ctx(), &req, &admin, &meta, &reader, &applier, &consent)
-            .unwrap_err();
+        let err = run(&op_ctx(), &req, &admin, &meta, &reader, &applier, &consent).unwrap_err();
         assert!(
             matches!(
                 err,
@@ -453,14 +453,22 @@ mod tests {
             heads: [("store".to_string(), 4u32)].into_iter().collect(),
             frontier: "step:9".into(),
         };
-        let reader = StubReader { manifest: m, envelope: env };
+        let reader = StubReader {
+            manifest: m,
+            envelope: env,
+        };
         let applier = default_applier();
         let consent = StubConsent { purged: 0 };
 
-        let err = run(&op_ctx(), &req, &admin, &meta, &reader, &applier, &consent)
-            .unwrap_err();
+        let err = run(&op_ctx(), &req, &admin, &meta, &reader, &applier, &consent).unwrap_err();
         assert!(
-            matches!(err, AdminError::SchemaTooNew { snapshot: 99, local: 4 }),
+            matches!(
+                err,
+                AdminError::SchemaTooNew {
+                    snapshot: 99,
+                    local: 4
+                }
+            ),
             "expected SchemaTooNew(99, 4), got {err:?}",
         );
     }
@@ -484,12 +492,14 @@ mod tests {
             heads: m.schema_versions.clone(),
             frontier: "step:9".into(),
         };
-        let reader = StubReader { manifest: m, envelope: env };
+        let reader = StubReader {
+            manifest: m,
+            envelope: env,
+        };
         let applier = default_applier();
         let consent = StubConsent { purged: 0 };
 
-        let err = run(&op_ctx(), &req, &admin, &meta, &reader, &applier, &consent)
-            .unwrap_err();
+        let err = run(&op_ctx(), &req, &admin, &meta, &reader, &applier, &consent).unwrap_err();
         assert!(
             matches!(err, AdminError::IntegrityMismatch { .. }),
             "expected IntegrityMismatch, got {err:?}",
@@ -511,12 +521,14 @@ mod tests {
             heads: m.schema_versions.clone(),
             frontier: "step:9".into(),
         };
-        let reader = StubReader { manifest: m.clone(), envelope: env };
+        let reader = StubReader {
+            manifest: m.clone(),
+            envelope: env,
+        };
         let applier = default_applier();
         let consent = StubConsent { purged: 0 };
 
-        let resp =
-            run(&op_ctx(), &req, &admin, &meta, &reader, &applier, &consent).unwrap();
+        let resp = run(&op_ctx(), &req, &admin, &meta, &reader, &applier, &consent).unwrap();
         assert!(
             !*applier.swapped.lock().expect("test mutex"),
             "dry-run never swaps",
@@ -540,12 +552,14 @@ mod tests {
             heads: m.schema_versions.clone(),
             frontier: "step:99".into(),
         };
-        let reader = StubReader { manifest: m, envelope: env };
+        let reader = StubReader {
+            manifest: m,
+            envelope: env,
+        };
         let applier = default_applier();
         let consent = StubConsent { purged: 3 };
 
-        let resp =
-            run(&op_ctx(), &req, &admin, &meta, &reader, &applier, &consent).unwrap();
+        let resp = run(&op_ctx(), &req, &admin, &meta, &reader, &applier, &consent).unwrap();
         assert!(
             *applier.staged.lock().expect("test mutex"),
             "stage must have been called",
@@ -579,12 +593,14 @@ mod tests {
             heads: m.schema_versions.clone(),
             frontier: "step:9".into(),
         };
-        let reader = StubReader { manifest: m, envelope: env };
+        let reader = StubReader {
+            manifest: m,
+            envelope: env,
+        };
         let applier = default_applier();
         let consent = StubConsent { purged: 0 };
 
-        let err = run(&op_ctx(), &req, &admin, &meta, &reader, &applier, &consent)
-            .unwrap_err();
+        let err = run(&op_ctx(), &req, &admin, &meta, &reader, &applier, &consent).unwrap_err();
         assert!(
             matches!(
                 err,

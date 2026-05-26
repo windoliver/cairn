@@ -35,25 +35,28 @@ impl SqliteConsentLog {
     /// to match the forget set.
     #[must_use]
     pub fn new(live_db: PathBuf, restored_db: PathBuf) -> Self {
-        Self { live_db, restored_db }
+        Self {
+            live_db,
+            restored_db,
+        }
     }
 }
 
 impl ConsentLog for SqliteConsentLog {
     fn forgotten_record_target_hashes(&self) -> Result<HashSet<String>, StoreError> {
-        let hashes = current_record_forget_hashes(&self.live_db)
-            .map_err(|e| Box::new(e) as StoreError)?;
+        let hashes =
+            current_record_forget_hashes(&self.live_db).map_err(|e| Box::new(e) as StoreError)?;
         Ok(hashes.into_iter().collect())
     }
 
     fn apply_post_restore_purge(&self) -> Result<u64, StoreError> {
-        let forget_hashes = current_record_forget_hashes(&self.live_db)
-            .map_err(|e| Box::new(e) as StoreError)?;
+        let forget_hashes =
+            current_record_forget_hashes(&self.live_db).map_err(|e| Box::new(e) as StoreError)?;
         if forget_hashes.is_empty() {
             return Ok(0);
         }
-        let targets = collect_target_ids(&self.restored_db)
-            .map_err(|e| Box::new(e) as StoreError)?;
+        let targets =
+            collect_target_ids(&self.restored_db).map_err(|e| Box::new(e) as StoreError)?;
         let to_purge: Vec<TargetId> = targets
             .into_iter()
             .filter(|t| forget_hashes.contains(&target_id_hash(t.as_str())))
@@ -62,8 +65,7 @@ impl ConsentLog for SqliteConsentLog {
             return Ok(0);
         }
         let count = u64::try_from(to_purge.len()).unwrap_or(u64::MAX);
-        purge_targets(&self.restored_db, &to_purge)
-            .map_err(|e| Box::new(e) as StoreError)?;
+        purge_targets(&self.restored_db, &to_purge).map_err(|e| Box::new(e) as StoreError)?;
         Ok(count)
     }
 }
@@ -114,20 +116,18 @@ fn collect_target_ids(db_path: &Path) -> Result<Vec<TargetId>, SqliteStoreError>
         return Ok(Vec::new());
     }
 
-    let mut stmt = conn
-        .prepare("SELECT DISTINCT target_id FROM records ORDER BY target_id ASC")?;
+    let mut stmt = conn.prepare("SELECT DISTINCT target_id FROM records ORDER BY target_id ASC")?;
     let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
 
     let mut targets = Vec::new();
     for row in rows {
         let target = row?;
-        targets.push(
-            TargetId::parse(target.clone())
-                .map_err(|e| SqliteStoreError::VaultPath(format!(
-                    "parse target id `{target}` from {path}: {e}",
-                    path = db_path.display()
-                )))?,
-        );
+        targets.push(TargetId::parse(target.clone()).map_err(|e| {
+            SqliteStoreError::VaultPath(format!(
+                "parse target id `{target}` from {path}: {e}",
+                path = db_path.display()
+            ))
+        })?);
     }
     Ok(targets)
 }
@@ -184,8 +184,15 @@ mod tests {
         // sha256("hmn:alice/rec/1") should be deterministic.
         // Format: "sha256:" (7 chars) + 64 hex chars = 71 chars total.
         let h = target_id_hash("hmn:alice/rec/1");
-        assert_eq!(h.len(), 71, "expected 'sha256:' + 64 hex = 71 chars, got: {h}");
-        assert!(h.starts_with("sha256:"), "hash must start with 'sha256:' prefix");
+        assert_eq!(
+            h.len(),
+            71,
+            "expected 'sha256:' + 64 hex = 71 chars, got: {h}"
+        );
+        assert!(
+            h.starts_with("sha256:"),
+            "hash must start with 'sha256:' prefix"
+        );
         assert_eq!(
             target_id_hash("hmn:alice/rec/1"),
             h,

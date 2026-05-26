@@ -100,7 +100,15 @@ fn restore_refuses_cross_machine_snapshot() {
         dry_run: false,
         local_machine_id: MACHINE_B.into(),
     };
-    let result = restore::run(&ctx, &restore_req, &admin, &meta2, &reader, &applier, &consent);
+    let result = restore::run(
+        &ctx,
+        &restore_req,
+        &admin,
+        &meta2,
+        &reader,
+        &applier,
+        &consent,
+    );
 
     // ── 6. Assert typed error ──────────────────────────────────────────────
     match result {

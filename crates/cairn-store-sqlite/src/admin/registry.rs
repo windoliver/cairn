@@ -40,8 +40,7 @@ impl BackupRegistry for FileBackupRegistry {
         let dir = self.dir();
         std::fs::create_dir_all(&dir).map_err(|e| Box::new(e) as StoreError)?;
         let path = dir.join(format!("{}.json", entry.backup_id));
-        let bytes =
-            serde_json::to_vec_pretty(entry).map_err(|e| Box::new(e) as StoreError)?;
+        let bytes = serde_json::to_vec_pretty(entry).map_err(|e| Box::new(e) as StoreError)?;
         std::fs::write(&path, bytes).map_err(|e| Box::new(e) as StoreError)?;
         Ok(())
     }
@@ -55,8 +54,7 @@ mod tests {
     fn sample_entry(id: &str) -> BackupRegistryEntry {
         BackupRegistryEntry {
             backup_id: id.to_owned(),
-            created_at: Rfc3339Timestamp::from_unix_secs(1_700_000_000)
-                .expect("valid ts"),
+            created_at: Rfc3339Timestamp::from_unix_secs(1_700_000_000).expect("valid ts"),
             artifact_path: format!("/tmp/snaps/{id}.cairn-snap.tar"),
             file_digest: format!("sha256:{:064x}", 0xdead_beef_u64),
             backup_kind: "snapshot".to_owned(),
@@ -80,8 +78,7 @@ mod tests {
         assert!(expected_path.exists(), "registry json must exist");
 
         let content = std::fs::read_to_string(&expected_path).expect("read json");
-        let parsed: BackupRegistryEntry =
-            serde_json::from_str(&content).expect("parse json");
+        let parsed: BackupRegistryEntry = serde_json::from_str(&content).expect("parse json");
         assert_eq!(parsed.backup_id, "reg-test-001");
         assert_eq!(parsed.backup_kind, "snapshot");
     }
@@ -93,7 +90,9 @@ mod tests {
         let entry = sample_entry("reg-idem-001");
 
         registry.register(&entry).expect("first register");
-        registry.register(&entry).expect("second register (idempotent)");
+        registry
+            .register(&entry)
+            .expect("second register (idempotent)");
 
         let expected_path = dir
             .path()

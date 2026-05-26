@@ -597,10 +597,8 @@ fn sqlite_string_literal(path: &Path) -> String {
     format!("'{escaped}'")
 }
 
-#[deprecated(
-    note = "moved to cairn-store-sqlite::admin_consent_log; \
-            will be deleted in a follow-up commit"
-)]
+#[deprecated(note = "moved to cairn-store-sqlite::admin_consent_log; \
+            will be deleted in a follow-up commit")]
 #[allow(
     dead_code,
     reason = "only caller (replay_current_forgets) is itself dead pending Tasks 2.5/2.6"
@@ -638,10 +636,8 @@ fn current_record_forget_hashes(db_path: &Path) -> Result<BTreeSet<String>> {
     Ok(hashes)
 }
 
-#[deprecated(
-    note = "moved to cairn-store-sqlite::admin_consent_log; \
-            will be deleted in a follow-up commit"
-)]
+#[deprecated(note = "moved to cairn-store-sqlite::admin_consent_log; \
+            will be deleted in a follow-up commit")]
 fn collect_target_ids(db_path: &Path) -> Result<Vec<TargetId>> {
     if !db_path.exists() {
         return Ok(Vec::new());
@@ -708,10 +704,8 @@ fn collect_source_rewrites(db_path: &Path, targets: &[TargetId]) -> Result<Vec<S
     Ok(groups.into_values().collect())
 }
 
-#[deprecated(
-    note = "moved to cairn-store-sqlite::admin_consent_log; \
-            will be deleted in a follow-up commit"
-)]
+#[deprecated(note = "moved to cairn-store-sqlite::admin_consent_log; \
+            will be deleted in a follow-up commit")]
 fn purge_targets(db_path: &Path, targets: &[TargetId]) -> Result<()> {
     if targets.is_empty() || !db_path.exists() {
         return Ok(());
@@ -781,10 +775,8 @@ fn table_exists(conn: &Connection, table: &str) -> Result<bool> {
     Ok(exists == 1)
 }
 
-#[deprecated(
-    note = "moved to cairn-store-sqlite::admin_consent_log; \
-            will be deleted in a follow-up commit"
-)]
+#[deprecated(note = "moved to cairn-store-sqlite::admin_consent_log; \
+            will be deleted in a follow-up commit")]
 #[allow(
     dead_code,
     reason = "only callers deprecated/dead pending Tasks 2.5/2.6"

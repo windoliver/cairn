@@ -14,7 +14,10 @@ pub fn require_role(
     admin: &dyn AdminStateStore,
     needed: AdminRole,
 ) -> Result<(), AdminError> {
-    if !admin.has_role(&ctx.actor, needed).map_err(AdminError::Store)? {
+    if !admin
+        .has_role(&ctx.actor, needed)
+        .map_err(AdminError::Store)?
+    {
         return Err(AdminError::NotAuthorized {
             actor: ctx.actor.clone(),
             needed,
