@@ -7,7 +7,7 @@
     {
       "id": "new222",
       "message": "feat: push event",
-      "author": {"name": "Carol", "email": "carol@example.com"},
+      "author": {"name": "Carol", "email": "carol@example.com", "username": "carol"},
       "timestamp": "2026-05-25T16:00:00Z",
       "url": "https://github.com/o/r/commit/new222"
     }

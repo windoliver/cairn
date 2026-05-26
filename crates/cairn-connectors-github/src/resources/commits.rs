@@ -50,6 +50,10 @@ struct CommitDto {
     commit: CommitInnerDto,
     #[serde(default)]
     author: Option<ActorDto>,
+    /// Consumed by serde for deserialization; the canonical payload uses a
+    /// synthesized URL rather than this field to ensure byte-identical output
+    /// across poll and push-webhook paths for the same SHA.
+    #[allow(dead_code)]
     html_url: String,
 }
 
@@ -94,7 +98,53 @@ struct PushCommitDto {
     id: String,
     message: String,
     timestamp: DateTime<Utc>,
+    /// Consumed by serde for deserialization; the canonical payload synthesizes
+    /// the URL from owner/repo/sha to ensure byte-identical output across paths.
+    #[allow(dead_code)]
     url: String,
+    #[serde(default)]
+    author: Option<PushAuthorDto>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PushAuthorDto {
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    email: Option<String>,
+    /// GitHub username (push event uses `username`, not `login`).
+    #[serde(default)]
+    username: Option<String>,
+}
+
+/// Canonical JSON payload for a commit event.
+///
+/// Identical structure regardless of whether the commit was observed via poll
+/// or push webhook, so the substrate's `(event_id, payload_hash)` index dedupes
+/// cross-channel without treating same-SHA observations as fatal reuse.
+///
+/// `html_url` is always synthesized from `owner/repo/sha` rather than taken
+/// from the upstream `html_url` / `url` field so that any trailing-slash or
+/// query-string variation between the REST and push-event endpoints does not
+/// produce a different hash for the same commit.
+fn commit_payload(
+    sha: &str,
+    author_name: Option<&str>,
+    author_email: Option<&str>,
+    author_login: Option<&str>,
+    message: &str,
+    html_url: &str,
+    ref_name: &str,
+) -> serde_json::Value {
+    serde_json::json!({
+        "sha": sha,
+        "author_name": author_name,
+        "author_email": author_email,
+        "author_login": author_login,
+        "message": message,
+        "html_url": html_url,
+        "ref": ref_name,
+    })
 }
 
 #[async_trait]
@@ -218,7 +268,7 @@ impl GhResource for CommitsResource {
                     stop = true;
                     break;
                 }
-                events.push(commit_to_event(dto, repo));
+                events.push(commit_to_event(dto, repo, &branch));
                 in_poll_seen.insert(dto.sha.clone());
                 walked.push((dto.sha.clone(), dto.commit.author.date));
                 budget_remaining = budget_remaining.saturating_sub(1);
@@ -348,7 +398,7 @@ impl GhResource for CommitsResource {
     }
 }
 
-fn commit_to_event(dto: &CommitDto, repo: &Repo) -> ConnectorEvent {
+fn commit_to_event(dto: &CommitDto, repo: &Repo, branch: &str) -> ConnectorEvent {
     let mut labels = BTreeSet::new();
     labels.insert("source:github".into());
     labels.insert("kind:commit".into());
@@ -362,16 +412,27 @@ fn commit_to_event(dto: &CommitDto, repo: &Repo) -> ConnectorEvent {
     // revision marker.  No payload hash needed — commits are immutable.
     let event_id = crate::event_id::from_parts("commit", &source_ref.system_id, &[&dto.sha]);
 
+    // Normalize branch to webhook `ref` form so poll and push-webhook agree.
+    let ref_name = format!("refs/heads/{branch}");
+    // Synthesize html_url deterministically from owner/repo/sha so the
+    // canonical payload is byte-identical regardless of what the upstream
+    // endpoints returned in their `html_url` / `url` fields.
+    let html_url = format!(
+        "https://github.com/{}/{}/commit/{}",
+        repo.owner, repo.name, dto.sha
+    );
+
     let payload = ConnectorPayload::Json {
         mime: "application/json".into(),
-        body: serde_json::json!({
-            "sha": dto.sha,
-            "author_name": dto.commit.author.name,
-            "author_email": dto.commit.author.email,
-            "author_login": dto.author.as_ref().map(|a| a.login.clone()),
-            "message": dto.commit.message,
-            "html_url": dto.html_url,
-        }),
+        body: commit_payload(
+            &dto.sha,
+            Some(&dto.commit.author.name),
+            Some(&dto.commit.author.email),
+            dto.author.as_ref().map(|a| a.login.as_str()),
+            &dto.commit.message,
+            &html_url,
+            &ref_name,
+        ),
     };
 
     ConnectorEvent::new(
@@ -410,14 +471,24 @@ fn push_commit_to_event(
     // separately carries the per-delivery UUID for the replay guard.
     let event_id = crate::event_id::from_parts("commit", &source_ref.system_id, &[&dto.id]);
 
+    // Synthesize html_url deterministically (same formula as poll path) so the
+    // payload is byte-identical to the poll path for the same SHA.
+    let html_url = format!(
+        "https://github.com/{}/{}/commit/{}",
+        repo.owner, repo.name, dto.id
+    );
+
     let payload = ConnectorPayload::Json {
         mime: "application/json".into(),
-        body: serde_json::json!({
-            "sha": dto.id,
-            "message": dto.message,
-            "url": dto.url,
-            "ref": ref_name,
-        }),
+        body: commit_payload(
+            &dto.id,
+            dto.author.as_ref().and_then(|a| a.name.as_deref()),
+            dto.author.as_ref().and_then(|a| a.email.as_deref()),
+            dto.author.as_ref().and_then(|a| a.username.as_deref()),
+            &dto.message,
+            &html_url,
+            ref_name,
+        ),
     };
 
     ConnectorEvent::new(
@@ -870,8 +941,9 @@ mod tests {
         );
     }
 
-    /// Fix 1 (round-4): `push_commit_to_event` and `commit_to_event` must produce
-    /// the same `event_id` for the same commit SHA (cross-channel dedup).
+    /// Fix 1 (round-4 + round-8): `push_commit_to_event` and `commit_to_event` must
+    /// produce the same `event_id` AND the same payload bytes for the same commit SHA
+    /// (cross-channel dedup requires byte-identical payloads, not just matching IDs).
     #[test]
     fn poll_and_webhook_paths_produce_same_event_id_for_same_commit() {
         let repo = Repo {
@@ -891,16 +963,17 @@ mod tests {
         }))
         .expect("poll dto");
 
-        // Build a PushCommitDto (webhook push path) for the same SHA.
+        // Build a PushCommitDto (webhook push path) for the same SHA with author info.
         let push_dto: PushCommitDto = serde_json::from_value(serde_json::json!({
             "id": "deadbeef",
             "message": "feat: add something",
             "timestamp": "2026-05-25T10:00:00Z",
-            "url": "https://github.com/o/r/commit/deadbeef"
+            "url": "https://github.com/o/r/commit/deadbeef",
+            "author": {"name": "A", "email": "a@x.com", "username": "alice"}
         }))
         .expect("push dto");
 
-        let poll_event = commit_to_event(&poll_dto, &repo);
+        let poll_event = commit_to_event(&poll_dto, &repo, "main");
         let push_event =
             push_commit_to_event(&push_dto, &repo, "refs/heads/main", "delivery-1", "sig-1");
 
@@ -909,6 +982,22 @@ mod tests {
             push_event.event_id.as_str(),
             "poll and webhook-push must produce the same event_id for the same commit SHA"
         );
+        // Fix 1 (round-8): payloads must also be byte-identical so the substrate's
+        // (event_id, payload_hash) index deduplicates without treating the cross-channel
+        // observation as fatal reuse.
+        match (&poll_event.payload, &push_event.payload) {
+            (
+                cairn_connectors_core::ConnectorPayload::Json { body: p, .. },
+                cairn_connectors_core::ConnectorPayload::Json { body: w, .. },
+            ) => {
+                assert_eq!(
+                    serde_json::to_string(p).unwrap(),
+                    serde_json::to_string(w).unwrap(),
+                    "payload JSON must be byte-identical for cross-channel dedup (Fix 1, round-8)"
+                );
+            }
+            _ => panic!("expected JSON payloads"),
+        }
         assert!(matches!(poll_event.delivery, DeliveryMode::Poll { .. }));
         assert!(matches!(push_event.delivery, DeliveryMode::Webhook { .. }));
     }
