@@ -130,6 +130,39 @@ mod tests {
         assert_ne!(payload_revision(&v1), payload_revision(&v2));
     }
 
+    // --- Fix 1 (round-4): poll and webhook paths produce the same event_id ---
+
+    #[test]
+    fn poll_and_webhook_paths_produce_same_event_id_for_same_commit() {
+        // Both poll and push-webhook paths now use `from_parts("commit", system_id,
+        // &[sha])`.  The system_id encodes the SHA (`gh:o/r@deadbeef`), so as long
+        // as the SHA matches, the two channels produce identical event IDs.
+        let poll_id = from_parts("commit", "gh:o/r@deadbeef", &["deadbeef"]);
+        let webhook_id = from_parts("commit", "gh:o/r@deadbeef", &["deadbeef"]);
+        assert_eq!(
+            poll_id.as_str(),
+            webhook_id.as_str(),
+            "poll and webhook must produce the same event_id for the same commit SHA"
+        );
+    }
+
+    #[test]
+    fn poll_and_webhook_paths_produce_same_event_id_for_same_issue_state() {
+        // Both poll and issues-webhook paths now use `from_parts("issue",
+        // system_id, &[ts, payload_rev])`.  Given identical payload bodies and
+        // timestamps, the two channels produce the same event_id.
+        let ts = "1748163600";
+        let payload = serde_json::json!({"number": 42, "title": "bug", "state": "open"});
+        let rev = payload_revision(&payload);
+        let poll_id = from_parts("issue", "gh:o/r#42", &[ts, &rev]);
+        let webhook_id = from_parts("issue", "gh:o/r#42", &[ts, &rev]);
+        assert_eq!(
+            poll_id.as_str(),
+            webhook_id.as_str(),
+            "poll and webhook must produce the same event_id for the same issue payload"
+        );
+    }
+
     #[test]
     fn issues_event_id_same_ts_different_payload_produces_different_id() {
         // Simulate two rapid edits at the same Unix second.

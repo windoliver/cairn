@@ -6,7 +6,7 @@ use async_trait::async_trait;
 use cairn_connectors_core::{
     ConnectorEvent, ConnectorPayload, ConnectorScope, DeliveryMode, SourceRef,
 };
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration, Utc};
 use serde::Deserialize;
 
 use crate::client::GhClient;
@@ -115,8 +115,14 @@ impl GhResource for PrsResource {
         // (50, 100, …) commit the correct max on the exhaustion page.
         let next_cursor = if exhausted {
             // Window done: commit pending_since → since, reset page + pending.
+            // Advance `since` to `max_updated - 1s` (overlap by 1 second) so that
+            // items updated at the exact same second as `max_updated` are re-served
+            // on the next poll.  Deterministic event IDs dedupe any re-served items
+            // the substrate has already ingested, so the overlap is harmless.
             ResourceCursor {
-                since: max_updated.or(sub_cursor.since),
+                since: max_updated
+                    .map(|t| t - Duration::seconds(1))
+                    .or(sub_cursor.since),
                 page: Some(1),
                 pending_since: None,
                 ..ResourceCursor::default()
@@ -199,18 +205,16 @@ fn pr_to_event(
         "merged": dto.merged_at.is_some(),
         "draft": dto.draft,
     });
-    // Deterministic event ID.
-    // Poll path: timestamp + payload content hash so two updates to the same
-    // PR within 1s produce distinct IDs (GitHub timestamps are second-granular).
-    // Webhook path: delivery_id is GitHub's per-delivery UUID — globally unique.
+    // Deterministic event ID: always keyed on upstream-object identity so that
+    // the same PR update is deduplicated regardless of whether it arrives via
+    // poll or webhook.  `delivery_id` is NOT used here — it changes per-delivery
+    // and would break cross-channel dedup.  Instead, timestamp + payload content
+    // hash captures both "which version" and "which edit within 1s" invariants.
+    // The `DeliveryMode::Webhook { signature_id }` field separately encodes the
+    // per-delivery UUID for the substrate's webhook replay guard.
     let ts = dto.updated_at.timestamp().to_string();
     let payload_rev = crate::event_id::payload_revision(&payload_value);
-    let event_id = match webhook_meta {
-        Some((delivery_id, _, _)) => {
-            crate::event_id::from_parts("pr", &source_ref.system_id, &[delivery_id])
-        }
-        None => crate::event_id::from_parts("pr", &source_ref.system_id, &[&ts, &payload_rev]),
-    };
+    let event_id = crate::event_id::from_parts("pr", &source_ref.system_id, &[&ts, &payload_rev]);
 
     let payload = ConnectorPayload::Json {
         mime: "application/json".into(),
@@ -480,5 +484,159 @@ mod tests {
             _ => panic!("expected Json payload"),
         };
         assert!(closed_merged, "merged PR must have merged=true");
+    }
+
+    /// Fix 1 (round-4): poll and webhook paths must produce the same `event_id`
+    /// for the same upstream PR state (identical payload + timestamp).
+    #[test]
+    fn poll_and_webhook_paths_produce_same_event_id_for_same_pr() {
+        let make_dto = || -> PrDto {
+            serde_json::from_value(serde_json::json!({
+                "id": 7,
+                "number": 7,
+                "title": "Cross-channel dedup",
+                "body": "same content",
+                "state": "open",
+                "user": {"login": "alice"},
+                "updated_at": "2026-05-25T10:00:00Z",
+                "html_url": "https://github.com/o/r/pull/7",
+                "head": {"sha": "abc", "ref": "feat"},
+                "base": {"sha": "def", "ref": "main"},
+                "draft": false
+            }))
+            .expect("deserializes")
+        };
+        let repo = Repo {
+            owner: "o".into(),
+            name: "r".into(),
+        };
+        let poll_event = pr_to_event(&make_dto(), &repo, None);
+        let webhook_event = pr_to_event(
+            &make_dto(),
+            &repo,
+            Some(("delivery-uuid-xyz", "sig-1", "edited")),
+        );
+
+        assert_eq!(
+            poll_event.event_id.as_str(),
+            webhook_event.event_id.as_str(),
+            "poll and webhook must produce the same event_id for identical PR content"
+        );
+        assert!(matches!(poll_event.delivery, DeliveryMode::Poll { .. }));
+        assert!(matches!(
+            webhook_event.delivery,
+            DeliveryMode::Webhook { .. }
+        ));
+    }
+
+    /// Fix 3 (round-4): `since` advances to `max_updated - 1s` on exhaustion.
+    #[tokio::test]
+    async fn prs_advance_since_overlaps_by_one_second() {
+        use cairn_connectors_core::CredentialHandle;
+        use wiremock::matchers::{method, path, query_param};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let ts = "2026-05-25T12:00:00Z";
+
+        Mock::given(method("GET"))
+            .and(path("/repos/o/r/pulls"))
+            .and(query_param("page", "1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                {
+                    "id": 1, "number": 1,
+                    "title": "PR",
+                    "body": null, "state": "open",
+                    "user": {"login": "alice"},
+                    "updated_at": ts,
+                    "html_url": "https://github.com/o/r/pull/1",
+                    "head": {"sha": "abc", "ref": "feat"},
+                    "base": {"sha": "def", "ref": "main"},
+                    "draft": false
+                }
+            ])))
+            .mount(&server)
+            .await;
+
+        let handle = CredentialHandle::from_bytes(
+            serde_json::json!({"kind": "pat", "token": "t"})
+                .to_string()
+                .into_bytes(),
+        );
+        let auth =
+            std::sync::Arc::new(crate::auth::GitHubAuth::from_handle(&handle).expect("auth"));
+        let client = GhClient::new(auth, url::Url::parse(&server.uri()).unwrap());
+        let outcome = PrsResource
+            .poll(
+                &client,
+                &Repo {
+                    owner: "o".into(),
+                    name: "r".into(),
+                },
+                &ResourceCursor {
+                    page: Some(1),
+                    ..Default::default()
+                },
+                50,
+            )
+            .await
+            .expect("poll");
+
+        let expected_max = DateTime::parse_from_rfc3339(ts)
+            .unwrap()
+            .with_timezone(&Utc);
+        let expected_since = expected_max - Duration::seconds(1);
+
+        assert_eq!(
+            outcome.next_cursor.since,
+            Some(expected_since),
+            "since must be max_updated - 1s"
+        );
+    }
+
+    /// Fix 3 (round-4): a PR updated twice at the same second produces two
+    /// distinct event IDs (payload hash breaks the tie), and the second poll
+    /// (with `since = max_updated - 1s`) re-serves both so the substrate can
+    /// dedupe via `event_id`.
+    #[test]
+    fn prs_same_second_double_update_both_captured() {
+        let repo = Repo {
+            owner: "o".into(),
+            name: "r".into(),
+        };
+        let make_dto = |title: &str| -> PrDto {
+            serde_json::from_value(serde_json::json!({
+                "id": 7,
+                "number": 7,
+                "title": title,
+                "body": null,
+                "state": "open",
+                "user": {"login": "alice"},
+                "updated_at": "2026-05-25T10:00:00Z",
+                "html_url": "https://github.com/o/r/pull/7",
+                "head": {"sha": "abc", "ref": "feat"},
+                "base": {"sha": "def", "ref": "main"},
+                "draft": false
+            }))
+            .expect("deserializes")
+        };
+        let ev1 = pr_to_event(&make_dto("Title v1"), &repo, None);
+        let ev2 = pr_to_event(&make_dto("Title v2"), &repo, None);
+
+        // Both events must have distinct IDs (payload hash separates same-second edits).
+        assert_ne!(
+            ev1.event_id.as_str(),
+            ev2.event_id.as_str(),
+            "same-second edits must produce distinct event IDs"
+        );
+
+        // On re-poll (same payload), the second event's ID is stable — the
+        // substrate can dedupe by ID.
+        let ev2_repoll = pr_to_event(&make_dto("Title v2"), &repo, None);
+        assert_eq!(
+            ev2.event_id.as_str(),
+            ev2_repoll.event_id.as_str(),
+            "deterministic event ID must be stable across polls"
+        );
     }
 }

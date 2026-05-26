@@ -6,7 +6,7 @@ use async_trait::async_trait;
 use cairn_connectors_core::{
     ConnectorEvent, ConnectorPayload, ConnectorScope, DeliveryMode, SourceRef,
 };
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration, Utc};
 use serde::Deserialize;
 
 use crate::client::GhClient;
@@ -116,8 +116,14 @@ impl GhResource for IssuesResource {
         // old window.
         let next_cursor = if exhausted {
             // Window done: commit pending_since → since, reset page + pending.
+            // Advance `since` to `max_updated - 1s` (overlap by 1 second) so that
+            // items updated at the exact same second as `max_updated` are re-served
+            // on the next poll.  Deterministic event IDs dedupe any re-served items
+            // the substrate has already ingested, so the overlap is harmless.
             ResourceCursor {
-                since: max_updated.or(sub_cursor.since),
+                since: max_updated
+                    .map(|t| t - Duration::seconds(1))
+                    .or(sub_cursor.since),
                 page: Some(1),
                 pending_since: None,
                 ..ResourceCursor::default()
@@ -198,18 +204,17 @@ fn issue_to_event(
         "user": dto.user.login,
         "html_url": dto.html_url,
     });
-    // Deterministic event ID.
-    // Poll path: timestamp + payload content hash so two updates to the same
-    // issue within 1s produce distinct IDs (GitHub timestamps are second-granular).
-    // Webhook path: delivery_id is GitHub's per-delivery UUID — globally unique.
+    // Deterministic event ID: always keyed on upstream-object identity so that
+    // the same issue update is deduplicated regardless of whether it arrives via
+    // poll or webhook.  `delivery_id` is NOT used here — it changes per-delivery
+    // and would break cross-channel dedup.  Instead, timestamp + payload content
+    // hash captures both "which version" and "which edit within 1s" invariants.
+    // The `DeliveryMode::Webhook { signature_id }` field separately encodes the
+    // per-delivery UUID for the substrate's webhook replay guard.
     let ts = dto.updated_at.timestamp().to_string();
     let payload_rev = crate::event_id::payload_revision(&payload_value);
-    let event_id = match webhook_meta {
-        Some((delivery_id, _, _)) => {
-            crate::event_id::from_parts("issue", &source_ref.system_id, &[delivery_id])
-        }
-        None => crate::event_id::from_parts("issue", &source_ref.system_id, &[&ts, &payload_rev]),
-    };
+    let event_id =
+        crate::event_id::from_parts("issue", &source_ref.system_id, &[&ts, &payload_rev]);
 
     let payload = ConnectorPayload::Json {
         mime: "application/json".into(),
@@ -486,5 +491,109 @@ mod tests {
         // The issue DTO must yield an event with kind:issue.
         let issue_event = issue_to_event(&issue_dto, &repo, None);
         assert!(issue_event.labels.contains("kind:issue"));
+    }
+
+    /// Fix 1 (round-4): poll and webhook paths must produce the same `event_id`
+    /// for the same upstream issue state (identical payload + timestamp).
+    #[test]
+    fn poll_and_webhook_paths_produce_same_event_id_for_same_issue() {
+        let repo = Repo {
+            owner: "o".into(),
+            name: "r".into(),
+        };
+        let dto: IssueDto = serde_json::from_value(serde_json::json!({
+            "id": 42,
+            "number": 42,
+            "title": "Cross-channel dedup",
+            "body": "same content",
+            "state": "open",
+            "user": {"login": "alice"},
+            "created_at": "2026-05-25T10:00:00Z",
+            "updated_at": "2026-05-25T10:00:00Z",
+            "html_url": "https://github.com/o/r/issues/42"
+        }))
+        .expect("deserializes");
+
+        // Poll path: no webhook_meta.
+        let poll_event = issue_to_event(&dto, &repo, None);
+        // Webhook path: webhook_meta present (delivery_id differs).
+        let webhook_event =
+            issue_to_event(&dto, &repo, Some(("delivery-uuid-xyz", "sig-1", "edited")));
+
+        assert_eq!(
+            poll_event.event_id.as_str(),
+            webhook_event.event_id.as_str(),
+            "poll and webhook must produce the same event_id for identical issue content"
+        );
+        // DeliveryMode must differ (poll vs webhook).
+        assert!(matches!(poll_event.delivery, DeliveryMode::Poll { .. }));
+        assert!(matches!(
+            webhook_event.delivery,
+            DeliveryMode::Webhook { .. }
+        ));
+    }
+
+    /// Fix 3 (round-4): `since` advances to `max_updated - 1s` on exhaustion.
+    #[tokio::test]
+    async fn issues_advance_since_overlaps_by_one_second() {
+        use cairn_connectors_core::CredentialHandle;
+        use wiremock::matchers::{method, path, query_param};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let ts = "2026-05-25T12:00:00Z";
+
+        // One item, partial page → exhaustion on first poll.
+        Mock::given(method("GET"))
+            .and(path("/repos/o/r/issues"))
+            .and(query_param("page", "1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                {
+                    "id": 1, "number": 1,
+                    "title": "issue",
+                    "body": null, "state": "open",
+                    "user": {"login": "alice"},
+                    "created_at": ts,
+                    "updated_at": ts,
+                    "html_url": "https://github.com/o/r/issues/1"
+                }
+            ])))
+            .mount(&server)
+            .await;
+
+        let handle = CredentialHandle::from_bytes(
+            serde_json::json!({"kind": "pat", "token": "t"})
+                .to_string()
+                .into_bytes(),
+        );
+        let auth =
+            std::sync::Arc::new(crate::auth::GitHubAuth::from_handle(&handle).expect("auth"));
+        let client = GhClient::new(auth, url::Url::parse(&server.uri()).unwrap());
+        let outcome = IssuesResource
+            .poll(
+                &client,
+                &Repo {
+                    owner: "o".into(),
+                    name: "r".into(),
+                },
+                &ResourceCursor {
+                    page: Some(1),
+                    ..Default::default()
+                },
+                50,
+            )
+            .await
+            .expect("poll");
+
+        let expected_max = DateTime::parse_from_rfc3339(ts)
+            .unwrap()
+            .with_timezone(&Utc);
+        let expected_since = expected_max - Duration::seconds(1);
+
+        assert_eq!(
+            outcome.next_cursor.since,
+            Some(expected_since),
+            "since must be max_updated - 1s"
+        );
     }
 }
