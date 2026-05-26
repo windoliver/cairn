@@ -9,6 +9,11 @@
 
 #![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used))]
 
+pub mod admin;
+pub use admin::{
+    FileBackupRegistry, SqliteSnapshotApplier, SqliteSnapshotMetadata, SqliteSnapshotProducer,
+    SqliteSnapshotReader,
+};
 pub mod admin_consent_log;
 pub use admin_consent_log::SqliteConsentLog;
 pub mod admin_state;
