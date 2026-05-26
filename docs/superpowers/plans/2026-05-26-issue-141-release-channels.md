@@ -98,8 +98,11 @@ Channel pinning lives in two places:
 - **Desktop:** `desktop-config.json` `update.channel` field (under the
   desktop app's app-support dir per OS — `~/Library/Application
   Support/cairn/` on macOS, mirrors the `vault_registry.json` location
-  from #139), default `stable`. Runtime channel switch triggers a
-  one-shot fetch of the chosen feed; the change applies on next launch.
+  from #139), default `stable`. Changing the value is persisted
+  immediately; the new channel applies on next launch. A one-shot
+  fetch of the chosen feed runs only if `update.check: true` is set
+  and neither `CAIRN_OFFLINE=1` nor `agent.offline: true` is engaged —
+  otherwise the channel switch applies with no outbound network call.
 
 ### 2. Per-OS update mechanism
 
@@ -144,9 +147,13 @@ Fail-closed: any verification failure → non-zero exit + the
   record IDs, no user identifiers, no IP-derived geo. Logged at `trace`
   only. The brief §6.6 rule ("never log raw record bodies above
   `debug`") is extended here to also cover update-poll payloads.
-- **Endpoint is a static file** (`updates/<channel>/latest-<platform>.yml` on github.io /
-  optional Cloudflare Pages mirror). No server-side application
-  logging beyond the hoster's standard access logs.
+- **Endpoint is a static file** (`updates/<channel>/latest-mac.yml` on
+  macOS and `updates/<channel>/latest.yml` on Windows, on
+  github.io / optional Cloudflare Pages mirror; Linux AppImage uses
+  the AppImage's embedded `update-information` field — no Cairn-hosted
+  endpoint). No server-side application logging beyond the hoster's
+  standard access logs, which the user-facing doc names so users know
+  what to expect.
 - **CLI never polls.** Only the desktop shell can be opted in. CLI users
   learn about updates from `brew outdated` / `cargo install --force` /
   the one-shot `cairn status --check-updates` (explicit invocation
@@ -796,9 +803,10 @@ To make sure they stay off:
 The desktop app's onboarding asks once whether you want update
 checks. You can change your mind any time in Settings → Updates.
 
-When checks are enabled, the desktop app polls (macOS / Windows)
-`https://windoliver.github.io/cairn/updates/<channel>/latest-<platform>.yml` once per
-24 hours, where `<platform>` is `mac` or `windows`. On Linux,
+When checks are enabled, the desktop app polls
+`https://windoliver.github.io/cairn/updates/<channel>/latest-mac.yml`
+(macOS) or `https://windoliver.github.io/cairn/updates/<channel>/latest.yml`
+(Windows) once per 24 hours. On Linux,
 AppImageUpdate uses the AppImage's embedded metadata; no separate
 Cairn-controlled poll endpoint runs. The payload sent by the macOS /
 Windows poller is metadata-only: channel name, current version, OS,

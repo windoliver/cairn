@@ -98,8 +98,11 @@ identity.
   `brew tap cairn/beta && brew upgrade cairn` walks beta.
   `cargo install --locked --bin cairn cairn-cli` is always stable.
 - **Desktop:** `desktop-config.json` (under the desktop app's app-support dir per OS — `~/Library/Application Support/cairn/` on macOS, mirrors the `vault_registry.json` location from #139) `update.channel` field, default
-  `stable`. Runtime channel switch triggers a one-shot fetch of the chosen
-  feed; the change applies on next launch.
+  `stable`. Changing the value is persisted immediately; the new channel
+  applies on next launch. A one-shot fetch of the chosen feed runs only
+  if `update.check: true` is set and neither `CAIRN_OFFLINE=1` nor
+  `agent.offline: true` is engaged — otherwise the channel switch applies
+  with no outbound network call.
 
 ## 6. Update mechanism (per OS)
 
@@ -142,10 +145,11 @@ Fail-closed: any verification failure → non-zero exit + the
   only (brief §6.6 rule: never log raw record bodies above `debug`; the
   rule is extended here to also cover update-poll payloads).
 - **Endpoint is a static file** (`updates/<channel>/latest-mac.yml` on
-  macOS, `updates/<channel>/latest.yml` on Windows, on github.io /
-  a Cloudflare Pages mirror). No server-side application logging beyond
-  the hoster's standard access logs, which the user-facing doc names so
-  users know what to expect.
+  macOS and `updates/<channel>/latest.yml` on Windows, on github.io /
+  optional Cloudflare Pages mirror; Linux AppImage uses the AppImage's
+  embedded `update-information` field — no Cairn-hosted endpoint). No
+  server-side application logging beyond the hoster's standard access
+  logs, which the user-facing doc names so users know what to expect.
 - **CLI never polls.** Only the desktop shell can be opted in. CLI users
   learn about updates from `brew outdated` / `cargo install --force` /
   the one-shot `cairn status --check-updates` (explicit invocation only,
