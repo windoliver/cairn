@@ -3930,17 +3930,22 @@ by which artifact / package-manager tap they installed.
 user opts in (`update.check: true`), and `CAIRN_OFFLINE=1` or
 `agent.offline: true` always wins. When enabled, the desktop shell
 reads electron-updater's native YAML feed at
-`updates/<channel>/latest-<platform>.yml`; AppImageUpdate handles
-Linux via its own zsync side-file. Every artifact additionally carries a
-Cosign keyless OIDC signature on the Sigstore Rekor transparency log;
-the shipped `cairn release verify <path>` CLI checks both the platform
-signature and the Cosign sidecar. Verification is fail-closed.
+`updates/<channel>/latest-{mac,windows}.yml` on macOS and Windows;
+AppImageUpdate handles Linux via the AppImage's embedded
+`update-information` field and zsync side-files. Every artifact
+additionally carries a Cosign keyless OIDC signature on the Sigstore
+Rekor transparency log; the shipped `cairn release verify <path>` CLI
+checks both the platform signature and the Cosign sidecar. Verification
+is fail-closed.
 
-**Channel migration is forward-only.** Switching channels changes the
-binary on next launch; vault data is untouched. Downgrade across a
-vault-schema bump is blocked. **Rollback is documented but manual** at
-v1.0 (`cairn release rollback --to <ver>` recipe); automatic
-boot-probe rollback is deferred to v1.1.
+**Channel migration is bidirectional with a vault-schema-downgrade guard.**
+Switching channels (stable ↔ beta ↔ nightly) changes the binary on
+next launch; vault data is untouched. If a channel switch would install
+a binary older than the vault's schema, startup is blocked with a clear
+error and the user is prompted to either reinstall the newer binary or
+pick a different vault. **Rollback is documented but manual** at v1.0
+(`cairn release rollback --to <ver>` recipe); automatic boot-probe
+rollback is deferred to v1.1.
 
 Full rules live in [ADR 0005](decisions/0005-release-channels.md).
 The maintainer recipe (cutting a stable, promoting nightly, rotating

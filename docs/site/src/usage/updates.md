@@ -65,18 +65,22 @@ To make sure they stay off:
 The desktop app's onboarding asks once whether you want update
 checks. You can change your mind any time in Settings → Updates.
 
-When checks are enabled, the desktop app polls
+When checks are enabled, the desktop app polls (macOS / Windows)
 `https://windoliver.github.io/cairn/updates/<channel>/latest-<platform>.yml` once per
-24 hours. The payload it sends is metadata-only: channel name,
-current version, OS, arch, and an opaque rotating install ID that
-resets weekly. No vault content, no user identity, no IP-derived
-geo.
+24 hours, where `<platform>` is `mac` or `windows`. On Linux,
+AppImageUpdate uses the AppImage's embedded metadata; no separate
+Cairn-controlled poll endpoint runs. The payload sent by the macOS /
+Windows poller is metadata-only: channel name, current version, OS,
+arch, and an opaque rotating install ID that resets weekly. No vault
+content, no user identity, no IP-derived geo.
 
 ## Verifying a downloaded artifact
 
 Every artifact on a Cairn GitHub Release ships with a Cosign keyless
-OIDC signature (`<artifact>.sig` + `<artifact>.pem`) committed to the
-Sigstore Rekor transparency log. The shipped CLI verifier:
+OIDC signature (`<artifact>.cosign.sig` + `<artifact>.cosign.pem`)
+committed to the Sigstore Rekor transparency log. Linux AppImages also
+carry a GPG armored signature (`<artifact>.asc`). The shipped CLI
+verifier:
 
 *Note: `cairn release verify` and `cairn release rollback` ship with v1.0. Check your installed version with `cairn --version`. Until then, use the manual `cosign verify-blob` recipe in the next subsection.*
 
@@ -91,12 +95,14 @@ original signature on the transparency log.
 
 You can also verify manually using upstream tooling:
 
+Substitute the channel-appropriate workflow path and tag for beta or nightly artifacts — see [ADR 0005 §3.a](../../../design/decisions/0005-release-channels.md) for the trust-anchor table.
+
 ```bash
 # Cosign verification (any OS):
 cosign verify-blob \
-  --certificate Cairn-1.0.0-universal.dmg.pem \
-  --signature Cairn-1.0.0-universal.dmg.sig \
-  --certificate-identity-regexp '^https://github\.com/windoliver/cairn/' \
+  --certificate Cairn-1.0.0-universal.dmg.cosign.pem \
+  --signature Cairn-1.0.0-universal.dmg.cosign.sig \
+  --certificate-identity 'https://github.com/windoliver/cairn/.github/workflows/release-stable.yml@refs/tags/v1.0.0' \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
   Cairn-1.0.0-universal.dmg
 
@@ -108,10 +114,10 @@ spctl --assess --type execute --verbose=2 /Applications/Cairn.app
 signtool verify /pa /v Cairn-1.0.0.msi
 
 # Linux GPG (on Linux):
-gpg --verify Cairn-1.0.0.AppImage.sig Cairn-1.0.0.AppImage
+gpg --verify Cairn-1.0.0.AppImage.asc Cairn-1.0.0.AppImage
 ```
 
-The maintainer's GPG fingerprint and Cosign identity regex are
+The maintainer's GPG fingerprint and Cosign trust anchors are
 documented in [release channels](../maintainers/release-channels.md)
 under "Rotate signing keys".
 

@@ -39,9 +39,9 @@ The following rules govern Cairn releases from v1.0 forward.
 
 | Channel | Trigger | Artifact destinations | Update poll feed | Cosign tag | Audience |
 |---|---|---|---|---|---|
-| **stable** | git tag `vX.Y.Z` (no pre-release suffix) | crates.io · `homebrew-cairn` main tap · winget · scoop · GitHub Releases (DMG/MSI/AppImage/deb/tarball) | `updates/stable/latest-<platform>.yml` on github.io | `cairn-stable` | Default for everyone; what `brew install cairn` gives you |
-| **beta** | git tag `vX.Y.Z-beta.N` or `vX.Y.Z-rc.N` | `homebrew-cairn-beta` tap · GitHub Pre-Releases · no crates.io publish (pre-release versions auto-skipped by `cargo install` unless `--version` pinned) | `updates/beta/latest-<platform>.yml` on github.io | `cairn-beta` | Opt-in. Users who want the next release with at least one tagged checkpoint of stability |
-| **nightly** | scheduled GHA every 24h off `main`, tagged `nightly-YYYYMMDD` | GitHub Releases ("Nightly" section), **no** package-manager publish | `updates/nightly/latest-<platform>.yml` on github.io | `cairn-nightly` | Developers + dogfooders. No semver promise. Aged off after 30 days. |
+| **stable** | git tag `vX.Y.Z` (no pre-release suffix) | crates.io · `homebrew-cairn` main tap · winget · scoop · GitHub Releases (DMG/MSI/AppImage/deb/tarball) | electron-updater YAML: `updates/stable/latest-{mac,windows}.yml` on github.io · Linux: embedded AppImageUpdate metadata | `cairn-stable` | Default for everyone; what `brew install cairn` gives you |
+| **beta** | git tag `vX.Y.Z-beta.N` or `vX.Y.Z-rc.N` | `homebrew-cairn-beta` tap · GitHub Pre-Releases · no crates.io publish (pre-release versions auto-skipped by `cargo install` unless `--version` pinned) | electron-updater YAML: `updates/beta/latest-{mac,windows}.yml` on github.io · Linux: embedded AppImageUpdate metadata | `cairn-beta` | Opt-in. Users who want the next release with at least one tagged checkpoint of stability |
+| **nightly** | scheduled GHA every 24h off `main`, tagged `nightly-YYYYMMDD` | GitHub Releases ("Nightly" section), **no** package-manager publish | electron-updater YAML: `updates/nightly/latest-{mac,windows}.yml` on github.io · Linux: embedded AppImageUpdate metadata | `cairn-nightly` | Developers + dogfooders. No semver promise. Aged off after 30 days. |
 
 One binary per platform per channel. The Rust core compiles
 identically; the only difference is the build-time `CAIRN_CHANNEL`
@@ -65,17 +65,18 @@ Channel pinning lives in two places:
 
 | OS | Updater | Feed format | Platform signature |
 |---|---|---|---|
-| macOS | `electron-updater` reading its native YAML feed | `updates/<channel>/latest-mac.yml` on github.io | Apple Developer ID + notarization (wired in [#139](https://github.com/windoliver/cairn/issues/139)). Cosign `.sig` sidecar as defence-in-depth. |
+| macOS | `electron-updater` reading its native YAML feed | `updates/<channel>/latest-mac.yml` on github.io | Apple Developer ID + notarization (wired in [#139](https://github.com/windoliver/cairn/issues/139)). Cosign `.cosign.sig` sidecar as defence-in-depth. |
 | Windows | `electron-updater` Squirrel | `updates/<channel>/latest.yml` on github.io | Authenticode signed MSI (EV cert deferred until v1.0-rc). Cosign sidecar. |
-| Linux AppImage | AppImageUpdate (zsync over HTTPS) | embedded `update-information` field | GPG-signed `.sig` next to artifact. Cosign sidecar. |
+| Linux AppImage | AppImageUpdate (zsync over HTTPS) | embedded `update-information` field | GPG-signed `.asc` next to artifact. Cosign sidecar. |
 | brew / cargo / winget / scoop | Owned by the package manager; we publish artifacts + sidecars. | n/a | Package manager's existing verification + Cosign sidecar for users who want to double-check via `cairn release verify`. |
 
 ### 3. Signature scheme
 
 Every released artifact carries a **Cosign keyless OIDC signature**
-(`<artifact>.sig` + `<artifact>.pem`) published alongside the artifact
-on its GitHub Release. The shipped CLI verifier `cairn release verify
-<path>`:
+(`<artifact>.cosign.sig` + `<artifact>.cosign.pem`) published alongside
+the artifact on its GitHub Release. Linux AppImages additionally carry a
+GPG armored signature (`<artifact>.asc`). The shipped CLI verifier
+`cairn release verify <path>`:
 
 1. Reads the embedded channel marker (`CAIRN_CHANNEL` in the binary
    stamp).
@@ -88,6 +89,26 @@ on its GitHub Release. The shipped CLI verifier `cairn release verify
 
 Fail-closed: any verification failure → non-zero exit + the
 `CapabilityUnavailable` remediation hint pointing back at this ADR.
+
+### 3.a Trust anchors
+
+The verifier accepts artifacts signed by the **release workflows**
+running in `windoliver/cairn`, not arbitrary workflows in the same
+repo. Pinned identities:
+
+| Channel | Cosign certificate identity | Cosign issuer | Trigger |
+|---|---|---|---|
+| stable | `https://github.com/windoliver/cairn/.github/workflows/release-stable.yml@refs/tags/v*` | `https://token.actions.githubusercontent.com` | git tag `vX.Y.Z` |
+| beta | `https://github.com/windoliver/cairn/.github/workflows/release-beta.yml@refs/tags/v*-{beta,rc}.*` | same | git tag `vX.Y.Z-beta.N` / `-rc.N` |
+| nightly | `https://github.com/windoliver/cairn/.github/workflows/release-nightly.yml@refs/tags/nightly-*` | same | scheduled GHA |
+
+GPG fingerprint for Linux AppImage signatures: **to be published in
+the v1.0 release notes and reproduced verbatim in
+`docs/site/src/maintainers/release-channels.md` "Rotate signing keys"
+under "GPG (AppImage)".**
+
+The workflow paths above are **frozen identifiers** under this ADR —
+they cannot be renamed without minting `cairn.update.v2`.
 
 ### 4. Privacy / offline contract
 

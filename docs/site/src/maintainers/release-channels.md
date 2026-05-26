@@ -33,7 +33,9 @@ the user-facing summary lives in [Updates](../usage/updates.md).
 8. Trigger the `release-stable.yml` workflow (added in follow-up
    under #32) with the tag as input. It builds + signs + publishes
    to all stable destinations + updates the `homebrew-cairn` tap +
-   updates `updates/stable/latest-<platform>.yml` electron-updater feed.
+   updates `updates/stable/latest-{mac,windows}.yml` electron-updater feed
+   (for macOS and Windows; the Linux AppImage's embedded
+   `update-information` field is regenerated at build time).
 9. Verify artifacts on a clean machine: `cairn release verify
    <downloaded>.dmg` must print `ok: cosign + apple-developer-id`.
 10. Post the release notes to GitHub Releases; mark as latest.
@@ -46,7 +48,8 @@ the user-facing summary lives in [Updates](../usage/updates.md).
    in `release-dry-run`).
 3. Trigger `release-beta.yml` workflow — builds, signs, publishes to
    the `homebrew-cairn-beta` tap, marks the GitHub Release as
-   "Pre-release", updates `updates/beta/latest-<platform>.yml`.
+   "Pre-release", updates `updates/beta/latest-{mac,windows}.yml`
+   (macOS and Windows; Linux AppImage carries embedded metadata).
 4. Announce in the release thread; ask beta testers for feedback.
 
 ### Promote a nightly to beta
@@ -88,6 +91,17 @@ in place. Vault is untouched.
 
 After any key rotation, update the documented fingerprint in
 [Updates](../usage/updates.md) so users can verify by hand.
+
+### Current trust anchors
+
+| Channel | Cosign identity | Cosign issuer |
+|---|---|---|
+| stable | `https://github.com/windoliver/cairn/.github/workflows/release-stable.yml@refs/tags/v*` | `https://token.actions.githubusercontent.com` |
+| beta | `https://github.com/windoliver/cairn/.github/workflows/release-beta.yml@refs/tags/v*-{beta,rc}.*` | same |
+| nightly | `https://github.com/windoliver/cairn/.github/workflows/release-nightly.yml@refs/tags/nightly-*` | same |
+| GPG (AppImage) | _Fingerprint to be published in the v1.0 release notes._ | |
+
+These identities are frozen under [ADR 0005 §3.a](../../../design/decisions/0005-release-channels.md). Any change to the workflow path or ref pattern requires `cairn.update.v2`.
 
 ### Retire an aged-off nightly
 

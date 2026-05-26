@@ -79,9 +79,9 @@ The following rules govern Cairn releases from v1.0 forward.
 
 | Channel | Trigger | Artifact destinations | Update poll feed | Cosign tag | Audience |
 |---|---|---|---|---|---|
-| **stable** | git tag `vX.Y.Z` (no pre-release suffix) | crates.io · `homebrew-cairn` main tap · winget · scoop · GitHub Releases (DMG/MSI/AppImage/deb/tarball) | `updates/stable/latest-<platform>.yml` on github.io | `cairn-stable` | Default for everyone; what `brew install cairn` gives you |
-| **beta** | git tag `vX.Y.Z-beta.N` or `vX.Y.Z-rc.N` | `homebrew-cairn-beta` tap · GitHub Pre-Releases · no crates.io publish (pre-release versions auto-skipped by `cargo install` unless `--version` pinned) | `updates/beta/latest-<platform>.yml` | `cairn-beta` | Opt-in. Users who want the next release with at least one tagged checkpoint of stability |
-| **nightly** | scheduled GHA every 24h off `main`, tagged `nightly-YYYYMMDD` | GitHub Releases ("Nightly" section), **no** package-manager publish | `updates/nightly/latest-<platform>.yml` | `cairn-nightly` | Developers + dogfooders. No semver promise. Aged off after 30 days. |
+| **stable** | git tag `vX.Y.Z` (no pre-release suffix) | crates.io · `homebrew-cairn` main tap · winget · scoop · GitHub Releases (DMG/MSI/AppImage/deb/tarball) | electron-updater YAML: `updates/stable/latest-{mac,windows}.yml` on github.io · Linux: embedded AppImageUpdate metadata | `cairn-stable` | Default for everyone; what `brew install cairn` gives you |
+| **beta** | git tag `vX.Y.Z-beta.N` or `vX.Y.Z-rc.N` | `homebrew-cairn-beta` tap · GitHub Pre-Releases · no crates.io publish (pre-release versions auto-skipped by `cargo install` unless `--version` pinned) | electron-updater YAML: `updates/beta/latest-{mac,windows}.yml` on github.io · Linux: embedded AppImageUpdate metadata | `cairn-beta` | Opt-in. Users who want the next release with at least one tagged checkpoint of stability |
+| **nightly** | scheduled GHA every 24h off `main`, tagged `nightly-YYYYMMDD` | GitHub Releases ("Nightly" section), **no** package-manager publish | electron-updater YAML: `updates/nightly/latest-{mac,windows}.yml` on github.io · Linux: embedded AppImageUpdate metadata | `cairn-nightly` | Developers + dogfooders. No semver promise. Aged off after 30 days. |
 
 One binary per platform per channel. The Rust core compiles
 identically; the only difference is the build-time `CAIRN_CHANNEL`
@@ -105,17 +105,18 @@ Channel pinning lives in two places:
 
 | OS | Updater | Feed format | Platform signature |
 |---|---|---|---|
-| macOS | `electron-updater` reading its native YAML feed | `updates/<channel>/latest-mac.yml` on github.io | Apple Developer ID + notarization (wired in [#139](https://github.com/windoliver/cairn/issues/139)). Cosign `.sig` sidecar as defence-in-depth. |
+| macOS | `electron-updater` reading its native YAML feed | `updates/<channel>/latest-mac.yml` on github.io | Apple Developer ID + notarization (wired in [#139](https://github.com/windoliver/cairn/issues/139)). Cosign `.cosign.sig` sidecar as defence-in-depth. |
 | Windows | `electron-updater` Squirrel | `updates/<channel>/latest.yml` on github.io | Authenticode signed MSI (EV cert deferred until v1.0-rc). Cosign sidecar. |
-| Linux AppImage | AppImageUpdate (zsync over HTTPS) | embedded `update-information` field | GPG-signed `.sig` next to artifact. Cosign sidecar. |
+| Linux AppImage | AppImageUpdate (zsync over HTTPS) | embedded `update-information` field | GPG-signed `.asc` next to artifact. Cosign sidecar. |
 | brew / cargo / winget / scoop | Owned by the package manager; we publish artifacts + sidecars. | n/a | Package manager's existing verification + Cosign sidecar for users who want to double-check via `cairn release verify`. |
 
 ### 3. Signature scheme
 
 Every released artifact carries a **Cosign keyless OIDC signature**
-(`<artifact>.sig` + `<artifact>.pem`) published alongside the artifact
-on its GitHub Release. The shipped CLI verifier `cairn release verify
-<path>`:
+(`<artifact>.cosign.sig` + `<artifact>.cosign.pem`) published alongside
+the artifact on its GitHub Release. Linux AppImages additionally carry a
+GPG armored signature (`<artifact>.asc`). The shipped CLI verifier
+`cairn release verify <path>`:
 
 1. Reads the embedded channel marker (`CAIRN_CHANNEL` in the binary
    stamp).
@@ -151,7 +152,7 @@ Fail-closed: any verification failure → non-zero exit + the
   the one-shot `cairn status --check-updates` (explicit invocation
   only, never automatic, never recurring).
 
-### 5. Channel migration (forward-only)
+### 5. Channel migration (bidirectional with vault-schema-downgrade guard)
 
 1. User changes `update.channel` from stable → beta (or vice versa)
    via the Settings UI or `cairn config set update.channel beta`.
@@ -340,18 +341,23 @@ by which artifact / package-manager tap they installed.
 **Update checks are off by default.** No outbound poll runs until the
 user opts in (`update.check: true`), and `CAIRN_OFFLINE=1` or
 `agent.offline: true` always wins. When enabled, the desktop shell
-reads electron-updater's native YAML feed at `updates/<channel>/latest-<platform>.yml`; per-OS native
-updaters (electron-updater on macOS / Windows, AppImageUpdate on
-Linux) handle the download. Every artifact additionally carries a
-Cosign keyless OIDC signature on the Sigstore Rekor transparency log;
-the shipped `cairn release verify <path>` CLI checks both the platform
-signature and the Cosign sidecar. Verification is fail-closed.
+reads electron-updater's native YAML feed at
+`updates/<channel>/latest-{mac,windows}.yml` on macOS and Windows;
+AppImageUpdate handles Linux via the AppImage's embedded
+`update-information` field and zsync side-files. Every artifact
+additionally carries a Cosign keyless OIDC signature on the Sigstore
+Rekor transparency log; the shipped `cairn release verify <path>` CLI
+checks both the platform signature and the Cosign sidecar. Verification
+is fail-closed.
 
-**Channel migration is forward-only.** Switching channels changes the
-binary on next launch; vault data is untouched. Downgrade across a
-vault-schema bump is blocked. **Rollback is documented but manual** at
-v1.0 (`cairn release rollback --to <ver>` recipe); automatic
-boot-probe rollback is deferred to v1.1.
+**Channel migration is bidirectional with a vault-schema-downgrade guard.**
+Switching channels (stable ↔ beta ↔ nightly) changes the binary on
+next launch; vault data is untouched. If a channel switch would install
+a binary older than the vault's schema, startup is blocked with a clear
+error and the user is prompted to either reinstall the newer binary or
+pick a different vault. **Rollback is documented but manual** at v1.0
+(`cairn release rollback --to <ver>` recipe); automatic boot-probe
+rollback is deferred to v1.1.
 
 Full rules live in [ADR 0005](decisions/0005-release-channels.md).
 The maintainer recipe (cutting a stable, promoting nightly, rotating
@@ -389,18 +395,23 @@ by which artifact / package-manager tap they installed.
 **Update checks are off by default.** No outbound poll runs until the
 user opts in (`update.check: true`), and `CAIRN_OFFLINE=1` or
 `agent.offline: true` always wins. When enabled, the desktop shell
-reads electron-updater's native YAML feed at `updates/<channel>/latest-<platform>.yml`; per-OS native
-updaters (electron-updater on macOS / Windows, AppImageUpdate on
-Linux) handle the download. Every artifact additionally carries a
-Cosign keyless OIDC signature on the Sigstore Rekor transparency log;
-the shipped `cairn release verify <path>` CLI checks both the platform
-signature and the Cosign sidecar. Verification is fail-closed.
+reads electron-updater's native YAML feed at
+`updates/<channel>/latest-{mac,windows}.yml` on macOS and Windows;
+AppImageUpdate handles Linux via the AppImage's embedded
+`update-information` field and zsync side-files. Every artifact
+additionally carries a Cosign keyless OIDC signature on the Sigstore
+Rekor transparency log; the shipped `cairn release verify <path>` CLI
+checks both the platform signature and the Cosign sidecar. Verification
+is fail-closed.
 
-**Channel migration is forward-only.** Switching channels changes the
-binary on next launch; vault data is untouched. Downgrade across a
-vault-schema bump is blocked. **Rollback is documented but manual** at
-v1.0 (`cairn release rollback --to <ver>` recipe); automatic
-boot-probe rollback is deferred to v1.1.
+**Channel migration is bidirectional with a vault-schema-downgrade guard.**
+Switching channels (stable ↔ beta ↔ nightly) changes the binary on
+next launch; vault data is untouched. If a channel switch would install
+a binary older than the vault's schema, startup is blocked with a clear
+error and the user is prompted to either reinstall the newer binary or
+pick a different vault. **Rollback is documented but manual** at v1.0
+(`cairn release rollback --to <ver>` recipe); automatic boot-probe
+rollback is deferred to v1.1.
 
 Full rules live in [ADR 0005](decisions/0005-release-channels.md).
 The maintainer recipe (cutting a stable, promoting nightly, rotating
@@ -559,7 +570,9 @@ the user-facing summary lives in [Updates](../usage/updates.md).
 8. Trigger the `release-stable.yml` workflow (added in follow-up
    under #32) with the tag as input. It builds + signs + publishes
    to all stable destinations + updates the `homebrew-cairn` tap +
-   updates the `updates/stable/latest-<platform>.yml` electron-updater feed.
+   updates `updates/stable/latest-{mac,windows}.yml` electron-updater feed
+   (for macOS and Windows; the Linux AppImage's embedded
+   `update-information` is regenerated at build time).
 9. Verify artifacts on a clean machine: `cairn release verify
    <downloaded>.dmg` must print `ok: cosign + apple-developer-id`.
 10. Post the release notes to GitHub Releases; mark as latest.
@@ -572,7 +585,8 @@ the user-facing summary lives in [Updates](../usage/updates.md).
    in `release-dry-run`).
 3. Trigger `release-beta.yml` workflow — builds, signs, publishes to
    the `homebrew-cairn-beta` tap, marks the GitHub Release as
-   "Pre-release", updates `updates/beta/latest-<platform>.yml`.
+   "Pre-release", updates `updates/beta/latest-{mac,windows}.yml`
+   (macOS and Windows; Linux AppImage carries embedded metadata).
 4. Announce in the release thread; ask beta testers for feedback.
 
 ### Promote a nightly to beta
@@ -760,18 +774,22 @@ To make sure they stay off:
 The desktop app's onboarding asks once whether you want update
 checks. You can change your mind any time in Settings → Updates.
 
-When checks are enabled, the desktop app polls
+When checks are enabled, the desktop app polls (macOS / Windows)
 `https://windoliver.github.io/cairn/updates/<channel>/latest-<platform>.yml` once per
-24 hours. The payload it sends is metadata-only: channel name,
-current version, OS, arch, and an opaque rotating install ID that
-resets weekly. No vault content, no user identity, no IP-derived
-geo.
+24 hours, where `<platform>` is `mac` or `windows`. On Linux,
+AppImageUpdate uses the AppImage's embedded metadata; no separate
+Cairn-controlled poll endpoint runs. The payload sent by the macOS /
+Windows poller is metadata-only: channel name, current version, OS,
+arch, and an opaque rotating install ID that resets weekly. No vault
+content, no user identity, no IP-derived geo.
 
 ## Verifying a downloaded artifact
 
 Every artifact on a Cairn GitHub Release ships with a Cosign keyless
-OIDC signature (`<artifact>.sig` + `<artifact>.pem`) committed to the
-Sigstore Rekor transparency log. The shipped CLI verifier:
+OIDC signature (`<artifact>.cosign.sig` + `<artifact>.cosign.pem`)
+committed to the Sigstore Rekor transparency log. Linux AppImages also
+carry a GPG armored signature (`<artifact>.asc`). The shipped CLI
+verifier:
 
 ```bash
 cairn release verify ~/Downloads/Cairn-1.0.0-universal.dmg
@@ -784,12 +802,14 @@ original signature on the transparency log.
 
 You can also verify manually using upstream tooling:
 
+Substitute the channel-appropriate workflow path and tag for beta or nightly artifacts — see [ADR 0005 §3.a](../../../design/decisions/0005-release-channels.md) for the trust-anchor table.
+
 ```bash
 # Cosign verification (any OS):
 cosign verify-blob \
-  --certificate Cairn-1.0.0-universal.dmg.pem \
-  --signature Cairn-1.0.0-universal.dmg.sig \
-  --certificate-identity-regexp '^https://github\.com/windoliver/cairn/' \
+  --certificate Cairn-1.0.0-universal.dmg.cosign.pem \
+  --signature Cairn-1.0.0-universal.dmg.cosign.sig \
+  --certificate-identity 'https://github.com/windoliver/cairn/.github/workflows/release-stable.yml@refs/tags/v1.0.0' \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
   Cairn-1.0.0-universal.dmg
 
@@ -801,10 +821,10 @@ spctl --assess --type execute --verbose=2 /Applications/Cairn.app
 signtool verify /pa /v Cairn-1.0.0.msi
 
 # Linux GPG (on Linux):
-gpg --verify Cairn-1.0.0.AppImage.sig Cairn-1.0.0.AppImage
+gpg --verify Cairn-1.0.0.AppImage.asc Cairn-1.0.0.AppImage
 ```
 
-The maintainer's GPG fingerprint and Cosign identity regex are
+The maintainer's GPG fingerprint and Cosign trust anchors are
 documented in [release channels](../maintainers/release-channels.md)
 under "Rotate signing keys".
 

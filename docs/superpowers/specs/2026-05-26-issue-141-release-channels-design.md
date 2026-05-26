@@ -94,15 +94,16 @@ table-driven off that one string.
 
 | OS | Updater | Feed format | Platform signature |
 |---|---|---|---|
-| macOS | `electron-updater` reading its native YAML feed | `updates/<channel>/latest-mac.yml` on github.io | Apple Developer ID + notarization (already wired in #139). Cosign `.sig` sidecar as defence-in-depth. |
+| macOS | `electron-updater` reading its native YAML feed | `updates/<channel>/latest-mac.yml` on github.io | Apple Developer ID + notarization (already wired in #139). Cosign `.cosign.sig` sidecar as defence-in-depth. |
 | Windows | `electron-updater` Squirrel | `updates/<channel>/latest.yml` on github.io | Authenticode signed MSI (EV cert deferred to v1.0-rc). Cosign sidecar. |
-| Linux AppImage | AppImageUpdate (zsync over HTTPS) | embedded `update-information` field | GPG-signed `.sig` next to artifact. Cosign sidecar. |
+| Linux AppImage | AppImageUpdate (zsync over HTTPS) | embedded `update-information` field | GPG-signed `.asc` next to artifact. Cosign sidecar. |
 | brew / cargo / winget / scoop | Owned by the package manager; we publish artifacts + sidecars. | n/a | Package manager's existing verification + Cosign sidecar for users who want to double-check via `cairn release verify`. |
 
 **Cosign uniform layer.** Every released artifact carries a Cosign
-keyless OIDC signature (`<artifact>.sig` + `<artifact>.pem`) published
-alongside the artifact on its GitHub Release. The shipped CLI verifier
-`cairn release verify <path>`:
+keyless OIDC signature (`<artifact>.cosign.sig` + `<artifact>.cosign.pem`)
+published alongside the artifact on its GitHub Release. Linux AppImages
+additionally carry a GPG armored signature (`<artifact>.asc`). The
+shipped CLI verifier `cairn release verify <path>`:
 
 1. Reads the embedded channel marker.
 2. Looks up the matching public identity on the Sigstore Rekor
@@ -140,7 +141,7 @@ Fail-closed: any verification failure → non-zero exit + the
 
 ## 8. Channel migration + rollback
 
-### 8.1 Channel migration (forward-only)
+### 8.1 Channel migration (bidirectional with vault-schema-downgrade guard)
 
 1. User changes `update.channel` from stable → beta (or vice versa)
    via the Settings UI or `cairn config set update.channel beta`.
@@ -230,10 +231,11 @@ ships the **specs they test against**, not the tests themselves.
   every update and a state machine for "first launch after update". The
   design noise is real engineering; deferring to v1.1 keeps #141 in the
   doc-only lane. A follow-up issue under #32 captures this.
-- **Cloudflare Pages mirror of `updates/<channel>/latest-<platform>.yml`.** Default is
+- **Cloudflare Pages mirror of `updates/<channel>/latest-{mac,windows}.yml`.** Default is
   github.io directly. If GitHub Pages bandwidth becomes a concern, the
   mirror is a one-line DNS change; named in the ADR as a permitted
-  variant.
+  variant. Linux AppImage uses the embedded `update-information` field,
+  so no Cairn-controlled mirror endpoint is required for Linux.
 - **Aged-off nightly retention.** 30 days is the proposed window. The
   maintainer recipe doc spells out the GHA cleanup job; the actual job
   ships in a follow-up.
