@@ -831,7 +831,7 @@ dependencies = [
  "insta",
  "jsonwebtoken",
  "proptest",
- "reqwest 0.13.3",
+ "reqwest 0.13.4",
  "serde",
  "serde_json",
  "sha2",

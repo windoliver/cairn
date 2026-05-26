@@ -62,8 +62,7 @@ async fn same_commit_via_poll_and_webhook_yields_identical_payload() {
 
     let handle = Arc::new(pat_handle());
 
-    let poll_connector =
-        GitHubConnector::with_base_url("o", "r", server.uri()).expect("construct");
+    let poll_connector = GitHubConnector::with_base_url("o", "r", server.uri()).expect("construct");
     let poll_outcome = poll_connector
         .poll(&cairn_connectors_core::PollContext::new(
             handle.clone(),
