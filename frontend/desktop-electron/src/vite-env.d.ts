@@ -3,8 +3,13 @@
 interface Window {
   cairnDesktop?: {
     apiBaseUrl: string;
-    /** Per-launch bearer token; null when sidecar auth is disabled. */
-    apiToken: string | null;
+    /**
+     * Resolve the per-launch bearer token from the Electron main
+     * process via IPC. The token is NEVER placed on argv (which would
+     * expose it in process listings). Returns null when sidecar auth
+     * is disabled.
+     */
+    apiToken: () => Promise<string | null>;
     /**
      * Subscribe to sidecar address+token changes. The Electron main
      * process emits 'cairn:api-base' after restarting the sidecar on a

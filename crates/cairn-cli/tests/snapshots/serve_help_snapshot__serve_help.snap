@@ -27,5 +27,10 @@ Options:
           --vault is set, so callers cannot silently mislead users about which vault is open.
           Real-vault binding is a follow-up issue.
 
+      --allow-anonymous
+          Disable bearer-token authentication on the API. Required if CAIRN_DESKTOP_TOKEN is unset
+          to an empty value, so an inherited empty env cannot silently downgrade a packaged-app boot
+          to anonymous. Use for tests / local dev only.
+
   -h, --help
           Print help (see a summary with '-h')

@@ -1,9 +1,10 @@
 import { contextBridge, ipcRenderer } from "electron";
 
-// Main injects the discovered sidecar address + bearer token into
-// process.argv switches so the renderer learns them synchronously
-// without an IPC roundtrip per fetch. CAIRN_DESKTOP_API / TOKEN env
-// vars still win for local dev.
+// Main injects the discovered sidecar address into a process.argv
+// switch so the renderer learns the URL synchronously without an IPC
+// roundtrip per fetch. The bearer TOKEN is deliberately NOT placed on
+// argv (visible in `ps`/Activity Monitor to any same-user process);
+// renderer pulls it via ipcRenderer.invoke instead.
 function argvFlag(name) {
   const prefix = `--${name}=`;
   const found = process.argv.find((a) => a.startsWith(prefix));
@@ -18,17 +19,10 @@ function discoverApiBase() {
   );
 }
 
-function discoverApiToken() {
-  return (
-    process.env.CAIRN_DESKTOP_TOKEN ||
-    argvFlag("cairn-api-token") ||
-    null
-  );
-}
-
 contextBridge.exposeInMainWorld("cairnDesktop", {
   apiBaseUrl: discoverApiBase(),
-  apiToken: discoverApiToken(),
+  /** Fetch the per-launch bearer token from main over IPC. */
+  apiToken: () => ipcRenderer.invoke("cairn:token"),
   // Subscribe to address+token changes (e.g. after a sidecar crash +
   // restart on a different port). Callback receives {url, token}.
   onApiBaseChange: (callback) => {

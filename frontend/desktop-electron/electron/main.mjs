@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog } from "electron";
+import { app, BrowserWindow, dialog, ipcMain } from "electron";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { homedir } from "node:os";
@@ -45,9 +45,11 @@ async function pollHealth(address, timeoutMs = 15_000) {
 // Sidecar binds an ephemeral port; the discovered address is forwarded
 // to the renderer via webPreferences.additionalArguments so preload can
 // pick it up synchronously without an extra IPC roundtrip per fetch.
-async function createWindow(apiBase, apiToken) {
-  const additionalArgs = [`--cairn-api-base=${apiBase}`];
-  if (apiToken) additionalArgs.push(`--cairn-api-token=${apiToken}`);
+async function createWindow(apiBase) {
+  // NB: token is NOT placed on argv — that would expose the secret in
+  // `ps`/Activity Monitor output to any same-user process. Instead the
+  // renderer pulls it via ipcRenderer.invoke("cairn:token") which main
+  // serves from a closure variable.
   const win = new BrowserWindow({
     width: 1320,
     height: 860,
@@ -57,7 +59,7 @@ async function createWindow(apiBase, apiToken) {
       preload: join(__dirname, "preload.mjs"),
       contextIsolation: true,
       nodeIntegration: false,
-      additionalArguments: additionalArgs,
+      additionalArguments: [`--cairn-api-base=${apiBase}`],
     },
   });
   if (process.env.NODE_ENV === "development") {
@@ -259,6 +261,11 @@ async function main() {
     return;
   }
 
+  // Register IPC token source — preload pulls the token via invoke
+  // rather than receiving it through argv (which would expose the
+  // secret in process listings).
+  ipcMain.handle("cairn:token", () => handle.token);
+
   // Post-launch crash recovery: if the sidecar dies after we open the
   // window, attempt one silent restart with a fresh /health poll; on a
   // second crash OR an unhealthy restart, surface a blocking dialog
@@ -325,7 +332,7 @@ async function main() {
   }
   wireCrashHandler(handle);
 
-  openWindow = await createWindow(`http://${handle.address}`, handle.token);
+  openWindow = await createWindow(`http://${handle.address}`);
 }
 
 app.whenReady().then(() => {

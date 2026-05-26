@@ -140,9 +140,49 @@ fn serve_cors_preflight_for_authenticated_origin() {
 }
 
 #[test]
-fn serve_token_disabled_when_env_is_empty() {
-    let (mut child, addr, token) = spawn_serve(&[("CAIRN_DESKTOP_TOKEN", "")]);
-    assert_eq!(token, "<none>", "empty env disables auth");
+fn serve_refuses_empty_token_without_explicit_anonymous_flag() {
+    // CAIRN_DESKTOP_TOKEN="" with no --allow-anonymous must exit
+    // EX_CONFIG (78) instead of silently downgrading auth.
+    let bin = env!("CARGO_BIN_EXE_cairn");
+    let output = Command::new(bin)
+        .args(["serve", "--port", "0"])
+        .env("CAIRN_DESKTOP_TOKEN", "")
+        .output()
+        .expect("spawn cairn serve");
+    assert!(!output.status.success(), "expected non-zero exit");
+    assert_eq!(output.status.code(), Some(78), "expected EX_CONFIG");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("refusing to start with CAIRN_DESKTOP_TOKEN=\"\""),
+        "stderr: {stderr}"
+    );
+}
+
+#[test]
+fn serve_token_disabled_with_explicit_allow_anonymous() {
+    let bin = env!("CARGO_BIN_EXE_cairn");
+    let mut child = Command::new(bin)
+        .args(["serve", "--port", "0", "--allow-anonymous"])
+        .env("CAIRN_DESKTOP_TOKEN", "")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn cairn serve");
+    let stdout = child.stdout.take().expect("stdout");
+    let mut reader = BufReader::new(stdout);
+    let mut addr_line = String::new();
+    reader.read_line(&mut addr_line).expect("read addr line");
+    let addr = addr_line
+        .trim()
+        .strip_prefix("cairn-desktop listening on http://")
+        .expect("addr line")
+        .to_owned();
+    let mut token_line = String::new();
+    reader.read_line(&mut token_line).expect("read token line");
+    assert!(
+        token_line.trim().ends_with("<none>"),
+        "expected token <none>; got: {token_line:?}"
+    );
 
     // Without a token, /api/v1/vault must succeed.
     let resp = ureq::get(&format!("http://{addr}/api/v1/vault"))

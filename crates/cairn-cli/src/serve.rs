@@ -53,6 +53,18 @@ pub fn subcommand() -> clap::Command {
                      vault is open. Real-vault binding is a follow-up issue.",
                 ),
         )
+        .arg(
+            clap::Arg::new("allow-anonymous")
+                .long("allow-anonymous")
+                .action(clap::ArgAction::SetTrue)
+                .help(
+                    "Disable bearer-token authentication on the API. \
+                     Required if CAIRN_DESKTOP_TOKEN is unset to an empty \
+                     value, so an inherited empty env cannot silently \
+                     downgrade a packaged-app boot to anonymous. Use for \
+                     tests / local dev only.",
+                ),
+        )
         // NB: `--vault` is supplied by the top-level `cairn` command as a
         // global arg (see command.rs); we do not redeclare it here. clap
         // panics on first access if the same arg name appears with a
@@ -76,6 +88,7 @@ pub fn run(matches: &ArgMatches) -> ExitCode {
     // binding lands in a follow-up issue.
     let vault: Option<String> = matches.get_one::<String>("vault").cloned();
     let alpha_fixture = matches.get_flag("alpha-fixture");
+    let allow_anonymous = matches.get_flag("allow-anonymous");
     if let Some(ref v) = vault {
         if !alpha_fixture {
             eprintln!(
@@ -93,6 +106,28 @@ pub fn run(matches: &ArgMatches) -> ExitCode {
         );
     }
 
+    // Token resolution; see comment in serve(). Hoisted up so EX_CONFIG
+    // can be returned cleanly before the tokio runtime is built.
+    let (banner_token, auth_token) = match std::env::var("CAIRN_DESKTOP_TOKEN") {
+        Ok(t) if !t.is_empty() => (t.clone(), Some(t)),
+        Ok(_empty) => {
+            if !allow_anonymous {
+                eprintln!(
+                    "cairn serve: refusing to start with CAIRN_DESKTOP_TOKEN=\"\". \
+                     Either unset the variable (auto-generate), set it to a \
+                     real token, or pass --allow-anonymous to disable auth \
+                     explicitly (dev/test only)."
+                );
+                return ExitCode::from(78); // EX_CONFIG
+            }
+            (String::new(), None)
+        }
+        Err(_) => {
+            let fresh = generate_token();
+            (fresh.clone(), Some(fresh))
+        }
+    };
+
     let runtime = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -104,7 +139,7 @@ pub fn run(matches: &ArgMatches) -> ExitCode {
         }
     };
 
-    match runtime.block_on(serve(host, port)) {
+    match runtime.block_on(serve(host, port, banner_token, auth_token)) {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => {
             eprintln!("cairn serve: {err:#}");
@@ -114,7 +149,16 @@ pub fn run(matches: &ArgMatches) -> ExitCode {
 }
 
 /// Binds the listener, emits the sidecar discovery line, and runs until SIGTERM/SIGINT.
-async fn serve(host: String, port: u16) -> anyhow::Result<()> {
+///
+/// `banner_token` is what we print on stdout for the sidecar to parse
+/// (empty string means anonymous mode); `auth_token` is what the
+/// router enforces (Some = required, None = open).
+async fn serve(
+    host: String,
+    port: u16,
+    banner_token: String,
+    auth_token: Option<String>,
+) -> anyhow::Result<()> {
     use std::io::Write as _;
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -124,17 +168,6 @@ async fn serve(host: String, port: u16) -> anyhow::Result<()> {
         .with_writer(std::io::stderr)
         .try_init()
         .ok();
-
-    // Per-launch bearer token gates every non-/health API route. Token
-    // is read from CAIRN_DESKTOP_TOKEN if set (so a parent process can
-    // share its own value), otherwise generated fresh. Set to an empty
-    // string to disable auth (dev/test only).
-    let token = std::env::var("CAIRN_DESKTOP_TOKEN").unwrap_or_else(|_| generate_token());
-    let auth_token = if token.is_empty() {
-        None
-    } else {
-        Some(token.clone())
-    };
 
     let fixture = DesktopFixture::load_default().context("loading desktop alpha fixture")?;
     let app = router_with_auth(DesktopRepository::from_fixture(fixture), auth_token);
@@ -158,10 +191,10 @@ async fn serve(host: String, port: u16) -> anyhow::Result<()> {
     // The Electron sidecar parses both. Token never appears in logs
     // (which are stderr-only).
     println!("cairn-desktop listening on http://{actual}");
-    if token.is_empty() {
+    if banner_token.is_empty() {
         println!("cairn-desktop token <none>");
     } else {
-        println!("cairn-desktop token {token}");
+        println!("cairn-desktop token {banner_token}");
     }
     std::io::stdout().flush().ok();
 

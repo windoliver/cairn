@@ -54,15 +54,18 @@ export function App({
 }: {
   api?: DesktopApi;
 }) {
-  // API base URL + token are mutable: when the Electron main process
-  // restarts the sidecar on a new ephemeral port, it sends a
-  // 'cairn:api-base' payload over IPC. preload exposes onApiBaseChange;
-  // we rebuild the client on every change.
+  // API base URL is known from preload synchronously (argv-injected).
+  // The bearer token is fetched async from main via IPC so it never
+  // appears in process listings. Both are mutable: a sidecar crash +
+  // restart on a new ephemeral port emits 'cairn:api-base' with both.
   const [apiBaseUrl, setApiBaseUrl] = useState<string>(resolveDesktopApiBaseUrl);
-  const [apiToken, setApiToken] = useState<string | null>(
-    () => window.cairnDesktop?.apiToken ?? null,
-  );
+  const [apiToken, setApiToken] = useState<string | null>(null);
   useEffect(() => {
+    // Pull initial token over IPC.
+    const tokenFn = window.cairnDesktop?.apiToken;
+    if (tokenFn) {
+      void tokenFn().then(setApiToken).catch(() => setApiToken(null));
+    }
     window.cairnDesktop?.onApiBaseChange?.(({ url, token }) => {
       setApiBaseUrl(url);
       setApiToken(token);
