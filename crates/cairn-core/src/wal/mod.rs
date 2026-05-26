@@ -15,6 +15,7 @@
 pub mod fsm;
 pub mod idempotency;
 pub mod recover;
+pub mod replayer;
 pub mod step_graph;
 
 // Re-exports populated as Tasks 2–5 land.
@@ -24,6 +25,7 @@ pub use fsm::{
 };
 pub use idempotency::{OperationId, OperationIdError, StepKey, StepLog, StepLogError};
 pub use recover::{MAX_STEP_ATTEMPTS, OpSnapshot, RecoveryDecision, StepRow, decide_recovery};
+pub use replayer::{ReplayError, StepEvent, iter_from};
 pub use step_graph::{
     EVOLVE_STEPS, EXPIRE_STEPS, FORGET_RECORD_STEPS, StepDef, StepGraph, UPSERT_STEPS, WalKind,
     graph_for,
