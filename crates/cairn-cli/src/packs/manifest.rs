@@ -537,4 +537,15 @@ mod load_tests {
         assert_eq!(manifest.pack_id, "cairn-claude-code");
         assert_eq!(manifest.harness, Harness::ClaudeCode);
     }
+
+    #[test]
+    fn bundled_manifest_passes_pass_a() {
+        let bytes = crate::packs::embed::CAIRN_CLAUDE_CODE_PACK
+            .get_file("pack.json")
+            .expect("pack.json present")
+            .contents();
+        let manifest: PackManifest =
+            serde_json::from_slice(bytes).expect("parses");
+        manifest.validate_pass_a().expect("real manifest passes Pass A");
+    }
 }

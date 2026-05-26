@@ -5,10 +5,41 @@
   "version": "0.1.0",
   "harness": "claude-code",
   "cairn_mcp_compat": ">=1.0.0",
-  "description": "Reference Claude Code skill-pack for Cairn.",
-  "requires_capabilities": [],
-  "subagents": [],
-  "commands": [],
-  "hooks": {},
+  "description": "Reference Claude Code skill-pack for Cairn — six subagents, thirteen slash commands, five-event hook bindings.",
+  "requires_capabilities": [
+    "cairn.mcp.v1.search.keyword",
+    "cairn.mcp.v1.retrieve.record",
+    "cairn.mcp.v1.forget.record"
+  ],
+  "subagents": [
+    { "id": "context-loader",   "path": "agents/context-loader.md",   "uses_mcp_tools": ["assemble_hot","retrieve","search"] },
+    { "id": "vault-librarian",  "path": "agents/vault-librarian.md",  "uses_mcp_tools": ["lint"] },
+    { "id": "forget-planner",   "path": "agents/forget-planner.md",   "uses_mcp_tools": ["forget"] },
+    { "id": "consolidator",     "path": "agents/consolidator.md",     "uses_mcp_tools": ["lint","summarize"] },
+    { "id": "replay-checker",   "path": "agents/replay-checker.md",   "uses_mcp_tools": ["capture_trace","retrieve"] },
+    { "id": "trace-summarizer", "path": "agents/trace-summarizer.md", "uses_mcp_tools": ["summarize","retrieve"] }
+  ],
+  "commands": [
+    { "id": "cairn-ingest",        "path": "commands/cairn-ingest.md",        "kind": "verb-direct", "verb": "ingest" },
+    { "id": "cairn-search",        "path": "commands/cairn-search.md",        "kind": "verb-direct", "verb": "search" },
+    { "id": "cairn-retrieve",      "path": "commands/cairn-retrieve.md",      "kind": "verb-direct", "verb": "retrieve" },
+    { "id": "cairn-summarize",     "path": "commands/cairn-summarize.md",     "kind": "verb-direct", "verb": "summarize" },
+    { "id": "cairn-assemble",      "path": "commands/cairn-assemble.md",      "kind": "verb-direct", "verb": "assemble_hot" },
+    { "id": "cairn-capture-trace", "path": "commands/cairn-capture-trace.md", "kind": "verb-direct", "verb": "capture_trace" },
+    { "id": "cairn-lint",          "path": "commands/cairn-lint.md",          "kind": "verb-direct", "verb": "lint" },
+    { "id": "cairn-forget",        "path": "commands/cairn-forget.md",        "kind": "verb-direct", "verb": "forget" },
+    { "id": "cairn-status",        "path": "commands/cairn-status.md",        "kind": "verb-direct", "verb": "status" },
+    { "id": "cairn-standup",       "path": "commands/cairn-standup.md",       "kind": "workflow" },
+    { "id": "cairn-wrap-up",       "path": "commands/cairn-wrap-up.md",       "kind": "workflow" },
+    { "id": "cairn-audit",         "path": "commands/cairn-audit.md",         "kind": "workflow" },
+    { "id": "cairn-recall",        "path": "commands/cairn-recall.md",        "kind": "workflow" }
+  ],
+  "hooks": {
+    "SessionStart":     { "command": "cairn hook SessionStart" },
+    "UserPromptSubmit": { "command": "cairn hook UserPromptSubmit" },
+    "PreToolUse":       { "command": "cairn hook PreToolUse" },
+    "PostToolUse":      { "command": "cairn hook PostToolUse" },
+    "Stop":             { "command": "cairn hook Stop" }
+  },
   "manual_fragment": "manual.md"
 }
