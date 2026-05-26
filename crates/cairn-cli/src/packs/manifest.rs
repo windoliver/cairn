@@ -334,6 +334,32 @@ impl PackManifest {
         Ok(())
     }
 
+    /// Verify every path referenced by the manifest exists in the
+    /// supplied embedded pack directory.
+    ///
+    /// # Errors
+    /// Returns [`PackError::ManifestInvalid`] naming the first missing
+    /// file.
+    pub fn assert_all_paths_present(&self, dir: &include_dir::Dir<'_>) -> Result<(), PackError> {
+        let check = |path: &str, label: &str, id: &str| -> Result<(), PackError> {
+            if dir.get_file(path).is_none() {
+                Err(PackError::ManifestInvalid {
+                    reason: format!("{label} `{id}` references missing file `{path}`"),
+                })
+            } else {
+                Ok(())
+            }
+        };
+        check(&self.manual_fragment, "manual_fragment", "")?;
+        for s in &self.subagents {
+            check(&s.path, "subagent", &s.id)?;
+        }
+        for c in &self.commands {
+            check(&c.path, "command", &c.id)?;
+        }
+        Ok(())
+    }
+
     /// Pass B: cross-reference validation against MCP TOOLS, capability
     /// advertise table, and hook lifecycle list.
     ///
@@ -671,5 +697,33 @@ mod load_tests {
         let manifest: PackManifest =
             serde_json::from_slice(bytes).expect("parses");
         manifest.validate_pass_a().expect("real manifest passes Pass A");
+    }
+}
+
+#[cfg(test)]
+mod presence_tests {
+    use super::*;
+
+    #[test]
+    fn every_referenced_path_exists_in_embed() {
+        let dir = &crate::packs::embed::CAIRN_CLAUDE_CODE_PACK;
+        let bytes = dir.get_file("pack.json").unwrap().contents();
+        let m: PackManifest = serde_json::from_slice(bytes).unwrap();
+
+        m.assert_all_paths_present(dir).expect("all paths present");
+    }
+
+    #[test]
+    fn missing_path_is_detected() {
+        let dir = &crate::packs::embed::CAIRN_CLAUDE_CODE_PACK;
+        let mut m: PackManifest =
+            serde_json::from_slice(dir.get_file("pack.json").unwrap().contents()).unwrap();
+        m.subagents.push(SubagentDecl {
+            id: "ghost".to_owned(),
+            path: "agents/ghost.md".to_owned(),
+            uses_mcp_tools: vec!["search".to_owned()],
+        });
+        let err = m.assert_all_paths_present(dir).unwrap_err();
+        assert!(matches!(err, PackError::ManifestInvalid { .. }));
     }
 }
