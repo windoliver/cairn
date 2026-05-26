@@ -172,31 +172,47 @@ async fn serve(host: String, port: u16) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Generate a 32-byte URL-safe random token for per-launch bearer auth.
+/// Generate a 32-byte (256-bit) URL-safe random token from the OS
+/// CSPRNG (`rand_core::OsRng` → `getrandom`). Encoded as 43 base64url
+/// characters (no padding). One token per `cairn serve` launch.
+///
+/// Using a real CSPRNG (not a seeded LCG) is load-bearing: the
+/// previous time/pid-seeded generator collapsed to 64 possible
+/// outputs because the LCG's low 6 bits depend only on the previous
+/// low 6 bits, leaving 99.97% of the seed entropy unused.
 fn generate_token() -> String {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    // 192 bits of entropy: 12 u128 mixes of nanos + process id + addr
-    // of a stack variable. Not cryptographic-grade but sufficient for a
-    // loopback-bound, per-launch secret; the real defense is that the
-    // token never leaves this machine and never reaches the log file.
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    let pid = std::process::id() as u128;
-    let stack_var: u8 = 0;
-    let addr = (&raw const stack_var) as u128;
-    let mut state = nanos
-        .wrapping_mul(0x9E37_79B9_7F4A_7C15_u128)
-        .wrapping_add(pid)
-        .wrapping_add(addr);
-    let mut out = String::with_capacity(43);
-    const ALPHA: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
-    for _ in 0..43 {
-        state = state
-            .wrapping_mul(0x2545_F491_4F6C_DD1D_u128)
-            .wrapping_add(0xBF58_476D_1CE4_E5B9_u128);
-        out.push(ALPHA[(state as usize) & 0x3F] as char);
+    use rand_core::{OsRng, RngCore as _};
+    let mut bytes = [0u8; 32];
+    OsRng.fill_bytes(&mut bytes);
+    base64url_no_pad(&bytes)
+}
+
+fn base64url_no_pad(input: &[u8]) -> String {
+    const ALPHA: &[u8] =
+        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    let mut out = String::with_capacity(input.len().div_ceil(3) * 4);
+    let mut i = 0;
+    while i + 3 <= input.len() {
+        let b0 = input[i];
+        let b1 = input[i + 1];
+        let b2 = input[i + 2];
+        out.push(ALPHA[(b0 >> 2) as usize] as char);
+        out.push(ALPHA[((b0 & 0x03) << 4 | b1 >> 4) as usize] as char);
+        out.push(ALPHA[((b1 & 0x0F) << 2 | b2 >> 6) as usize] as char);
+        out.push(ALPHA[(b2 & 0x3F) as usize] as char);
+        i += 3;
+    }
+    let remaining = input.len() - i;
+    if remaining == 1 {
+        let b0 = input[i];
+        out.push(ALPHA[(b0 >> 2) as usize] as char);
+        out.push(ALPHA[((b0 & 0x03) << 4) as usize] as char);
+    } else if remaining == 2 {
+        let b0 = input[i];
+        let b1 = input[i + 1];
+        out.push(ALPHA[(b0 >> 2) as usize] as char);
+        out.push(ALPHA[((b0 & 0x03) << 4 | b1 >> 4) as usize] as char);
+        out.push(ALPHA[((b1 & 0x0F) << 2) as usize] as char);
     }
     out
 }
@@ -223,7 +239,37 @@ async fn shutdown_signal() {
     let terminate = std::future::pending::<()>();
 
     tokio::select! {
-        _ = ctrl_c => {}
-        _ = terminate => {}
+        () = ctrl_c => {}
+        () = terminate => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashSet;
+
+    #[test]
+    fn generate_token_high_entropy() {
+        // 1000 tokens must all be distinct AND span the full alphabet.
+        // The previous LCG implementation collapsed to 64 outputs;
+        // this test would have caught that immediately.
+        let mut seen = HashSet::new();
+        let mut chars = HashSet::new();
+        for _ in 0..1000 {
+            let t = generate_token();
+            assert_eq!(t.len(), 43, "expected base64url(32 bytes) = 43 chars");
+            for c in t.chars() {
+                chars.insert(c);
+            }
+            assert!(seen.insert(t), "duplicate token within 1000 samples");
+        }
+        // base64url alphabet is 64 chars; 1000 × 43 = 43k samples should
+        // exercise at least 50 of them with overwhelming probability.
+        assert!(
+            chars.len() >= 50,
+            "alphabet coverage suspiciously low: {} chars",
+            chars.len()
+        );
     }
 }

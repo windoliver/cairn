@@ -108,6 +108,38 @@ fn serve_bearer_token_gates_api_routes() {
 }
 
 #[test]
+fn serve_cors_preflight_for_authenticated_origin() {
+    // OPTIONS preflight from a renderer origin must succeed and echo
+    // Access-Control-Allow-Methods. Without allow_methods on the
+    // restricted CORS layer, browsers would refuse the follow-up
+    // authenticated GET/POST.
+    let (mut child, addr, _token) = spawn_serve(&[]);
+
+    let resp = ureq::request("OPTIONS", &format!("http://{addr}/api/v1/vault"))
+        .set("Origin", "null")
+        .set("Access-Control-Request-Method", "GET")
+        .set("Access-Control-Request-Headers", "authorization,content-type")
+        .call()
+        .expect("OPTIONS preflight");
+    assert!(
+        (200..400).contains(&resp.status()),
+        "preflight status {}",
+        resp.status()
+    );
+    let allow_methods = resp
+        .header("access-control-allow-methods")
+        .unwrap_or_default()
+        .to_ascii_uppercase();
+    assert!(
+        allow_methods.contains("GET") && allow_methods.contains("POST"),
+        "Access-Control-Allow-Methods missing GET/POST: {allow_methods:?}"
+    );
+
+    sigterm(child.id());
+    let _ = child.wait();
+}
+
+#[test]
 fn serve_token_disabled_when_env_is_empty() {
     let (mut child, addr, token) = spawn_serve(&[("CAIRN_DESKTOP_TOKEN", "")]);
     assert_eq!(token, "<none>", "empty env disables auth");

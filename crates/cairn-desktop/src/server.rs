@@ -5,13 +5,13 @@ use std::{net::SocketAddr, sync::Arc};
 use axum::{
     Json, Router,
     extract::{Path, Query, Request, State},
-    http::{HeaderValue, StatusCode, header},
+    http::{HeaderValue, Method, StatusCode, header},
     middleware::{Next, from_fn_with_state},
     response::IntoResponse,
     routing::{get, post},
 };
 use serde::Deserialize;
-use tower_http::cors::{AllowHeaders, AllowOrigin, CorsLayer};
+use tower_http::cors::{AllowHeaders, AllowMethods, AllowOrigin, CorsLayer};
 
 use crate::{
     model::{DesktopReconcileApplyRequest, DesktopReconcilePreviewRequest},
@@ -73,6 +73,7 @@ pub fn router_with_auth(repo: DesktopRepository, token: Option<String>) -> Route
                 HeaderValue::from_static("http://127.0.0.1:5173"),
                 HeaderValue::from_static("http://localhost:5173"),
             ]))
+            .allow_methods(AllowMethods::list([Method::GET, Method::POST]))
             .allow_headers(AllowHeaders::list([
                 header::AUTHORIZATION,
                 header::CONTENT_TYPE,
