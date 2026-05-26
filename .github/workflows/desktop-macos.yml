@@ -1,0 +1,131 @@
+name: desktop-macos
+
+on:
+  pull_request:
+    paths:
+      - "frontend/desktop-electron/**"
+      - "crates/cairn-cli/**"
+      - "crates/cairn-desktop/**"
+      - "scripts/uninstall.sh"
+      - ".github/workflows/desktop-macos.yml"
+      - ".github/workflows/desktop-smoke.yml"
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-14  # Apple Silicon
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    env:
+      CARGO_TERM_COLOR: always
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        run: |
+          rustup toolchain install 1.95.0 --profile minimal
+          rustup default 1.95.0
+          rustup target add aarch64-apple-darwin x86_64-apple-darwin
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: frontend/desktop-electron/package-lock.json
+
+      - name: Install desktop deps
+        working-directory: frontend/desktop-electron
+        run: npm ci
+
+      # Apple/CSC secrets are ONLY injected for tag-pushed builds. PR
+      # builds run untrusted package scripts (npm/cargo/electron-builder
+      # afterSign hook), so giving them signing credentials would let
+      # any same-repo PR exfiltrate the Developer ID certificate or
+      # produce a maliciously-signed artifact. PR DMGs are intentionally
+      # unsigned and rely on the right-click→Open Gatekeeper bypass
+      # documented in the DMG readme.
+      - name: Build DMG (signed, tag pushes only)
+        if: startsWith(github.ref, 'refs/tags/v')
+        working-directory: frontend/desktop-electron
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          CSC_LINK: ${{ secrets.CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
+        run: npm run dist
+
+      - name: Build DMG (unsigned, PR / non-tag)
+        if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
+        working-directory: frontend/desktop-electron
+        env:
+          # Explicitly disable code-sign identity discovery so
+          # electron-builder cannot accidentally pick up a local
+          # certificate on a self-hosted runner. The notarize hook
+          # already no-ops when APPLE_ID is unset.
+          CSC_IDENTITY_AUTO_DISCOVERY: "false"
+        run: npm run dist
+
+      - name: Verify universal binary
+        working-directory: frontend/desktop-electron
+        run: |
+          lipo -info resources/bin/cairn
+          lipo -info resources/bin/cairn | grep -q "arm64 x86_64\|x86_64 arm64"
+
+      - name: Verify signing (when signed)
+        if: env.APPLE_ID != ''
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+        working-directory: frontend/desktop-electron
+        run: |
+          APP=$(find release/mac* -name "*.app" -maxdepth 2 | head -1)
+          codesign --verify --deep --strict --verbose=2 "$APP"
+          spctl --assess --type execute --verbose=2 "$APP"
+          DMG=$(ls release/*.dmg | head -1)
+          xcrun stapler validate "$DMG"
+
+      - name: Upload artifact for downstream jobs
+        uses: actions/upload-artifact@v4
+        with:
+          # Name is consumed by smoke + upload-release; keep stable.
+          # The artifact itself is unsigned on PR/non-tag builds; tag
+          # builds produce a signed DMG (when secrets are configured).
+          name: cairn-macos-dmg
+          path: frontend/desktop-electron/release/*.dmg
+          retention-days: 7
+
+  smoke:
+    needs: build
+    uses: ./.github/workflows/desktop-smoke.yml
+
+  upload-release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [build, smoke]
+    runs-on: macos-14
+    permissions:
+      contents: write  # required only for the GitHub Release upload
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: cairn-macos-dmg
+          path: ./dmg
+      - name: Upload to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ./dmg/*.dmg

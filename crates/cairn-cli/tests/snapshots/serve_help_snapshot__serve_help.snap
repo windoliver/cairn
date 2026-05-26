@@ -1,0 +1,36 @@
+---
+source: crates/cairn-cli/tests/serve_help_snapshot.rs
+expression: stdout
+---
+Starts the cairn-desktop axum server on a localhost port. Used as a sidecar by Cairn.app; can also
+be run standalone for debugging. Port 0 binds an ephemeral port and prints the bound address to
+stdout as the first line.
+
+Usage: cairn serve [OPTIONS]
+
+Options:
+      --port <PORT>
+          TCP port (0 = ephemeral)
+          
+          [default: 4000]
+
+      --vault <NAME_OR_PATH>
+          Active vault: name from registry or filesystem path (overrides CAIRN_VAULT)
+
+      --host <HOST>
+          Bind address
+          
+          [default: 127.0.0.1]
+
+      --alpha-fixture
+          Acknowledge that the alpha serves canned fixture data regardless of --vault. Required when
+          --vault is set, so callers cannot silently mislead users about which vault is open.
+          Real-vault binding is a follow-up issue.
+
+      --allow-anonymous
+          Disable bearer-token authentication on the API. Required if CAIRN_DESKTOP_TOKEN is unset
+          to an empty value, so an inherited empty env cannot silently downgrade a packaged-app boot
+          to anonymous. Use for tests / local dev only.
+
+  -h, --help
+          Print help (see a summary with '-h')

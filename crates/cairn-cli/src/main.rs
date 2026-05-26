@@ -136,6 +136,7 @@ fn subcommand_needs_vault_guard(subcommand: Option<(&str, &ArgMatches)>) -> bool
             | "plugins"
             | "import"
             | "mcp"
+            | "serve"
             | "admin"
             | "backup"
             | "llm"
@@ -544,6 +545,7 @@ fn main() -> ExitCode {
         Some(("doctor", sub)) => doctor::run(sub),
         Some(("bench", sub)) => bench::run(sub),
         Some(("nexus", sub)) => run_nexus(sub, explicit_vault.as_deref()),
+        Some(("serve", sub)) => cairn_cli::serve::run(sub),
         Some(("mcp", _sub)) => {
             let (vault_root, source, config) =
                 match resolve_vault_and_config(explicit_vault.as_deref()) {

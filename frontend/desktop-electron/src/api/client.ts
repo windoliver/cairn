@@ -17,9 +17,11 @@ import type {
 
 export class DesktopApiClient {
   private readonly baseUrl: string;
+  private readonly token: string | null;
 
-  constructor(baseUrl: string) {
+  constructor(baseUrl: string, token: string | null = null) {
     this.baseUrl = baseUrl.replace(/\/+$/, "");
+    this.token = token;
   }
 
   vault(): Promise<DesktopVaultSummary> {
@@ -66,15 +68,26 @@ export class DesktopApiClient {
     return this.post("/api/v1/reconcile/apply", request);
   }
 
+  private authHeader(): { authorization: string } | undefined {
+    return this.token ? { authorization: `Bearer ${this.token}` } : undefined;
+  }
+
   private async get<T>(path: string): Promise<T> {
-    const response = await requestJson(`${this.baseUrl}${path}`);
+    // Keep no-init call shape stable when no token is configured so
+    // pre-existing tests asserting `toHaveBeenCalledWith(url)` still
+    // pass; only thread an init when we actually need to add a header.
+    const auth = this.authHeader();
+    const response = auth
+      ? await requestJson(`${this.baseUrl}${path}`, { headers: auth })
+      : await requestJson(`${this.baseUrl}${path}`);
     return readJson<T>(response);
   }
 
   private async post<T>(path: string, body: unknown): Promise<T> {
+    const auth = this.authHeader();
     const response = await requestJson(`${this.baseUrl}${path}`, {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers: { "content-type": "application/json", ...(auth ?? {}) },
       body: JSON.stringify(body),
     });
     return readJson<T>(response);

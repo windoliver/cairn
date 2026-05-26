@@ -58,6 +58,7 @@ pub fn build_command() -> clap::Command {
         .subcommand(nexus_cli::command())
         .subcommand(setup_subcommand())
         .subcommand(mcp_subcommand())
+        .subcommand(crate::serve::subcommand())
         .subcommand(vault_subcommand())
         .subcommand(skill_subcommand())
         .subcommand(skillpack_subcommand())

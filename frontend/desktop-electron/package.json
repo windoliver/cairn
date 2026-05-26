@@ -7,12 +7,14 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
+    "build:sidecar": "node scripts/build-sidecar.mjs",
+    "pack": "npm run build && npm run build:sidecar && electron-builder --mac --dir",
+    "dist": "npm run build && npm run build:sidecar && electron-builder --mac",
     "electron": "electron .",
     "test": "vitest run"
   },
   "dependencies": {
     "@vitejs/plugin-react": "^5.0.0",
-    "electron": "^38.0.0",
     "lucide-react": "^0.468.0",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
@@ -20,12 +22,15 @@
     "vite": "^7.0.0"
   },
   "devDependencies": {
+    "@electron/notarize": "^2.5.0",
     "@testing-library/jest-dom": "^6.6.0",
     "@testing-library/react": "^16.0.0",
     "@testing-library/user-event": "^14.6.0",
     "@types/node": "^22.0.0",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
+    "electron": "^38.0.0",
+    "electron-builder": "^25.1.8",
     "jsdom": "^25.0.0",
     "vitest": "^2.1.0"
   }

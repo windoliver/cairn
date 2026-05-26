@@ -1,0 +1,60 @@
+name: desktop-smoke
+
+on:
+  workflow_call: {}
+  workflow_dispatch: {}
+
+jobs:
+  smoke:
+    runs-on: macos-14
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: cairn-macos-dmg
+          path: ./dmg
+
+      - name: Mount + install
+        run: |
+          DMG=$(ls dmg/*.dmg | head -1)
+          hdiutil attach "$DMG" -mountpoint /Volumes/Cairn
+          cp -R /Volumes/Cairn/Cairn.app /Applications/
+          hdiutil detach /Volumes/Cairn
+
+      - name: Smoke launch (--smoke-test)
+        timeout-minutes: 2
+        run: |
+          mkdir -p "$RUNNER_TEMP/smoke-vault"
+          /Applications/Cairn.app/Contents/MacOS/Cairn \
+            --smoke-test --vault "$RUNNER_TEMP/smoke-vault"
+          code=$?
+          echo "app exit: $code"
+          if [ "$code" -ne 0 ]; then
+            echo "smoke test failed — sidecar didn't reach /health"
+            cat "$HOME/Library/Application Support/cairn/logs/desktop.log" 2>/dev/null || true
+            exit 1
+          fi
+
+      - name: Dump backend log (diagnostic only)
+        if: always()
+        run: |
+          LOG="$HOME/Library/Application Support/cairn/logs/desktop.log"
+          if [ -f "$LOG" ]; then
+            echo "--- desktop.log head ---"
+            head -40 "$LOG"
+          else
+            echo "(no desktop.log — sidecar did not write stderr)"
+          fi
+          # Liveness is proven by the previous step's exit code: --smoke-test
+          # only exits 0 after main.mjs polls /health and receives 200 from
+          # the spawned sidecar. The log may be empty on a healthy boot
+          # because tracing-subscriber writes nothing for a 200 /health
+          # request and the discovery line goes to stdout (parsed by
+          # sidecar.mjs, not tee'd to the log).
+
+      - name: Cleanup
+        if: always()
+        run: |
+          rm -rf /Applications/Cairn.app
+          bash "$GITHUB_WORKSPACE/scripts/uninstall.sh" --yes --full || true

@@ -30,10 +30,22 @@ The main CI workflow runs on every PR and push to `main`. Key jobs:
   or floor breach. See `crates/cairn-bench/manifests/coherence.toml`.
 - `codegen-drift`: IDL codegen drift gate only — runs `cairn-codegen --check`
   to verify committed generated types match the IDL source.
-- `contract-drift`: wire-compat and capability-matrix gate — runs
-  `cairn-codegen --check`, `cairn-docgen --check`, the wire-compat fixtures,
-  and the capability-matrix v0.1 advertise tests. Fails if any generated
-  output or contract surface drifts from committed state.
+- `contract-drift` (a.k.a. **v1-freeze gate**, release-blocking on v1.0+):
+  wire-compat and capability-matrix gate — runs `cairn-codegen --check`,
+  `cairn-docgen --check`, the wire-compat fixtures
+  (`crates/cairn-idl/tests/wire_compat_v1.rs`), the capability-matrix
+  advertise tests (`crates/cairn-core/tests/capability_matrix_v1.rs`),
+  per-surface status snapshots (`crates/cairn-cli/tests/status_snapshot_insta.rs`),
+  CLI↔SDK parity (`crates/cairn-cli/tests/sdk_cli_parity.rs`),
+  SDK transport filter (`crates/cairn-sdk/tests/surface.rs`),
+  and MCP initialize↔status parity (`crates/cairn-mcp/tests/init_status_parity.rs`).
+  Fails if any generated output or contract surface drifts from committed
+  state. The MCP envelope conformance suite
+  (`crates/cairn-mcp/tests/mcp_conformance.rs`) ships as part of the
+  regular `test` jobs — separate gate, also branch-protection required.
+  See [ADR 0004](../../../design/decisions/0004-mcp-v1-semver-freeze.md)
+  and [MCP Semver Policy](mcp-semver-policy.md) for the freeze rules
+  this gate enforces.
 - `bench-full`: manual-trigger BrainBench scorecard run (`bench / world-v1`).
 
 ## Supply-chain CI (`supply-chain.yml`)
