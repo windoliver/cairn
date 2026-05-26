@@ -18,6 +18,20 @@ pub struct ResourceCursor {
     pub last_sha: Option<String>,
     /// Branch the commit walk is targeting (commits resource only).
     pub branch: Option<String>,
+    /// Continuation cursor for commits walks that hit the per-poll page cap
+    /// without reaching `last_sha`. Set to the date of the oldest commit
+    /// walked this tick; next poll resumes with `until=<date>` so we continue
+    /// walking backward without re-scanning.
+    #[serde(default)]
+    pub pending_until_date: Option<DateTime<Utc>>,
+    /// Recorded HEAD sha for the in-progress walk. When the gap closes,
+    /// `last_sha` is advanced to this value.
+    #[serde(default)]
+    pub pending_head: Option<String>,
+    /// In-progress high-water timestamp for issues/PRs walking a `since` window.
+    /// On exhaustion, promoted to `since` and cleared.
+    #[serde(default)]
+    pub pending_since: Option<DateTime<Utc>>,
 }
 
 /// Connector-level cursor: per-resource map.

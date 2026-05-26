@@ -823,6 +823,7 @@ dependencies = [
  "cairn-connectors-core",
  "cairn-core",
  "chrono",
+ "hex",
  "insta",
  "jsonwebtoken",
  "proptest",

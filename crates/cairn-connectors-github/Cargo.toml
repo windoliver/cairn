@@ -21,6 +21,7 @@ cairn-connectors-core = { workspace = true }
 arc-swap = { workspace = true }
 async-trait = { workspace = true }
 chrono = { workspace = true }
+hex = { workspace = true }
 jsonwebtoken = { workspace = true }
 reqwest = { workspace = true }
 serde = { workspace = true }
