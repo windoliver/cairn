@@ -4,7 +4,7 @@
 - **Deciders:** Cairn maintainers
 - **Issue:** [#141](https://github.com/windoliver/cairn/issues/141)
 - **Parent epic:** [#32](https://github.com/windoliver/cairn/issues/32)
-- **Design-brief sections:** §2 (design principles — invariants 1, 2, 6, 9), §14 (privacy), §16 (distribution and packaging), §16.b (new subsection introduced by this ADR), §19 (v1.0 production)
+- **Design-brief sections:** §2 (design principles), §14 (privacy), §16 (distribution and packaging), §16.b (new subsection introduced by this ADR), §19 (v1.0 production)
 - **Supersedes:** none
 
 ## Context
@@ -101,7 +101,7 @@ Fail-closed: any verification failure → non-zero exit + the
   arch, and an opaque rotating install salt (regenerated weekly via the
   identity service, never linked to vault contents). No vault data, no
   record IDs, no user identifiers, no IP-derived geo. Logged at `trace`
-  only. The brief §6.6 rule ("never log raw record bodies above
+  only. The `CLAUDE.md` §6.6 rule ("never log raw record bodies above
   `debug`") is extended here to also cover update-poll payloads.
 - **Endpoint is a static file** (`updates/<channel>.xml` on github.io /
   optional Cloudflare Pages mirror). No server-side application
@@ -111,7 +111,7 @@ Fail-closed: any verification failure → non-zero exit + the
   the one-shot `cairn status --check-updates` (explicit invocation
   only, never automatic, never recurring).
 
-### 5. Channel migration (forward-only)
+### 5. Channel migration
 
 1. User changes `update.channel` from stable → beta (or vice versa)
    via the Settings UI or `cairn config set update.channel beta`.
@@ -150,7 +150,7 @@ Fail-closed: any verification failure → non-zero exit + the
 Unlike ADR 0004 (which is enforced by the runtime `contract-drift` CI
 job), this ADR is a **policy document** — the rules apply to release
 operations, not to compiled code. Enforcement is reviewer-driven via
-the beta-readiness runbook (Gate 11 added by this ADR's PR). Concrete
+the beta-readiness runbook (new Gate 11 "release channel policy frozen" added by this ADR's PR, which renumbers the existing manual gates 11–15 to 12–16). Concrete
 runtime gates ship in named follow-up issues:
 
 - Signed Sparkle feeds + Cosign sidecars per channel — follow-up under
@@ -181,8 +181,7 @@ Each follow-up cites this ADR for shape.
   off-by-default poll preserves the offline-first contract while
   letting users opt in.
 - **On-by-default update poll.** Rejected as a direct violation of
-  brief §2 invariant #2 ("stand-alone P0 — fresh laptop, offline,
-  zero cloud credentials"). The default must be zero outbound traffic.
+  brief §2 invariant #3 ("stand-alone — a single Rust static binary on a fresh laptop with zero cloud credentials works end-to-end"). The default must be zero outbound traffic.
 
 ## Consequences
 
