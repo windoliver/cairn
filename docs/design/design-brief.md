@@ -3922,8 +3922,11 @@ Releases), **beta** (tagged `vX.Y.Z-beta.N` or `-rc.N` — `homebrew-cairn-beta`
 tap and GitHub Pre-Releases), and **nightly** (scheduled GHA on `main`
 creates and pushes a `nightly-YYYYMMDD` tag; the tag push triggers the
 signed-publish workflow — GitHub Releases only). One binary per
-platform per channel; `cairn status` reports the channel via the
-build-time `CAIRN_CHANNEL` stamp. Desktop users pin a channel via
+platform per channel. `CAIRN_CHANNEL` (build-time) names the installed
+binary's channel; `update.channel` (desktop config) names the channel
+the next update will come from — see ADR 0005 §1 for the field split.
+`cairn status` reports the channel via the build-time `CAIRN_CHANNEL`
+stamp. Desktop users configure the next-update channel via
 `update.channel` in their desktop-config; CLI users pick a channel
 by which artifact / package-manager tap they installed.
 

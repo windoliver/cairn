@@ -76,10 +76,14 @@ When checks are enabled, the desktop app polls once per 24 hours:
 `https://windoliver.github.io/cairn/updates/<channel>/latest-mac.yml`
 on macOS, or `https://windoliver.github.io/cairn/updates/<channel>/latest.yml`
 on Windows. On Linux, AppImageUpdate uses the AppImage's embedded
-metadata; no separate Cairn-controlled poll endpoint runs. The payload
-sent by the macOS / Windows poller is metadata-only: channel name,
-current version, OS, arch, and an opaque rotating install ID that resets
-weekly. No vault content, no user identity, no IP-derived geo.
+metadata; no separate Cairn-controlled poll endpoint runs. The poll is
+a plain HTTP GET to a static file — electron-updater sends its default
+User-Agent (which encodes app name + version + OS + arch) and standard
+HTTP headers. **No Cairn-added query params, headers, install IDs, or
+vault-derived data leave your host.** The hosting provider's standard
+access logs see the channel (encoded in the URL path), the running
+version + OS + arch (in User-Agent), and your IP address (HTTP-standard).
+Nothing Cairn-controlled beyond that.
 
 ## Verifying a downloaded artifact
 

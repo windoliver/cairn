@@ -85,9 +85,30 @@ The following rules govern Cairn releases from v1.0 forward.
 
 One binary per platform per channel. The Rust core compiles
 identically; the only difference is the build-time `CAIRN_CHANNEL`
-env var the build embeds and `cairn status` reports. Channel-specific
-behavior (feed URL, update-check default, signature-verify identity)
-is table-driven off that one string.
+env var the build embeds.
+
+**Two channel fields, two distinct roles:**
+
+- **`CAIRN_CHANNEL`** (build-time, embedded in the binary) — names
+  the channel the **currently installed binary** was built from.
+  Read-only at runtime. Drives:
+  - `cairn status` channel reporting.
+  - The Cosign identity used by `cairn release verify` when
+    auditing the **currently running binary** against the
+    transparency log.
+- **`update.channel`** (desktop config, user-settable) — names the
+  channel the **next** update should come from. Default `stable`.
+  Drives:
+  - Which feed URL the desktop poller hits.
+  - The Cosign identity expected when verifying the **next**
+    downloaded artifact.
+
+After an update applies, the new binary's `CAIRN_CHANNEL` matches the
+prior `update.channel` (they converge). Until then, a stable binary
+with `update.channel=beta` will fetch beta feeds and verify the next
+downloaded artifact against the beta trust anchor, while
+`cairn status` continues to report `stable` (because the running
+binary is still the stable one).
 
 Channel pinning lives in two places:
 
@@ -98,11 +119,12 @@ Channel pinning lives in two places:
 - **Desktop:** `desktop-config.json` `update.channel` field (under the
   desktop app's app-support dir per OS — `~/Library/Application
   Support/cairn/` on macOS, mirrors the `vault_registry.json` location
-  from #139), default `stable`. Changing the value is persisted
-  immediately; the new channel applies on next launch. A one-shot
-  fetch of the chosen feed runs only if `update.check: true` is set
-  and neither `CAIRN_OFFLINE=1` nor `agent.offline: true` is engaged —
-  otherwise the channel switch applies with no outbound network call.
+  from #139), default `stable`. Changing `update.channel` is persisted
+  immediately; the feed URL and next-artifact Cosign identity switch on
+  the next launch. A one-shot fetch of the chosen feed runs only if
+  `update.check: true` is set and neither `CAIRN_OFFLINE=1` nor
+  `agent.offline: true` is engaged — otherwise the channel switch
+  applies with no outbound network call.
 
 ### 2. Per-OS update mechanism
 
@@ -141,12 +163,18 @@ Fail-closed: any verification failure → non-zero exit + the
 - **`CAIRN_OFFLINE=1` and `agent.offline: true` always win.** If either
   is set, the update poller is dead code regardless of `update.check`.
   Evaluated at config-load time, not at poll time.
-- **Payload is metadata-only.** Channel name, current version, OS,
-  arch, and an opaque rotating install salt (regenerated weekly via the
-  identity service, never linked to vault contents). No vault data, no
-  record IDs, no user identifiers, no IP-derived geo. Logged at `trace`
-  only. The brief §6.6 rule ("never log raw record bodies above
-  `debug`") is extended here to also cover update-poll payloads.
+- **Payload is HTTP-standard, no Cairn-controlled identifiers.** The
+  update poll is a GET request to a static per-channel YAML file
+  (e.g. `updates/stable/latest-mac.yml`). electron-updater sends its
+  default User-Agent (which includes app name + version + OS + arch)
+  and the standard HTTP headers (`Host`, `Accept`, etc.). **No
+  Cairn-added query params, headers, install IDs, or vault-derived
+  data leave the host.** The host's standard access logs see the
+  channel (encoded in the URL path), the running version + OS + arch
+  (in User-Agent), and the requester's IP (HTTP-standard). Nothing
+  Cairn-controlled beyond that. The `CLAUDE.md` §6.6 rule ("never log
+  raw record bodies above `debug`") is extended here to also cover
+  update-poll activity.
 - **Endpoint is a static file** (`updates/<channel>/latest-mac.yml` on
   macOS and `updates/<channel>/latest.yml` on Windows, on
   github.io / optional Cloudflare Pages mirror; Linux AppImage uses
@@ -806,12 +834,16 @@ checks. You can change your mind any time in Settings → Updates.
 When checks are enabled, the desktop app polls
 `https://windoliver.github.io/cairn/updates/<channel>/latest-mac.yml`
 (macOS) or `https://windoliver.github.io/cairn/updates/<channel>/latest.yml`
-(Windows) once per 24 hours. On Linux,
-AppImageUpdate uses the AppImage's embedded metadata; no separate
-Cairn-controlled poll endpoint runs. The payload sent by the macOS /
-Windows poller is metadata-only: channel name, current version, OS,
-arch, and an opaque rotating install ID that resets weekly. No vault
-content, no user identity, no IP-derived geo.
+(Windows) once per 24 hours. On Linux, AppImageUpdate uses the
+AppImage's embedded metadata; no separate Cairn-controlled poll
+endpoint runs. The poll is a plain HTTP GET to a static file —
+electron-updater sends its default User-Agent (which encodes app name
++ version + OS + arch) and standard HTTP headers. **No Cairn-added
+query params, headers, install IDs, or vault-derived data leave your
+host.** The hosting provider's standard access logs see the channel
+(encoded in the URL path), the running version + OS + arch (in
+User-Agent), and your IP address (HTTP-standard). Nothing
+Cairn-controlled beyond that.
 
 ## Verifying a downloaded artifact
 
