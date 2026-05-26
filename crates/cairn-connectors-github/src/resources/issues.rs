@@ -104,11 +104,19 @@ impl GhResource for IssuesResource {
         // across multiple poll calls before exhaustion.
         let mut max_updated = sub_cursor.pending_since.or(sub_cursor.since);
         for dto in &issues {
+            // Update the high-water mark for EVERY returned row, including PRs,
+            // so the cursor advances even on PR-only pages.  Failing to do this
+            // causes the cursor to stall: the next poll replays the same window
+            // because `max_updated` never moved past the PR rows.
+            if max_updated.is_none_or(|t| dto.updated_at > t) {
+                max_updated = Some(dto.updated_at);
+            }
             // Skip pull requests returned by /issues.
             // GitHub's /repos/{o}/{r}/issues endpoint returns both issues and
             // PRs.  PRs carry a non-null `pull_request` marker field.
             // `PrsResource` already owns PRs via /repos/{o}/{r}/pulls — emitting
             // them here too would produce duplicate, misclassified records.
+            // The timestamp bump above already advanced the cursor past them.
             if dto.pull_request.is_some() {
                 continue;
             }
@@ -117,14 +125,7 @@ impl GhResource for IssuesResource {
             // deliberate 1-second cursor overlap doesn't re-spool the same rows
             // in a no-update steady state.
             if boundary_skip.contains(event.event_id.as_str()) {
-                // Still track max_updated for the cursor even when skipping.
-                if max_updated.is_none_or(|t| dto.updated_at > t) {
-                    max_updated = Some(dto.updated_at);
-                }
                 continue;
-            }
-            if max_updated.is_none_or(|t| dto.updated_at > t) {
-                max_updated = Some(dto.updated_at);
             }
             events_with_meta.push((event, dto.updated_at));
         }
@@ -715,6 +716,97 @@ mod tests {
             result2.events.len(),
             0,
             "second poll in steady state must emit nothing"
+        );
+    }
+
+    /// Fix 3 (round-6): when a page contains only PR rows (`pull_request: {...}`),
+    /// no events are emitted but the cursor must still advance past those rows so
+    /// the next poll does not replay the same window.
+    #[tokio::test]
+    async fn issues_cursor_advances_through_pr_only_page() {
+        use cairn_connectors_core::CredentialHandle;
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let ts = "2026-05-25T10:00:00Z";
+
+        // All three items have `pull_request` markers — none should be emitted.
+        Mock::given(method("GET"))
+            .and(path("/repos/o/r/issues"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                {
+                    "id": 11, "number": 11,
+                    "title": "PR disguised as issue 1",
+                    "body": null, "state": "open",
+                    "user": {"login": "alice"},
+                    "created_at": ts,
+                    "updated_at": ts,
+                    "html_url": "https://github.com/o/r/pull/11",
+                    "pull_request": {"url": "https://api.github.com/repos/o/r/pulls/11"}
+                },
+                {
+                    "id": 12, "number": 12,
+                    "title": "PR disguised as issue 2",
+                    "body": null, "state": "open",
+                    "user": {"login": "bob"},
+                    "created_at": ts,
+                    "updated_at": ts,
+                    "html_url": "https://github.com/o/r/pull/12",
+                    "pull_request": {"url": "https://api.github.com/repos/o/r/pulls/12"}
+                },
+                {
+                    "id": 13, "number": 13,
+                    "title": "PR disguised as issue 3",
+                    "body": null, "state": "open",
+                    "user": {"login": "carol"},
+                    "created_at": ts,
+                    "updated_at": ts,
+                    "html_url": "https://github.com/o/r/pull/13",
+                    "pull_request": {"url": "https://api.github.com/repos/o/r/pulls/13"}
+                }
+            ])))
+            .mount(&server)
+            .await;
+
+        let handle = CredentialHandle::from_bytes(
+            serde_json::json!({"kind": "pat", "token": "t"})
+                .to_string()
+                .into_bytes(),
+        );
+        let auth =
+            std::sync::Arc::new(crate::auth::GitHubAuth::from_handle(&handle).expect("auth"));
+        let client = GhClient::new(auth, url::Url::parse(&server.uri()).unwrap());
+
+        let result = IssuesResource
+            .poll(
+                &client,
+                &Repo {
+                    owner: "o".into(),
+                    name: "r".into(),
+                },
+                &ResourceCursor {
+                    page: Some(1),
+                    ..Default::default()
+                },
+                50,
+            )
+            .await
+            .expect("poll");
+
+        // No events emitted (all rows are PRs).
+        assert_eq!(result.events.len(), 0, "PR-only page must emit no events");
+
+        // But the cursor must still advance so the next poll does not stall.
+        // Expected: since = max_updated_at - 1s = ts - 1s.
+        let expected_max = chrono::DateTime::parse_from_rfc3339(ts)
+            .unwrap()
+            .with_timezone(&Utc);
+        let expected_since = expected_max - Duration::seconds(1);
+        assert_eq!(
+            result.next_cursor.since,
+            Some(expected_since),
+            "cursor must advance to max_updated - 1s even when all rows are PRs"
         );
     }
 
