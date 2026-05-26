@@ -153,7 +153,7 @@ pub enum PackError {
 
 /// Canonical lifecycle hook events (must match
 /// `cairn_cli::hooks::HookName::ALL`).
-const HOOK_EVENTS: &[&str] = &[
+pub(crate) const HOOK_EVENTS: &[&str] = &[
     "SessionStart",
     "UserPromptSubmit",
     "PreToolUse",
@@ -173,6 +173,10 @@ fn is_safe_relative_path(s: &str) -> bool {
     }
     for comp in s.split('/') {
         if comp.is_empty() || comp == "." || comp == ".." {
+            return false;
+        }
+        // Reject non-ASCII, backslash, and control characters in path components.
+        if comp.bytes().any(|b| !b.is_ascii() || b == b'\\' || b < 0x20) {
             return false;
         }
     }
@@ -228,7 +232,8 @@ impl PackManifest {
             return Err(PackError::ManifestInvalid {
                 reason: format!(
                     "cairn_mcp_compat `{}` tail `{}` is not valid semver",
-                    self.cairn_mcp_compat, rest
+                    self.cairn_mcp_compat,
+                    rest.trim()
                 ),
             });
         }
@@ -453,6 +458,66 @@ mod validate_tests {
         });
         let err = m.validate_pass_a().unwrap_err();
         assert!(matches!(err, PackError::ManifestInvalid { .. }));
+    }
+
+    #[test]
+    fn rejects_backslash_in_subagent_path() {
+        let mut m = minimal_valid();
+        m.subagents.push(SubagentDecl {
+            id: "x".to_owned(),
+            path: "agents\\evil.md".to_owned(),
+            uses_mcp_tools: vec![],
+        });
+        let err = m.validate_pass_a().unwrap_err();
+        assert!(matches!(err, PackError::ManifestInvalid { .. }));
+    }
+
+    #[test]
+    fn rejects_nul_byte_in_subagent_path() {
+        let mut m = minimal_valid();
+        m.subagents.push(SubagentDecl {
+            id: "x".to_owned(),
+            path: "agents/evil\0.md".to_owned(),
+            uses_mcp_tools: vec![],
+        });
+        let err = m.validate_pass_a().unwrap_err();
+        assert!(matches!(err, PackError::ManifestInvalid { .. }));
+    }
+
+    #[test]
+    fn hook_events_matches_hook_name_all() {
+        assert_eq!(
+            HOOK_EVENTS,
+            &crate::hooks::HookName::ALL[..],
+            "HOOK_EVENTS must stay in sync with HookName::ALL"
+        );
+    }
+
+    #[test]
+    fn valid_manifest_with_populated_entries_passes_pass_a() {
+        let mut m = minimal_valid();
+        m.subagents.push(SubagentDecl {
+            id: "context-loader".to_owned(),
+            path: "agents/context-loader.md".to_owned(),
+            uses_mcp_tools: vec!["assemble_hot".to_owned(), "retrieve".to_owned()],
+        });
+        m.commands.push(CommandDecl {
+            id: "cairn-ingest".to_owned(),
+            path: "commands/cairn-ingest.md".to_owned(),
+            kind: CommandKind::VerbDirect,
+            verb: Some("ingest".to_owned()),
+        });
+        m.commands.push(CommandDecl {
+            id: "cairn-standup".to_owned(),
+            path: "commands/cairn-standup.md".to_owned(),
+            kind: CommandKind::Workflow,
+            verb: None,
+        });
+        m.hooks.insert(
+            "SessionStart".to_owned(),
+            HookBinding { command: "cairn hook SessionStart".to_owned() },
+        );
+        m.validate_pass_a().expect("populated valid manifest passes Pass A");
     }
 }
 
