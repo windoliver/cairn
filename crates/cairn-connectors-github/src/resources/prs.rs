@@ -80,7 +80,9 @@ impl GhResource for PrsResource {
         let query: Vec<(&str, String)> = vec![
             ("state", "all".into()),
             ("sort", "updated".into()),
-            ("direction", "asc".into()),
+            // Newest-first ordering: breaks early as soon as a row older than
+            // `since` is encountered, avoiding a full re-walk on every poll.
+            ("direction", "desc".into()),
             ("per_page", per_page.to_string()),
             ("page", page.to_string()),
         ];
@@ -106,29 +108,25 @@ impl GhResource for PrsResource {
         // across multiple poll calls before exhaustion.
         let mut max_updated = sub_cursor.pending_since.or(sub_cursor.since);
         for dto in &prs {
-            // Apply `since` client-side because /pulls lacks a since param.
-            if sub_cursor
-                .since
-                .is_some_and(|since| dto.updated_at <= since)
+            // Always advance the high-water timestamp for every returned row so
+            // the cursor advances even for rows we won't emit.
+            if max_updated.is_none_or(|t| dto.updated_at > t) {
+                max_updated = Some(dto.updated_at);
+            }
+            // With direction=desc (newest first), any row with updated_at <= since
+            // means all remaining rows are also old — break immediately rather than
+            // continuing to walk stale history.
+            if let Some(since) = sub_cursor.since
+                && dto.updated_at <= since
             {
-                // Still track max_updated for the cursor even when filtering.
-                if max_updated.is_none_or(|t| dto.updated_at > t) {
-                    max_updated = Some(dto.updated_at);
-                }
-                continue;
+                break;
             }
             let event = pr_to_event(dto, repo, None);
             // Skip events already emitted at the boundary timestamp so that the
             // deliberate 1-second cursor overlap doesn't re-spool the same rows
             // in a no-update steady state.
             if boundary_skip.contains(event.event_id.as_str()) {
-                if max_updated.is_none_or(|t| dto.updated_at > t) {
-                    max_updated = Some(dto.updated_at);
-                }
                 continue;
-            }
-            if max_updated.is_none_or(|t| dto.updated_at > t) {
-                max_updated = Some(dto.updated_at);
             }
             events_with_meta.push((event, dto.updated_at));
         }
@@ -683,6 +681,116 @@ mod tests {
             ev2_repoll.event_id.as_str(),
             "deterministic event ID must be stable across polls"
         );
+    }
+
+    /// Fix 2 (round-6): poll uses direction=desc and breaks as soon as a row with
+    /// `updated_at <= since` is encountered, so stale history is never traversed.
+    #[tokio::test]
+    async fn prs_poll_uses_desc_and_breaks_on_stale_row() {
+        use cairn_connectors_core::CredentialHandle;
+        use wiremock::matchers::{method, path, query_param};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+
+        // Three PRs returned newest-first (as direction=desc gives).
+        // PR_A: 2026-06-01 (newer than since)
+        // PR_B: 2026-05-15 (newer than since)
+        // PR_C: 2026-05-01 (older than or equal to since=2026-05-10)
+        let prs = serde_json::json!([
+            {
+                "id": 1, "number": 1,
+                "title": "PR_A",
+                "body": null, "state": "open",
+                "user": {"login": "alice"},
+                "updated_at": "2026-06-01T00:00:00Z",
+                "html_url": "https://github.com/o/r/pull/1",
+                "head": {"sha": "aaa", "ref": "feat-a"},
+                "base": {"sha": "000", "ref": "main"},
+                "draft": false
+            },
+            {
+                "id": 2, "number": 2,
+                "title": "PR_B",
+                "body": null, "state": "open",
+                "user": {"login": "bob"},
+                "updated_at": "2026-05-15T00:00:00Z",
+                "html_url": "https://github.com/o/r/pull/2",
+                "head": {"sha": "bbb", "ref": "feat-b"},
+                "base": {"sha": "000", "ref": "main"},
+                "draft": false
+            },
+            {
+                "id": 3, "number": 3,
+                "title": "PR_C",
+                "body": null, "state": "open",
+                "user": {"login": "carol"},
+                "updated_at": "2026-05-01T00:00:00Z",
+                "html_url": "https://github.com/o/r/pull/3",
+                "head": {"sha": "ccc", "ref": "feat-c"},
+                "base": {"sha": "000", "ref": "main"},
+                "draft": false
+            }
+        ]);
+
+        Mock::given(method("GET"))
+            .and(path("/repos/o/r/pulls"))
+            .and(query_param("direction", "desc"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&prs))
+            .mount(&server)
+            .await;
+
+        let handle = CredentialHandle::from_bytes(
+            serde_json::json!({"kind": "pat", "token": "t"})
+                .to_string()
+                .into_bytes(),
+        );
+        let auth =
+            std::sync::Arc::new(crate::auth::GitHubAuth::from_handle(&handle).expect("auth"));
+        let client = GhClient::new(auth, url::Url::parse(&server.uri()).unwrap());
+
+        // since = 2026-05-10 → PR_A and PR_B are newer; PR_C (2026-05-01) is older → break.
+        let since = chrono::DateTime::parse_from_rfc3339("2026-05-10T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+
+        let result = PrsResource
+            .poll(
+                &client,
+                &Repo {
+                    owner: "o".into(),
+                    name: "r".into(),
+                },
+                &ResourceCursor {
+                    since: Some(since),
+                    page: Some(1),
+                    ..Default::default()
+                },
+                50,
+            )
+            .await
+            .expect("poll succeeds");
+
+        // Only PR_A and PR_B must be emitted; PR_C is stale and breaks the loop.
+        assert_eq!(
+            result.events.len(),
+            2,
+            "only PR_A and PR_B emitted; loop breaks at PR_C"
+        );
+        let numbers: Vec<u64> = result
+            .events
+            .iter()
+            .filter_map(|e| {
+                if let cairn_connectors_core::ConnectorPayload::Json { body, .. } = &e.payload {
+                    body.get("number").and_then(serde_json::Value::as_u64)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        assert!(numbers.contains(&1), "PR_A (#1) must be emitted");
+        assert!(numbers.contains(&2), "PR_B (#2) must be emitted");
+        assert!(!numbers.contains(&3), "PR_C (#3) must not be emitted");
     }
 
     /// Fix 2 (round-5): in steady state (no new PRs), the boundary PR must NOT
