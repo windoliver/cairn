@@ -151,6 +151,311 @@ pub enum PackError {
     Json(#[from] serde_json::Error),
 }
 
+/// Canonical lifecycle hook events (must match
+/// `cairn_cli::hooks::HookName::ALL`).
+const HOOK_EVENTS: &[&str] = &[
+    "SessionStart",
+    "UserPromptSubmit",
+    "PreToolUse",
+    "PostToolUse",
+    "Stop",
+];
+
+fn is_safe_path_token(s: &str) -> bool {
+    !s.is_empty()
+        && s.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_'))
+}
+
+fn is_safe_relative_path(s: &str) -> bool {
+    if s.is_empty() || s.starts_with('/') {
+        return false;
+    }
+    for comp in s.split('/') {
+        if comp.is_empty() || comp == "." || comp == ".." {
+            return false;
+        }
+    }
+    true
+}
+
+impl PackManifest {
+    /// Pass A: structural invariants (no external lookups).
+    ///
+    /// Covers spec §4 invariants 1–6, 9, 11. Cross-reference checks
+    /// (invariants 7, 8, 10) live in [`Self::validate_pass_b`].
+    ///
+    /// # Errors
+    /// Returns [`PackError`] on the first failed invariant.
+    pub fn validate_pass_a(&self) -> Result<(), PackError> {
+        // 1. Schema.
+        if self.schema != "cairn-pack/v1" {
+            return Err(PackError::SchemaUnknown {
+                got: self.schema.clone(),
+            });
+        }
+
+        // 2. pack_id / name tokens.
+        if !is_safe_path_token(&self.pack_id) {
+            return Err(PackError::ManifestInvalid {
+                reason: format!("pack_id `{}` is not a safe path token", self.pack_id),
+            });
+        }
+        if !is_safe_path_token(&self.name) {
+            return Err(PackError::ManifestInvalid {
+                reason: format!("name `{}` is not a safe path token", self.name),
+            });
+        }
+
+        // 3. Semver.
+        if semver::Version::parse(&self.version).is_err() {
+            return Err(PackError::ManifestInvalid {
+                reason: format!("version `{}` is not valid semver", self.version),
+            });
+        }
+
+        // 4. cairn_mcp_compat — must start with `>=` and the remainder parse
+        //    as semver.
+        let Some(rest) = self.cairn_mcp_compat.strip_prefix(">=") else {
+            return Err(PackError::ManifestInvalid {
+                reason: format!(
+                    "cairn_mcp_compat `{}` must start with `>=` in v1",
+                    self.cairn_mcp_compat
+                ),
+            });
+        };
+        if semver::Version::parse(rest.trim()).is_err() {
+            return Err(PackError::ManifestInvalid {
+                reason: format!(
+                    "cairn_mcp_compat `{}` tail `{}` is not valid semver",
+                    self.cairn_mcp_compat, rest
+                ),
+            });
+        }
+
+        // 5. harness — enum already parsed by serde. Nothing extra to check.
+
+        // 6, 9, 11 — delegated to focused helpers.
+        if !is_safe_relative_path(&self.manual_fragment) {
+            return Err(PackError::ManifestInvalid {
+                reason: format!(
+                    "manual_fragment path `{}` escapes pack root",
+                    self.manual_fragment
+                ),
+            });
+        }
+        self.validate_subagents()?;
+        self.validate_commands()?;
+        self.validate_hooks()
+    }
+
+    /// Validates subagent path safety and uniqueness (invariants 6, 11).
+    fn validate_subagents(&self) -> Result<(), PackError> {
+        let mut seen = std::collections::BTreeSet::new();
+        for s in &self.subagents {
+            if !is_safe_relative_path(&s.path) {
+                return Err(PackError::ManifestInvalid {
+                    reason: format!("subagent `{}` path `{}` escapes pack root", s.id, s.path),
+                });
+            }
+            if !is_safe_path_token(&s.id) {
+                return Err(PackError::ManifestInvalid {
+                    reason: format!("subagent id `{}` is not a safe path token", s.id),
+                });
+            }
+            if !seen.insert(&s.id) {
+                return Err(PackError::ManifestInvalid {
+                    reason: format!("duplicate subagent id `{}`", s.id),
+                });
+            }
+        }
+        Ok(())
+    }
+
+    /// Validates command path safety, verb-kind consistency, and uniqueness
+    /// (invariants 6, 11).
+    fn validate_commands(&self) -> Result<(), PackError> {
+        let mut seen = std::collections::BTreeSet::new();
+        for c in &self.commands {
+            if !is_safe_relative_path(&c.path) {
+                return Err(PackError::ManifestInvalid {
+                    reason: format!("command `{}` path `{}` escapes pack root", c.id, c.path),
+                });
+            }
+            if !is_safe_path_token(&c.id) {
+                return Err(PackError::ManifestInvalid {
+                    reason: format!("command id `{}` is not a safe path token", c.id),
+                });
+            }
+            // verb required iff verb-direct.
+            match (c.kind, &c.verb) {
+                (CommandKind::VerbDirect, None) => {
+                    return Err(PackError::ManifestInvalid {
+                        reason: format!(
+                            "verb-direct command `{}` missing required `verb` field",
+                            c.id
+                        ),
+                    });
+                }
+                (CommandKind::Workflow, Some(verb)) => {
+                    return Err(PackError::ManifestInvalid {
+                        reason: format!(
+                            "workflow command `{}` must not declare a `verb` field (got `{verb}`)",
+                            c.id
+                        ),
+                    });
+                }
+                _ => {}
+            }
+            if !seen.insert(&c.id) {
+                return Err(PackError::ManifestInvalid {
+                    reason: format!("duplicate command id `{}`", c.id),
+                });
+            }
+        }
+        Ok(())
+    }
+
+    /// Validates that all hook event names are in the canonical list
+    /// (invariant 9).
+    fn validate_hooks(&self) -> Result<(), PackError> {
+        for hook_name in self.hooks.keys() {
+            if !HOOK_EVENTS.contains(&hook_name.as_str()) {
+                return Err(PackError::HookUnknown {
+                    hook: hook_name.clone(),
+                });
+            }
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod validate_tests {
+    use super::*;
+
+    fn minimal_valid() -> PackManifest {
+        PackManifest {
+            schema: "cairn-pack/v1".to_owned(),
+            pack_id: "test-pack".to_owned(),
+            name: "test-pack".to_owned(),
+            version: "0.1.0".to_owned(),
+            harness: Harness::ClaudeCode,
+            cairn_mcp_compat: ">=1.0.0".to_owned(),
+            description: "test".to_owned(),
+            requires_capabilities: vec![],
+            subagents: vec![],
+            commands: vec![],
+            hooks: BTreeMap::new(),
+            manual_fragment: "manual.md".to_owned(),
+        }
+    }
+
+    #[test]
+    fn valid_minimal_manifest_passes_pass_a() {
+        minimal_valid().validate_pass_a().expect("pass A");
+    }
+
+    #[test]
+    fn rejects_unknown_schema() {
+        let mut m = minimal_valid();
+        m.schema = "cairn-pack/v9".to_owned();
+        match m.validate_pass_a() {
+            Err(PackError::SchemaUnknown { got }) => assert_eq!(got, "cairn-pack/v9"),
+            other => panic!("expected SchemaUnknown, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rejects_bad_pack_id_path_token() {
+        let mut m = minimal_valid();
+        m.pack_id = "../evil".to_owned();
+        let err = m.validate_pass_a().unwrap_err();
+        assert!(matches!(err, PackError::ManifestInvalid { .. }));
+    }
+
+    #[test]
+    fn rejects_bad_name_path_token() {
+        let mut m = minimal_valid();
+        m.name = "with/slash".to_owned();
+        let err = m.validate_pass_a().unwrap_err();
+        assert!(matches!(err, PackError::ManifestInvalid { .. }));
+    }
+
+    #[test]
+    fn rejects_non_semver_version() {
+        let mut m = minimal_valid();
+        m.version = "latest".to_owned();
+        let err = m.validate_pass_a().unwrap_err();
+        assert!(matches!(err, PackError::ManifestInvalid { .. }));
+    }
+
+    #[test]
+    fn rejects_cairn_mcp_compat_without_ge() {
+        let mut m = minimal_valid();
+        m.cairn_mcp_compat = "1.0.0".to_owned();
+        let err = m.validate_pass_a().unwrap_err();
+        assert!(matches!(err, PackError::ManifestInvalid { .. }));
+    }
+
+    #[test]
+    fn rejects_unknown_hook_event() {
+        let mut m = minimal_valid();
+        m.hooks.insert(
+            "BadHook".to_owned(),
+            HookBinding {
+                command: "cairn hook X".to_owned(),
+            },
+        );
+        match m.validate_pass_a() {
+            Err(PackError::HookUnknown { hook }) => assert_eq!(hook, "BadHook"),
+            other => panic!("expected HookUnknown, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rejects_path_traversal_in_subagent_path() {
+        let mut m = minimal_valid();
+        m.subagents.push(SubagentDecl {
+            id: "x".to_owned(),
+            path: "../escape.md".to_owned(),
+            uses_mcp_tools: vec![],
+        });
+        let err = m.validate_pass_a().unwrap_err();
+        assert!(matches!(err, PackError::ManifestInvalid { .. }));
+    }
+
+    #[test]
+    fn rejects_duplicate_subagent_id() {
+        let mut m = minimal_valid();
+        m.subagents.push(SubagentDecl {
+            id: "a".to_owned(),
+            path: "agents/a.md".to_owned(),
+            uses_mcp_tools: vec![],
+        });
+        m.subagents.push(SubagentDecl {
+            id: "a".to_owned(),
+            path: "agents/a2.md".to_owned(),
+            uses_mcp_tools: vec![],
+        });
+        let err = m.validate_pass_a().unwrap_err();
+        assert!(matches!(err, PackError::ManifestInvalid { .. }));
+    }
+
+    #[test]
+    fn rejects_verb_direct_command_without_verb() {
+        let mut m = minimal_valid();
+        m.commands.push(CommandDecl {
+            id: "c".to_owned(),
+            path: "commands/c.md".to_owned(),
+            kind: CommandKind::VerbDirect,
+            verb: None,
+        });
+        let err = m.validate_pass_a().unwrap_err();
+        assert!(matches!(err, PackError::ManifestInvalid { .. }));
+    }
+}
+
 #[cfg(test)]
 mod load_tests {
     use super::*;
