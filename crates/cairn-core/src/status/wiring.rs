@@ -209,13 +209,16 @@ mod admin_extension_ready_tests {
         // can only ADD `true` rows).
         let cases = [
             (false, false, false),
-            (false, true,  false),
-            (true,  false, false),
-            (true,  true,  false),
+            (false, true, false),
+            (true, false, false),
+            (true, true, false),
         ];
         for (config, has_op, expected) in cases {
-            assert_eq!(admin_extension_ready(config, has_op), expected,
-                "config={config} has_op={has_op}");
+            assert_eq!(
+                admin_extension_ready(config, has_op),
+                expected,
+                "config={config} has_op={has_op}"
+            );
         }
     }
 }

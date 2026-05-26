@@ -3,8 +3,8 @@
 use chrono::{DateTime, Utc};
 
 use crate::contract::memory_store::StoreError;
-use crate::domain::admin::AdminRole;
 use crate::domain::Identity;
+use crate::domain::admin::AdminRole;
 
 /// A snapshot of a connector's enable/disable state as persisted in the store.
 ///

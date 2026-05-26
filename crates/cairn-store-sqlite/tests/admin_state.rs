@@ -3,8 +3,8 @@
 #![allow(clippy::unwrap_used, reason = "integration tests may use unwrap")]
 
 use cairn_core::contract::{AdminStateStore, ConnectorStateRow};
-use cairn_core::domain::admin::AdminRole;
 use cairn_core::domain::Identity;
+use cairn_core::domain::admin::AdminRole;
 use cairn_store_sqlite::SqliteAdminStateStore;
 
 fn alice() -> Identity {

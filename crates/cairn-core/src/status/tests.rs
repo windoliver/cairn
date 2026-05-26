@@ -668,7 +668,9 @@ fn admin_capability_absent_while_dark() {
     };
     let caps = advertise(&gates);
     assert!(
-        !caps.iter().any(|c| matches!(c, Capabilities::CairnMcpV1ExtensionAdmin)),
+        !caps
+            .iter()
+            .any(|c| matches!(c, Capabilities::CairnMcpV1ExtensionAdmin)),
         "admin capability must be absent when ADMIN_EXTENSION_WIRED = false; got {caps:?}"
     );
 }

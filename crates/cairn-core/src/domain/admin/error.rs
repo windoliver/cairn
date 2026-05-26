@@ -40,7 +40,9 @@ pub enum AdminError {
     },
 
     /// Cross-machine restore is not supported in v0.2.
-    #[error("snapshot is from machine {snapshot} but local is {local} — cross-machine restore not supported in v0.2")]
+    #[error(
+        "snapshot is from machine {snapshot} but local is {local} — cross-machine restore not supported in v0.2"
+    )]
     CrossMachineRestore {
         /// Machine fingerprint embedded in the snapshot.
         snapshot: String,
@@ -108,16 +110,16 @@ impl AdminError {
     pub fn code(&self) -> &'static str {
         match self {
             Self::CapabilityUnavailable { .. } => "CapabilityUnavailable",
-            Self::NotAuthorized { .. }         => "NotAuthorized",
-            Self::IntegrityMismatch { .. }     => "IntegrityMismatch",
-            Self::CrossMachineRestore { .. }   => "CrossMachineRestore",
-            Self::VaultIdMismatch { .. }       => "VaultIdMismatch",
-            Self::SchemaTooNew { .. }          => "SchemaTooNew",
-            Self::UnknownConnector { .. }      => "UnknownConnector",
-            Self::UnknownStepMarker { .. }     => "UnknownStepMarker",
-            Self::ReplayEscalated { .. }       => "ReplayEscalated",
-            Self::Store(_)                     => "StoreError",
-            Self::Wal(_)                       => "WalError",
+            Self::NotAuthorized { .. } => "NotAuthorized",
+            Self::IntegrityMismatch { .. } => "IntegrityMismatch",
+            Self::CrossMachineRestore { .. } => "CrossMachineRestore",
+            Self::VaultIdMismatch { .. } => "VaultIdMismatch",
+            Self::SchemaTooNew { .. } => "SchemaTooNew",
+            Self::UnknownConnector { .. } => "UnknownConnector",
+            Self::UnknownStepMarker { .. } => "UnknownStepMarker",
+            Self::ReplayEscalated { .. } => "ReplayEscalated",
+            Self::Store(_) => "StoreError",
+            Self::Wal(_) => "WalError",
         }
     }
 
@@ -126,15 +128,15 @@ impl AdminError {
     pub fn exit_code(&self) -> u8 {
         match self {
             Self::CapabilityUnavailable { .. } => 69,
-            Self::NotAuthorized { .. }         => 64,
+            Self::NotAuthorized { .. } => 64,
             Self::IntegrityMismatch { .. }
             | Self::CrossMachineRestore { .. }
             | Self::VaultIdMismatch { .. }
             | Self::SchemaTooNew { .. }
             | Self::UnknownStepMarker { .. }
-            | Self::UnknownConnector { .. }    => 70,
-            Self::ReplayEscalated { .. }       => 75,
-            Self::Store(_) | Self::Wal(_)      => 1,
+            | Self::UnknownConnector { .. } => 70,
+            Self::ReplayEscalated { .. } => 75,
+            Self::Store(_) | Self::Wal(_) => 1,
         }
     }
 }
@@ -146,8 +148,7 @@ mod tests {
     #[test]
     fn exit_codes_match_spec() {
         #[allow(clippy::expect_used)]
-        let actor =
-            Identity::parse("hmn:x").expect("test fixture: known-valid identity");
+        let actor = Identity::parse("hmn:x").expect("test fixture: known-valid identity");
 
         assert_eq!(
             64,

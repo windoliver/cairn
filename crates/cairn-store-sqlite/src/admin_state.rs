@@ -16,8 +16,8 @@ use chrono::{DateTime, Utc};
 use parking_lot::Mutex;
 use rusqlite::{Connection, OptionalExtension as _};
 
-use cairn_core::contract::{AdminStateStore, ConnectorStateRow};
 use cairn_core::contract::memory_store::StoreError;
+use cairn_core::contract::{AdminStateStore, ConnectorStateRow};
 use cairn_core::domain::Identity;
 use cairn_core::domain::admin::AdminRole;
 
