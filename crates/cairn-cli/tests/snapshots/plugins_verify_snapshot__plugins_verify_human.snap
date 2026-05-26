@@ -78,4 +78,11 @@ cairn-workflows (WorkflowOrchestrator)
   tier-1 manifest_features_match_capabilities     ok
   tier-2 enqueue_then_complete                    pending (real impl pending)
 
-Summary: 8 plugins, 54 ok, 6 pending, 0 failed
+cairn-claude-code (pack)
+  tier-1 pack_conformance_case                    ok
+  tier-1 pack_conformance_case                    ok
+  tier-1 pack_conformance_case                    ok
+  tier-1 pack_conformance_case                    ok
+  tier-2 pack_conformance_case                    ok
+
+Summary: 9 plugins, 59 ok, 6 pending, 0 failed

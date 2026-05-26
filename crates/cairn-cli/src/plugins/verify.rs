@@ -121,6 +121,43 @@ pub fn run(registry: &PluginRegistry) -> VerifyReport {
         });
     }
 
+    // Pack conformance: run the bundled pack-verify suite and surface each
+    // pack as a synthetic PluginReport with contract="pack".  This keeps
+    // VerifyReport's shape stable while making `cairn plugins verify`
+    // exercise the full pack install pipeline.
+    for pack_id in crate::packs::verify::bundled_pack_ids() {
+        let pack_outcomes = crate::packs::verify::run_pack_conformance(pack_id);
+        let mut cases = Vec::with_capacity(pack_outcomes.len());
+        for o in pack_outcomes {
+            let tier = match o.tier {
+                crate::packs::verify::Tier::One => Tier::One,
+                crate::packs::verify::Tier::Two | crate::packs::verify::Tier::Three => Tier::Two,
+            };
+            let status = match o.status {
+                Ok(()) => {
+                    summary.ok += 1;
+                    CaseStatus::Ok
+                }
+                Err(reason) => {
+                    summary.failed += 1;
+                    CaseStatus::Failed { message: reason }
+                }
+            };
+            // CaseOutcome.id is &'static str; use a stable sentinel —
+            // the per-case human name is surfaced in the failure message.
+            cases.push(CaseOutcome {
+                id: "pack_conformance_case",
+                tier,
+                status,
+            });
+        }
+        plugins.push(PluginReport {
+            name: pack_id.to_string(),
+            contract: "pack".to_string(),
+            cases,
+        });
+    }
+
     VerifyReport { plugins, summary }
 }
 
@@ -230,16 +267,29 @@ mod tests {
     use crate::plugins::host::register_all_for_verify;
 
     #[test]
-    fn run_reports_eight_plugins() {
+    fn run_reports_eight_plugins_plus_pack() {
         let reg = register_all_for_verify().expect("registers");
         let report = run(&reg);
-        assert_eq!(report.plugins.len(), 8);
+        // 8 bundled plugins + 1 synthetic "cairn-claude-code" pack report.
+        assert_eq!(report.plugins.len(), 9);
         assert_eq!(report.summary.failed, 0, "no failures expected");
         // 8 plugins × 4 tier-1 cases (manifest_matches_host,
         // arc_pointer_stable, capability_self_consistency_floor,
-        // manifest_features_match_capabilities) = 32 ok minimum.
+        // manifest_features_match_capabilities) = 32 ok minimum, plus
+        // pack conformance cases (all ok).
         assert!(report.summary.ok >= 32);
         assert!(report.summary.pending >= 4, "tier-2 stubs are pending");
+        // Pack report is present and clean.
+        let pack = report
+            .plugins
+            .iter()
+            .find(|p| p.name == "cairn-claude-code")
+            .expect("pack report present");
+        assert_eq!(pack.contract, "pack");
+        assert!(
+            pack.cases.iter().all(|c| c.status == CaseStatus::Ok),
+            "all pack conformance cases must pass"
+        );
     }
 
     #[test]
@@ -277,7 +327,8 @@ mod tests {
     fn empty_registry_fails_closed() {
         let reg = cairn_core::contract::registry::PluginRegistry::new();
         let report = run(&reg);
-        assert_eq!(report.plugins.len(), 1, "synthetic registry-empty plugin");
+        // 1 synthetic registry-empty plugin + 1 pack report (all-ok cases).
+        assert_eq!(report.plugins.len(), 2, "synthetic registry-empty plugin + pack");
         assert!(report.summary.failed >= 1);
         assert_eq!(exit_code(&report, false), 69);
         assert_eq!(exit_code(&report, true), 69);
@@ -367,9 +418,14 @@ mod tests {
             .expect("registers");
 
         let report = run(&reg);
-        assert_eq!(report.plugins.len(), 1);
-        assert_eq!(report.plugins[0].name, "bare-store");
-        let case = &report.plugins[0].cases[0];
+        // 1 typed-registration-without-manifest plugin + 1 pack report.
+        assert_eq!(report.plugins.len(), 2);
+        let bare = report
+            .plugins
+            .iter()
+            .find(|p| p.name == "bare-store")
+            .expect("bare-store plugin present");
+        let case = &bare.cases[0];
         assert_eq!(case.id, "manifest_present_for_typed_registration");
         assert!(matches!(case.status, CaseStatus::Failed { .. }));
         assert_eq!(exit_code(&report, false), 69);
@@ -537,7 +593,8 @@ patch = 0
         let report = run(&reg);
         let json = render_json(&report);
         let v: serde_json::Value = serde_json::from_str(&json).expect("valid json");
-        assert_eq!(v["plugins"].as_array().unwrap().len(), 8);
+        // 8 bundled plugins + 1 synthetic pack report.
+        assert_eq!(v["plugins"].as_array().unwrap().len(), 9);
         assert_eq!(v["summary"]["failed"], 0);
     }
 }

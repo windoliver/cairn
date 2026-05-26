@@ -7,6 +7,7 @@ pub mod embed;
 pub mod install;
 pub mod manifest;
 pub mod merge;
+pub mod verify;
 
 use include_dir::Dir;
 
