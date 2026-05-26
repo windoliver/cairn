@@ -88,24 +88,52 @@ impl GhResource for PrsResource {
         let path = format!("/repos/{}/{}/pulls", repo.owner, repo.name);
         let prs: Vec<PrDto> = client.get_json(&path, &query).await?;
 
-        let mut events: Vec<ConnectorEvent> = Vec::with_capacity(prs.len());
+        // Build the set of event IDs already emitted at the boundary timestamp.
+        // These are skipped to avoid re-emitting the same rows in steady state
+        // (when the cursor advances to `max_updated - 1s` for overlap safety, the
+        // boundary row is re-served every poll until a newer item appears).
+        let boundary_skip: std::collections::BTreeSet<String> = sub_cursor
+            .pending_boundary_event_ids
+            .iter()
+            .cloned()
+            .collect();
+
+        // Track (event, updated_at) pairs so we can record the boundary IDs later.
+        let mut events_with_meta: Vec<(ConnectorEvent, DateTime<Utc>)> =
+            Vec::with_capacity(prs.len());
         // Carry forward any in-progress max seen from prior pages; initialize
         // from `pending_since` so exact-full-page windows accumulate correctly
         // across multiple poll calls before exhaustion.
         let mut max_updated = sub_cursor.pending_since.or(sub_cursor.since);
         for dto in &prs {
-            if max_updated.is_none_or(|t| dto.updated_at > t) {
-                max_updated = Some(dto.updated_at);
-            }
             // Apply `since` client-side because /pulls lacks a since param.
             if sub_cursor
                 .since
                 .is_some_and(|since| dto.updated_at <= since)
             {
+                // Still track max_updated for the cursor even when filtering.
+                if max_updated.is_none_or(|t| dto.updated_at > t) {
+                    max_updated = Some(dto.updated_at);
+                }
                 continue;
             }
-            events.push(pr_to_event(dto, repo, None));
+            let event = pr_to_event(dto, repo, None);
+            // Skip events already emitted at the boundary timestamp so that the
+            // deliberate 1-second cursor overlap doesn't re-spool the same rows
+            // in a no-update steady state.
+            if boundary_skip.contains(event.event_id.as_str()) {
+                if max_updated.is_none_or(|t| dto.updated_at > t) {
+                    max_updated = Some(dto.updated_at);
+                }
+                continue;
+            }
+            if max_updated.is_none_or(|t| dto.updated_at > t) {
+                max_updated = Some(dto.updated_at);
+            }
+            events_with_meta.push((event, dto.updated_at));
         }
+
+        let events: Vec<ConnectorEvent> = events_with_meta.iter().map(|(e, _)| e.clone()).collect();
 
         let exhausted = u32::try_from(prs.len()).unwrap_or(u32::MAX) < per_page;
         // Only advance `since` when the current window is exhausted (partial
@@ -119,21 +147,38 @@ impl GhResource for PrsResource {
             // items updated at the exact same second as `max_updated` are re-served
             // on the next poll.  Deterministic event IDs dedupe any re-served items
             // the substrate has already ingested, so the overlap is harmless.
+            //
+            // Record the event IDs emitted at `max_updated` so the next poll can
+            // skip re-emitting them (the 1-second overlap re-serves them, but in a
+            // no-update steady state that causes unnecessary churn).
+            let new_boundary_ids: Vec<String> = if let Some(m) = max_updated {
+                events_with_meta
+                    .iter()
+                    .filter(|(_, d)| *d == m)
+                    .map(|(e, _)| e.event_id.as_str().to_owned())
+                    .collect()
+            } else {
+                // No new events this tick — carry forward existing boundary IDs.
+                sub_cursor.pending_boundary_event_ids.clone()
+            };
             ResourceCursor {
                 since: max_updated
                     .map(|t| t - Duration::seconds(1))
                     .or(sub_cursor.since),
                 page: Some(1),
                 pending_since: None,
+                pending_boundary_event_ids: new_boundary_ids,
                 ..ResourceCursor::default()
             }
         } else {
             // Still paginating same since window — keep since stable, advance
-            // pending_since so it survives to the exhaustion page.
+            // pending_since so it survives to the exhaustion page. Carry forward
+            // boundary IDs from prior state unchanged.
             ResourceCursor {
                 since: sub_cursor.since,
                 page: Some(page + 1),
                 pending_since: max_updated,
+                pending_boundary_event_ids: sub_cursor.pending_boundary_event_ids.clone(),
                 ..ResourceCursor::default()
             }
         };
@@ -637,6 +682,86 @@ mod tests {
             ev2.event_id.as_str(),
             ev2_repoll.event_id.as_str(),
             "deterministic event ID must be stable across polls"
+        );
+    }
+
+    /// Fix 2 (round-5): in steady state (no new PRs), the boundary PR must NOT
+    /// be re-emitted on the second poll.  The 1-second cursor overlap re-serves
+    /// it, but `pending_boundary_event_ids` causes it to be skipped.
+    #[tokio::test]
+    async fn prs_steady_state_no_new_updates_emits_nothing() {
+        use cairn_connectors_core::CredentialHandle;
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let ts = "2026-05-25T12:00:00Z";
+
+        let pr_payload = serde_json::json!([{
+            "id": 1, "number": 1,
+            "title": "Steady-state PR",
+            "body": null, "state": "open",
+            "user": {"login": "alice"},
+            "updated_at": ts,
+            "html_url": "https://github.com/o/r/pull/1",
+            "head": {"sha": "abc", "ref": "feat"},
+            "base": {"sha": "def", "ref": "main"},
+            "draft": false
+        }]);
+
+        // Both polls return the identical PR.
+        Mock::given(method("GET"))
+            .and(path("/repos/o/r/pulls"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&pr_payload))
+            .mount(&server)
+            .await;
+
+        let handle = CredentialHandle::from_bytes(
+            serde_json::json!({"kind": "pat", "token": "t"})
+                .to_string()
+                .into_bytes(),
+        );
+        let auth =
+            std::sync::Arc::new(crate::auth::GitHubAuth::from_handle(&handle).expect("auth"));
+        let base = url::Url::parse(&server.uri()).unwrap();
+        let repo = Repo {
+            owner: "o".into(),
+            name: "r".into(),
+        };
+
+        // Poll 1: emits 1 event (the PR), sets boundary_event_ids.
+        let result1 = PrsResource
+            .poll(
+                &GhClient::new(auth.clone(), base.clone()),
+                &repo,
+                &ResourceCursor {
+                    page: Some(1),
+                    ..Default::default()
+                },
+                50,
+            )
+            .await
+            .expect("poll 1");
+        assert_eq!(result1.events.len(), 1, "first poll emits 1 event");
+        assert!(
+            !result1.next_cursor.pending_boundary_event_ids.is_empty(),
+            "boundary event IDs must be recorded after first poll"
+        );
+
+        // Poll 2: same server, same response — boundary skip must suppress re-emit.
+        let result2 = PrsResource
+            .poll(
+                &GhClient::new(auth.clone(), base.clone()),
+                &repo,
+                &result1.next_cursor,
+                50,
+            )
+            .await
+            .expect("poll 2");
+        assert_eq!(
+            result2.events.len(),
+            0,
+            "second poll in steady state must emit nothing"
         );
     }
 }

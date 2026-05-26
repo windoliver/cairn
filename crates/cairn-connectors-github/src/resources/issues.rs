@@ -86,15 +86,24 @@ impl GhResource for IssuesResource {
         let path = format!("/repos/{}/{}/issues", repo.owner, repo.name);
         let issues: Vec<IssueDto> = client.get_json(&path, &query).await?;
 
-        let mut events: Vec<ConnectorEvent> = Vec::with_capacity(issues.len());
+        // Build the set of event IDs already emitted at the boundary timestamp.
+        // These are skipped to avoid re-emitting the same rows in steady state
+        // (when the cursor advances to `max_updated - 1s` for overlap safety, the
+        // boundary row is re-served every poll until a newer item appears).
+        let boundary_skip: std::collections::BTreeSet<String> = sub_cursor
+            .pending_boundary_event_ids
+            .iter()
+            .cloned()
+            .collect();
+
+        // Track (event, updated_at) pairs so we can record the boundary IDs later.
+        let mut events_with_meta: Vec<(ConnectorEvent, DateTime<Utc>)> =
+            Vec::with_capacity(issues.len());
         // Carry forward any in-progress max seen from prior pages; initialize
         // from `pending_since` so exact-full-page windows accumulate correctly
         // across multiple poll calls before exhaustion.
         let mut max_updated = sub_cursor.pending_since.or(sub_cursor.since);
         for dto in &issues {
-            if max_updated.is_none_or(|t| dto.updated_at > t) {
-                max_updated = Some(dto.updated_at);
-            }
             // Skip pull requests returned by /issues.
             // GitHub's /repos/{o}/{r}/issues endpoint returns both issues and
             // PRs.  PRs carry a non-null `pull_request` marker field.
@@ -103,8 +112,24 @@ impl GhResource for IssuesResource {
             if dto.pull_request.is_some() {
                 continue;
             }
-            events.push(issue_to_event(dto, repo, None));
+            let event = issue_to_event(dto, repo, None);
+            // Skip events already emitted at the boundary timestamp so that the
+            // deliberate 1-second cursor overlap doesn't re-spool the same rows
+            // in a no-update steady state.
+            if boundary_skip.contains(event.event_id.as_str()) {
+                // Still track max_updated for the cursor even when skipping.
+                if max_updated.is_none_or(|t| dto.updated_at > t) {
+                    max_updated = Some(dto.updated_at);
+                }
+                continue;
+            }
+            if max_updated.is_none_or(|t| dto.updated_at > t) {
+                max_updated = Some(dto.updated_at);
+            }
+            events_with_meta.push((event, dto.updated_at));
         }
+
+        let events: Vec<ConnectorEvent> = events_with_meta.iter().map(|(e, _)| e.clone()).collect();
 
         let exhausted = u32::try_from(issues.len()).unwrap_or(u32::MAX) < per_page;
         // Only advance `since` when the current `since`-window is exhausted
@@ -120,21 +145,39 @@ impl GhResource for IssuesResource {
             // items updated at the exact same second as `max_updated` are re-served
             // on the next poll.  Deterministic event IDs dedupe any re-served items
             // the substrate has already ingested, so the overlap is harmless.
+            //
+            // Record the event IDs emitted at `max_updated` so the next poll can
+            // skip re-emitting them (the 1-second overlap re-serves them, but in a
+            // no-update steady state that causes unnecessary churn).
+            let new_boundary_ids: Vec<String> = if let Some(m) = max_updated {
+                events_with_meta
+                    .iter()
+                    .filter(|(_, d)| *d == m)
+                    .map(|(e, _)| e.event_id.as_str().to_owned())
+                    .collect()
+            } else {
+                // No new events this tick — carry forward existing boundary IDs so
+                // the skip remains active.
+                sub_cursor.pending_boundary_event_ids.clone()
+            };
             ResourceCursor {
                 since: max_updated
                     .map(|t| t - Duration::seconds(1))
                     .or(sub_cursor.since),
                 page: Some(1),
                 pending_since: None,
+                pending_boundary_event_ids: new_boundary_ids,
                 ..ResourceCursor::default()
             }
         } else {
             // Still paginating same since window — keep since stable, advance
-            // pending_since so it survives to the exhaustion page.
+            // pending_since so it survives to the exhaustion page. Carry forward
+            // boundary IDs from prior state unchanged.
             ResourceCursor {
                 since: sub_cursor.since,
                 page: Some(page + 1),
                 pending_since: max_updated,
+                pending_boundary_event_ids: sub_cursor.pending_boundary_event_ids.clone(),
                 ..ResourceCursor::default()
             }
         };
@@ -595,5 +638,192 @@ mod tests {
             Some(expected_since),
             "since must be max_updated - 1s"
         );
+    }
+
+    /// Fix 2 (round-5): in steady state (no new issues), the boundary issue must
+    /// NOT be re-emitted on the second poll.  The 1-second cursor overlap re-serves
+    /// it, but `pending_boundary_event_ids` causes it to be skipped.
+    #[tokio::test]
+    async fn issues_steady_state_no_new_updates_emits_nothing() {
+        use cairn_connectors_core::CredentialHandle;
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let ts = "2026-05-25T12:00:00Z";
+
+        let issue_payload = serde_json::json!([{
+            "id": 1, "number": 1,
+            "title": "Steady-state issue",
+            "body": null, "state": "open",
+            "user": {"login": "alice"},
+            "created_at": ts,
+            "updated_at": ts,
+            "html_url": "https://github.com/o/r/issues/1"
+        }]);
+
+        // Both polls return the identical issue.
+        Mock::given(method("GET"))
+            .and(path("/repos/o/r/issues"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&issue_payload))
+            .mount(&server)
+            .await;
+
+        let handle = CredentialHandle::from_bytes(
+            serde_json::json!({"kind": "pat", "token": "t"})
+                .to_string()
+                .into_bytes(),
+        );
+        let auth =
+            std::sync::Arc::new(crate::auth::GitHubAuth::from_handle(&handle).expect("auth"));
+        let base = url::Url::parse(&server.uri()).unwrap();
+        let repo = Repo {
+            owner: "o".into(),
+            name: "r".into(),
+        };
+
+        // Poll 1: emits 1 event (the issue), sets boundary_event_ids.
+        let result1 = IssuesResource
+            .poll(
+                &GhClient::new(auth.clone(), base.clone()),
+                &repo,
+                &ResourceCursor {
+                    page: Some(1),
+                    ..Default::default()
+                },
+                50,
+            )
+            .await
+            .expect("poll 1");
+        assert_eq!(result1.events.len(), 1, "first poll emits 1 event");
+        assert!(
+            !result1.next_cursor.pending_boundary_event_ids.is_empty(),
+            "boundary event IDs must be recorded after first poll"
+        );
+
+        // Poll 2: same server, same response — boundary skip must suppress re-emit.
+        let result2 = IssuesResource
+            .poll(
+                &GhClient::new(auth.clone(), base.clone()),
+                &repo,
+                &result1.next_cursor,
+                50,
+            )
+            .await
+            .expect("poll 2");
+        assert_eq!(
+            result2.events.len(),
+            0,
+            "second poll in steady state must emit nothing"
+        );
+    }
+
+    /// Fix 2 (round-5): a new issue appearing after the boundary is emitted while
+    /// the unchanged boundary issue is skipped.
+    #[tokio::test]
+    async fn issues_new_update_after_boundary_emits_only_new() {
+        use cairn_connectors_core::CredentialHandle;
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let ts_t = "2026-05-25T12:00:00Z";
+        let ts_t5 = "2026-05-25T12:05:00Z";
+
+        // Server 1: first poll — only the boundary issue at T.
+        let server1 = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/repos/o/r/issues"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                {
+                    "id": 1, "number": 1,
+                    "title": "Boundary issue",
+                    "body": null, "state": "open",
+                    "user": {"login": "alice"},
+                    "created_at": ts_t,
+                    "updated_at": ts_t,
+                    "html_url": "https://github.com/o/r/issues/1"
+                }
+            ])))
+            .mount(&server1)
+            .await;
+
+        let handle = CredentialHandle::from_bytes(
+            serde_json::json!({"kind": "pat", "token": "t"})
+                .to_string()
+                .into_bytes(),
+        );
+        let auth =
+            std::sync::Arc::new(crate::auth::GitHubAuth::from_handle(&handle).expect("auth"));
+        let repo = Repo {
+            owner: "o".into(),
+            name: "r".into(),
+        };
+
+        let result1 = IssuesResource
+            .poll(
+                &GhClient::new(auth.clone(), url::Url::parse(&server1.uri()).unwrap()),
+                &repo,
+                &ResourceCursor {
+                    page: Some(1),
+                    ..Default::default()
+                },
+                50,
+            )
+            .await
+            .expect("poll 1");
+        assert_eq!(result1.events.len(), 1, "first poll emits 1 event");
+        assert!(!result1.next_cursor.pending_boundary_event_ids.is_empty());
+
+        // Server 2: second poll — same boundary issue at T plus a new one at T+5min.
+        let server2 = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/repos/o/r/issues"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                {
+                    "id": 1, "number": 1,
+                    "title": "Boundary issue",
+                    "body": null, "state": "open",
+                    "user": {"login": "alice"},
+                    "created_at": ts_t,
+                    "updated_at": ts_t,
+                    "html_url": "https://github.com/o/r/issues/1"
+                },
+                {
+                    "id": 2, "number": 2,
+                    "title": "New issue",
+                    "body": null, "state": "open",
+                    "user": {"login": "bob"},
+                    "created_at": ts_t5,
+                    "updated_at": ts_t5,
+                    "html_url": "https://github.com/o/r/issues/2"
+                }
+            ])))
+            .mount(&server2)
+            .await;
+
+        let result2 = IssuesResource
+            .poll(
+                &GhClient::new(auth.clone(), url::Url::parse(&server2.uri()).unwrap()),
+                &repo,
+                &result1.next_cursor,
+                50,
+            )
+            .await
+            .expect("poll 2");
+
+        // Only the new issue (id=2) must be emitted; boundary issue (id=1) skipped.
+        assert_eq!(
+            result2.events.len(),
+            1,
+            "only the new issue must be emitted"
+        );
+        let emitted_id = match &result2.events[0].payload {
+            cairn_connectors_core::ConnectorPayload::Json { body, .. } => body
+                .get("number")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0),
+            _ => 0,
+        };
+        assert_eq!(emitted_id, 2, "emitted event must be the new issue #2");
     }
 }
