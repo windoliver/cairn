@@ -104,6 +104,34 @@ pub const REMEDIATION: &[(&str, &str)] = &[
          that `cairn mcp serve` is hosting the scheduler so the golden \
          checks can run and emit report records.",
     ),
+    (
+        "cairn.mcp.v1.extension.admin.snapshot",
+        "enable admin extension: set `admin.enabled: true` in .cairn/config.yaml \
+         and grant operator role with `cairn admin grant <identity>`",
+    ),
+    (
+        "cairn.mcp.v1.extension.admin.restore",
+        "enable admin extension: set `admin.enabled: true` in .cairn/config.yaml \
+         and grant operator role with `cairn admin grant <identity>`",
+    ),
+    (
+        "cairn.mcp.v1.extension.admin.replay_wal",
+        "enable admin extension: set `admin.enabled: true` in .cairn/config.yaml. \
+         Dry-run requires no role; --apply requires operator",
+    ),
+    (
+        "cairn.mcp.v1.extension.admin.connector.enable",
+        "enable admin extension and grant operator role; see `cairn admin --help`",
+    ),
+    (
+        "cairn.mcp.v1.extension.admin.connector.disable",
+        "enable admin extension and grant operator role; see `cairn admin --help`",
+    ),
+    (
+        "cairn.mcp.v1.extension.admin.connector.backfill",
+        "enable admin extension and grant operator role; \
+         ensure the connector is registered and currently enabled",
+    ),
 ];
 
 /// Operator-facing remediation hint for `capability`, or `None` when no hint
