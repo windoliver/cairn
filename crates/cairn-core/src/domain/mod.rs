@@ -18,6 +18,7 @@
 //!   JSON form so a YAML projector reuses the same `serde` derive.
 
 pub mod actor_chain;
+pub mod admin;
 pub mod admission;
 pub mod agent_audit;
 pub mod agent_canary;
