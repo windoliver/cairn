@@ -41,6 +41,18 @@ pub struct ResourceCursor {
     /// Cleared when the walk moves past the boundary date or the gap is closed.
     #[serde(default)]
     pub pending_boundary_shas: Vec<String>,
+    /// Page number for commit continuation under a fixed `until=<date>` filter.
+    /// Combined with `pending_until_date` to walk same-timestamp batches without
+    /// getting stuck: when ALL commits on a page share the same author date,
+    /// `until=<date>` alone re-returns the same boundary items every poll.
+    /// Adding `page=N` to the bounded result set makes the cursor stable.
+    #[serde(default)]
+    pub pending_until_page: Option<u32>,
+    /// Event IDs emitted at the current `since` high-water timestamp. Used by
+    /// issues/PRs to skip re-emitting the same row across the deliberate 1-second
+    /// cursor overlap.
+    #[serde(default)]
+    pub pending_boundary_event_ids: Vec<String>,
 }
 
 /// Connector-level cursor: per-resource map.

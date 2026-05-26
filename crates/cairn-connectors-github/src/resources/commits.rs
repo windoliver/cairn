@@ -143,6 +143,14 @@ impl GhResource for CommitsResource {
         // emitted at the pending_until_date boundary on a previous tick).
         let boundary_filter: std::collections::BTreeSet<String> =
             sub_cursor.pending_boundary_shas.iter().cloned().collect();
+        // Track SHAs emitted within this poll to dedupe same-timestamp commits
+        // across pages within a single tick. This is necessary when the `until=`
+        // date filter returns the same boundary items at the start of each page.
+        let mut in_poll_seen: std::collections::BTreeSet<String> =
+            std::collections::BTreeSet::new();
+        // Whether this poll is continuing under a fixed `until=` bound.
+        // If so, we send both `until=` and `page=` so the result set is stable.
+        let in_continuation = sub_cursor.pending_until_date.is_some();
 
         loop {
             if pages_walked >= MAX_PAGES_PER_POLL {
@@ -158,20 +166,46 @@ impl GhResource for CommitsResource {
             let pp = per_page.min(budget_remaining);
             let mut query: Vec<(&str, String)> =
                 vec![("sha", branch.clone()), ("per_page", pp.to_string())];
-            if let Some(until) = oldest_walked_date {
-                // Continuation: keep walking backward from where we left off.
-                // GitHub's `until` is inclusive on second granularity; the first
-                // commit of the resumed page may equal the last commit of the
-                // previous page.  We skip duplicates via the boundary SHA set and
-                // the pending_head sentinel below.
+
+            // Include `until=` when continuing under a fixed boundary date OR when
+            // we have already walked past the first page and have a date to anchor.
+            if let Some(until) = sub_cursor.pending_until_date.or(
+                // For non-continuation walks that have advanced `oldest_walked_date`
+                // past the first page, we also include `until=` so subsequent pages
+                // are consistently bounded.
+                if pages_walked > 0 {
+                    oldest_walked_date
+                } else {
+                    None
+                },
+            ) {
                 query.push(("until", until.to_rfc3339()));
+            }
+
+            // Include `page=` when continuing under a fixed `until=` boundary so
+            // that same-timestamp batches can be walked page-by-page without
+            // re-returning the same commits every poll.  The page number is stable
+            // across polls because the `until=` bound keeps the result set fixed.
+            let current_page = if in_continuation {
+                // Resume from where the prior poll left off, then advance by the
+                // number of pages walked this tick.
+                sub_cursor
+                    .pending_until_page
+                    .unwrap_or(1)
+                    .saturating_add(pages_walked)
+            } else {
+                // Fresh walk: first page is always 1.
+                1_u32.saturating_add(pages_walked)
+            };
+            if in_continuation || pages_walked > 0 {
+                query.push(("page", current_page.to_string()));
             }
 
             let page_commits: Vec<CommitDto> = client.get_json(&path, &query).await?;
             pages_walked = pages_walked.saturating_add(1);
 
             if page_commits.is_empty() {
-                // No more history — full backfill from epoch closes here.
+                // No more history (or empty page under continuation) — gap closes.
                 closed_gap = true;
                 break;
             }
@@ -189,6 +223,12 @@ impl GhResource for CommitsResource {
                 if boundary_filter.contains(&dto.sha) {
                     continue;
                 }
+                // Skip SHAs already emitted within this tick's page sequence.
+                // Necessary when multiple pages under the same `until=` date return
+                // overlapping boundary commits.
+                if in_poll_seen.contains(&dto.sha) {
+                    continue;
+                }
                 // Skip the continuation boundary item: when `until=<date>` is
                 // inclusive, GitHub may return the same commit as the last item
                 // of the previous page (same date, same sha via pending_head).
@@ -203,6 +243,7 @@ impl GhResource for CommitsResource {
                     break;
                 }
                 events.push(commit_to_event(dto, repo));
+                in_poll_seen.insert(dto.sha.clone());
                 walked.push((dto.sha.clone(), dto.commit.author.date));
                 budget_remaining = budget_remaining.saturating_sub(1);
                 oldest_walked_date = Some(dto.commit.author.date);
@@ -242,6 +283,24 @@ impl GhResource for CommitsResource {
             s
         };
 
+        // Compute the next page for the continuation cursor.  If we were already
+        // continuing under a fixed `until=` boundary, advance the page by the
+        // number of pages walked this tick.  On the first time we set a boundary,
+        // start from page 1 (the next poll will resume at page 2 after walking it).
+        let next_until_page = if closed_gap {
+            None
+        } else if in_continuation {
+            Some(
+                sub_cursor
+                    .pending_until_page
+                    .unwrap_or(1)
+                    .saturating_add(pages_walked),
+            )
+        } else {
+            // Not yet in continuation but will be next tick — start at page 1.
+            Some(1_u32)
+        };
+
         // Only advance last_sha when the gap is closed; otherwise keep the prior
         // sha so the next poll resumes correctly (prevents permanent history skip
         // when > per_page commits accumulate between polls).
@@ -251,16 +310,19 @@ impl GhResource for CommitsResource {
                 last_sha: recorded_head.or_else(|| sub_cursor.last_sha.clone()),
                 branch: Some(branch),
                 pending_until_date: None,
+                pending_until_page: None,
                 pending_head: None,
                 pending_boundary_shas: Vec::new(),
                 ..ResourceCursor::default()
             }
         } else {
-            // Mid-walk: persist continuation state for next poll.
+            // Mid-walk: persist continuation state (until_date + until_page) so
+            // next poll can resume the bounded result set at the correct page.
             ResourceCursor {
                 last_sha: sub_cursor.last_sha.clone(),
                 branch: Some(branch),
                 pending_until_date: oldest_walked_date,
+                pending_until_page: next_until_page,
                 pending_head: recorded_head,
                 pending_boundary_shas: boundary_shas,
                 ..ResourceCursor::default()
@@ -651,48 +713,76 @@ mod tests {
     /// Fix 1 (round-3): bounded poll caps at `MAX_PAGES_PER_POLL` and persists
     /// continuation state (`pending_head` + `pending_until_date`) so the next tick
     /// resumes without re-walking already-seen commits.
+    ///
+    /// Uses page-specific mocks so each page returns unique commit SHAs.
+    /// `in_poll_seen` deduplicates within a tick, so all 500 unique SHAs are emitted.
     #[tokio::test]
+    #[allow(clippy::too_many_lines)]
     async fn commits_poll_caps_pages_per_call_and_persists_continuation() {
         let server = MockServer::start().await;
 
-        // Each request returns per_page commits (full page), so the loop
-        // continues until MAX_PAGES_PER_POLL (10) is hit.  We mount a single
-        // catch-all mock that always returns the same 2-commit page, and use
-        // per_page=2 (budget=2) so each loop iteration sees a "full" page.
+        // Mount MAX_PAGES_PER_POLL (10) page-specific mocks, each returning 50
+        // unique commits.  The page number sent by the code on page N > 1 will be
+        // N itself (because in_continuation=false, current_page = 1 + pages_walked).
+        // Page 1 is requested without a `page=` param; pages 2-10 carry `page=N`.
+        // All pages also carry `until=` after the first page sets oldest_walked_date.
         //
-        // With budget=2 the loop exits on budget exhaustion after 1 page (2
-        // commits consumed).  To actually trigger the page cap we need budget >
-        // per_page * MAX_PAGES_PER_POLL.  Use budget=10000 and per_page=50; we
-        // mount a mock that always returns 50 identical commits so every page is
-        // full.  The loop will hit MAX_PAGES_PER_POLL=10 and break.
-        let commit_page: Vec<serde_json::Value> = (0_u32..50)
-            .map(|i| {
-                serde_json::json!({
-                    "sha": format!("sha{i:04}"),
-                    "commit": {
-                        "author": {
-                            "name": "A",
-                            "email": "a@x.com",
-                            // Spread dates so oldest_walked_date keeps advancing.
-                            "date": format!("2026-05-25T{:02}:00:00Z", (10 - i / 10).min(9))
-                        },
-                        "committer": {
-                            "name": "A", "email": "a@x.com",
-                            "date": format!("2026-05-25T{:02}:00:00Z", (10 - i / 10).min(9))
-                        },
-                        "message": format!("commit {i}")
-                    },
-                    "author": {"login": "a"},
-                    "html_url": format!("https://github.com/o/r/commit/sha{i:04}")
-                })
-            })
-            .collect();
+        // Because this is a fresh walk (no pending_until_date), page 1 is fetched
+        // without `page=` or `until=`.  Subsequent pages include both.
+        // Use a catch-all for all page-N requests (the exact page param varies per
+        // iteration).  Each page must have unique SHAs to avoid in_poll_seen dedup.
+        //
+        // Strategy: mount 10 page-specific mocks where page N matches `page=N`
+        // and returns commits sha(N*50)..(N*50+50).  Page 1 has no `page=` param.
+        // The hour spread ensures oldest_walked_date advances so `until=` is stable.
 
+        // Page 1: no `page=` param.
+        let make_page = |page_idx: u32| -> Vec<serde_json::Value> {
+            let base = page_idx * 50;
+            (0_u32..50)
+                .map(|i| {
+                    let global_i = base + i;
+                    // Spread dates: group every 50 by hour so each page has a
+                    // distinct oldest_walked_date and `until=` advances each page.
+                    let hour = 20_u32.saturating_sub(page_idx);
+                    serde_json::json!({
+                        "sha": format!("p{page_idx}sha{i:04}"),
+                        "commit": {
+                            "author": {
+                                "name": "A", "email": "a@x.com",
+                                "date": format!("2026-05-25T{hour:02}:{i:02}:00Z")
+                            },
+                            "committer": {
+                                "name": "A", "email": "a@x.com",
+                                "date": format!("2026-05-25T{hour:02}:{i:02}:00Z")
+                            },
+                            "message": format!("commit {global_i}")
+                        },
+                        "author": {"login": "a"},
+                        "html_url": format!("https://github.com/o/r/commit/p{page_idx}sha{i:04}")
+                    })
+                })
+                .collect()
+        };
+
+        // Page 1 catch-all (no page= param needed; this fires for the first request).
+        // Lower priority (5 = default) so it loses to the page-specific mocks below.
         Mock::given(method("GET"))
             .and(path("/repos/o/r/commits"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(&commit_page))
+            .respond_with(ResponseTemplate::new(200).set_body_json(make_page(0)))
+            .with_priority(5)
             .mount(&server)
             .await;
+        // Pages 2-10: higher priority (1) so they win over the catch-all above.
+        for pg in 2_u32..=10 {
+            Mock::given(method("GET"))
+                .and(path("/repos/o/r/commits"))
+                .and(query_param("page", pg.to_string()))
+                .respond_with(ResponseTemplate::new(200).set_body_json(make_page(pg - 1)))
+                .with_priority(1)
+                .mount(&server)
+                .await;
+        }
 
         let auth = std::sync::Arc::new(
             crate::auth::GitHubAuth::from_handle(&pat_handle("tok")).expect("auth"),
@@ -713,7 +803,7 @@ mod tests {
             .await
             .expect("poll succeeds");
 
-        // 10 pages × 50 commits = 500 events.
+        // 10 pages × 50 unique commits = 500 events.
         assert_eq!(
             result.events.len(),
             500,
@@ -967,6 +1057,204 @@ mod tests {
         assert!(
             result2.next_cursor.pending_boundary_shas.is_empty(),
             "boundary SHAs cleared on gap close"
+        );
+    }
+
+    /// Fix 1 (round-5): when ALL commits in every page share the same author
+    /// date, the `until=<date>` continuation must also send `page=N` to walk
+    /// through the bounded result set without getting stuck re-returning the same
+    /// boundary items.
+    ///
+    /// Setup: three pages, all commits at `2026-05-01T00:00:00Z`.
+    /// - Poll 1 (no continuation): page 1 — [sha001, sha002] emitted.
+    /// - Poll 2 (continuation, page=2): [sha003, sha004] emitted.
+    /// - Poll 3 (continuation, page=3): [] → gap closed.
+    ///
+    /// All 4 SHAs must be emitted, none duplicated, and gap closes at the empty page.
+    #[tokio::test]
+    // The test body exhaustively sets up three sequential mock servers to validate
+    // the full page-increment continuation across same-timestamp boundaries.
+    #[allow(clippy::too_many_lines)]
+    async fn commits_poll_walks_past_same_timestamp_via_page_increment() {
+        use wiremock::matchers::query_param;
+
+        let boundary_ts = "2026-05-01T00:00:00Z";
+        let make_commit = |sha: &str| {
+            serde_json::json!({
+                "sha": sha,
+                "commit": {
+                    "author": {"name": "A", "email": "a@x.com", "date": boundary_ts},
+                    "committer": {"name": "A", "email": "a@x.com", "date": boundary_ts},
+                    "message": format!("commit {sha}")
+                },
+                "author": {"login": "a"},
+                "html_url": format!("https://github.com/o/r/commit/{sha}")
+            })
+        };
+
+        // Server 1: first poll — page 1, no `until=` yet.
+        let server1 = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/repos/o/r/commits"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                make_commit("sha001"),
+                make_commit("sha002"),
+            ])))
+            .mount(&server1)
+            .await;
+
+        let auth = std::sync::Arc::new(
+            crate::auth::GitHubAuth::from_handle(&pat_handle("tok")).expect("auth"),
+        );
+        let repo = Repo {
+            owner: "o".into(),
+            name: "r".into(),
+        };
+
+        // Poll 1: fresh walk, budget=2 so per_page=2; full page → no gap close.
+        let sub1 = ResourceCursor {
+            branch: Some("main".into()),
+            ..ResourceCursor::default()
+        };
+        let client1 = GhClient::new(auth.clone(), url::Url::parse(&server1.uri()).unwrap());
+        let result1 = CommitsResource
+            .poll(&client1, &repo, &sub1, 2)
+            .await
+            .expect("poll 1");
+
+        assert_eq!(result1.events.len(), 2, "sha001 + sha002 on first poll");
+        assert!(
+            result1.next_cursor.pending_until_date.is_some(),
+            "continuation date set after poll 1"
+        );
+        // pending_until_page should be Some(1) — next poll will request page=2.
+        assert_eq!(
+            result1.next_cursor.pending_until_page,
+            Some(1),
+            "pending_until_page starts at 1 after first page cap"
+        );
+
+        let emitted_poll1: Vec<String> = result1
+            .events
+            .iter()
+            .filter_map(|e| {
+                if let cairn_connectors_core::ConnectorPayload::Json { body, .. } = &e.payload {
+                    body.get("sha").and_then(|v| v.as_str()).map(String::from)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        assert!(emitted_poll1.contains(&"sha001".to_string()));
+        assert!(emitted_poll1.contains(&"sha002".to_string()));
+
+        // Server 2: second poll — continuation under `until=`.
+        //
+        // With pending_until_page=Some(1), the poll sends:
+        //   iteration 0: until=boundary_ts&page=1 → sha001+sha002 (filtered by boundary_filter)
+        //   iteration 1: until=boundary_ts&page=2 → sha003+sha004 (budget=2 exhausted)
+        //
+        // The page=1 response returns the same boundary commits; pending_boundary_shas
+        // filters them so they are not re-emitted.  The page=2 response has new commits.
+        let server2 = MockServer::start().await;
+        let until_str = "2026-05-01T00:00:00+00:00";
+
+        // page=1: re-serves sha001+sha002 (will be filtered by boundary_filter).
+        Mock::given(method("GET"))
+            .and(path("/repos/o/r/commits"))
+            .and(query_param("until", until_str))
+            .and(query_param("page", "1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                make_commit("sha001"),
+                make_commit("sha002"),
+            ])))
+            .mount(&server2)
+            .await;
+
+        // page=2: new commits sha003+sha004.
+        Mock::given(method("GET"))
+            .and(path("/repos/o/r/commits"))
+            .and(query_param("until", until_str))
+            .and(query_param("page", "2"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                make_commit("sha003"),
+                make_commit("sha004"),
+            ])))
+            .mount(&server2)
+            .await;
+
+        let client2 = GhClient::new(auth.clone(), url::Url::parse(&server2.uri()).unwrap());
+        // Budget=2 so per_page=2 exactly.  Page=1 returns 2 items (all filtered by
+        // boundary_filter) which equals per_page, so the code sees a full page and
+        // continues to page=2 rather than closing the gap on a partial page.
+        // Page=2 then emits sha003+sha004 and exhausts the budget.
+        let result2 = CommitsResource
+            .poll(&client2, &repo, &result1.next_cursor, 2)
+            .await
+            .expect("poll 2");
+
+        assert_eq!(result2.events.len(), 2, "sha003 + sha004 on second poll");
+        assert!(
+            result2.next_cursor.pending_until_date.is_some(),
+            "continuation still open after poll 2"
+        );
+        // After poll 2: 2 pages walked (page=1 filtered, page=2 emitted, budget=0).
+        // next_page = pending_until_page(1) + pages_walked(2) = 3.
+        assert_eq!(
+            result2.next_cursor.pending_until_page,
+            Some(3),
+            "pending_until_page advances to 3 after second poll walks pages 1+2"
+        );
+
+        let emitted_poll2: Vec<String> = result2
+            .events
+            .iter()
+            .filter_map(|e| {
+                if let cairn_connectors_core::ConnectorPayload::Json { body, .. } = &e.payload {
+                    body.get("sha").and_then(|v| v.as_str()).map(String::from)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        assert!(emitted_poll2.contains(&"sha003".to_string()));
+        assert!(emitted_poll2.contains(&"sha004".to_string()));
+        // sha001/sha002 must NOT be re-emitted.
+        assert!(
+            !emitted_poll2.contains(&"sha001".to_string()),
+            "sha001 must not be re-emitted"
+        );
+        assert!(
+            !emitted_poll2.contains(&"sha002".to_string()),
+            "sha002 must not be re-emitted"
+        );
+
+        // Server 3: third poll — page=3, empty → gap closes.
+        // pending_until_page=Some(3): poll sends until=boundary_ts&page=3.
+        let server3 = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/repos/o/r/commits"))
+            .and(query_param("until", until_str))
+            .and(query_param("page", "3"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([])))
+            .expect(1)
+            .mount(&server3)
+            .await;
+
+        let client3 = GhClient::new(auth.clone(), url::Url::parse(&server3.uri()).unwrap());
+        let result3 = CommitsResource
+            .poll(&client3, &repo, &result2.next_cursor, 10)
+            .await
+            .expect("poll 3");
+
+        assert_eq!(result3.events.len(), 0, "no new commits on empty page");
+        assert!(
+            result3.next_cursor.pending_until_date.is_none(),
+            "continuation cleared on empty page"
+        );
+        assert!(
+            result3.next_cursor.pending_until_page.is_none(),
+            "pending_until_page cleared on gap close"
         );
     }
 }
