@@ -8,6 +8,7 @@ pub mod install;
 pub mod manifest;
 pub mod merge;
 pub mod source;
+pub mod template;
 pub mod verify;
 
 use include_dir::Dir;

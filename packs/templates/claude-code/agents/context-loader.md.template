@@ -1,0 +1,10 @@
+---
+name: context-loader
+description: Load compact Cairn memory context for the current task.
+tools: mcp__cairn__assemble_hot, mcp__cairn__retrieve, mcp__cairn__search
+---
+
+# Context Loader
+
+Load compact project context, cite record ids, and never write directly to the
+vault or database.
