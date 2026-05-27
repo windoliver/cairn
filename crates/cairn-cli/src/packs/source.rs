@@ -6,6 +6,10 @@ use include_dir::Dir;
 
 use crate::packs::manifest::PackError;
 
+struct ResolvedPackFile {
+    path: PathBuf,
+}
+
 /// Read-only source of pack files addressed by pack-relative paths.
 pub trait PackSource {
     /// Human-readable source label for diagnostics.
@@ -67,6 +71,38 @@ impl FsPackSource {
         reject_unsafe_pack_path(path)?;
         Ok(self.root.join(path))
     }
+
+    fn resolve_regular_file(&self, path: &str) -> Result<ResolvedPackFile, PackError> {
+        let resolved = self.resolve(path)?;
+        let mut current = self.root.clone();
+        let components: Vec<_> = Path::new(path).components().collect();
+
+        for (idx, component) in components.iter().enumerate() {
+            let Component::Normal(name) = component else {
+                unreachable!("reject_unsafe_pack_path rejects non-normal components");
+            };
+            current.push(name);
+            let metadata = std::fs::symlink_metadata(&current).map_err(PackError::Io)?;
+            if metadata.file_type().is_symlink() {
+                return Err(PackError::ManifestInvalid {
+                    reason: format!("path `{path}` contains symlink"),
+                });
+            }
+            if idx + 1 == components.len() {
+                if !metadata.is_file() {
+                    return Err(PackError::ManifestInvalid {
+                        reason: format!("path `{path}` is not a regular file"),
+                    });
+                }
+            } else if !metadata.is_dir() {
+                return Err(PackError::ManifestInvalid {
+                    reason: format!("path `{path}` parent is not a directory"),
+                });
+            }
+        }
+
+        Ok(ResolvedPackFile { path: resolved })
+    }
 }
 
 impl PackSource for FsPackSource {
@@ -75,12 +111,12 @@ impl PackSource for FsPackSource {
     }
 
     fn has_file(&self, path: &str) -> bool {
-        self.resolve(path).is_ok_and(|p| p.is_file())
+        self.resolve_regular_file(path).is_ok()
     }
 
     fn read_file(&self, path: &str) -> Result<Vec<u8>, PackError> {
-        let resolved = self.resolve(path)?;
-        std::fs::read(&resolved).map_err(PackError::Io)
+        let resolved = self.resolve_regular_file(path)?;
+        std::fs::read(&resolved.path).map_err(PackError::Io)
     }
 }
 
@@ -135,6 +171,30 @@ mod tests {
             .expect_err("escape rejected");
         assert!(
             err.to_string().contains("escapes pack root"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fs_source_rejects_symlinked_files() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let outside = tempfile::tempdir().expect("outside tempdir");
+        std::fs::create_dir(tmp.path().join("agents")).expect("create agents dir");
+        std::fs::write(outside.path().join("foo.md"), b"outside").expect("write outside file");
+        std::os::unix::fs::symlink(
+            outside.path().join("foo.md"),
+            tmp.path().join("agents/foo.md"),
+        )
+        .expect("create symlink");
+        let source = FsPackSource::new(tmp.path().to_path_buf());
+
+        assert!(!source.has_file("agents/foo.md"));
+        let err = source
+            .read_file("agents/foo.md")
+            .expect_err("symlink rejected");
+        assert!(
+            err.to_string().contains("symlink"),
             "unexpected error: {err}"
         );
     }
