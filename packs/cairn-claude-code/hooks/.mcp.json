@@ -1,0 +1,9 @@
+{
+  "_pack": "cairn-claude-code@0.1.0",
+  "mcpServers": {
+    "cairn": {
+      "command": "cairn",
+      "args": ["--vault", "{{PROJECT_DIR}}", "mcp"]
+    }
+  }
+}

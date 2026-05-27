@@ -1,0 +1,14 @@
+---
+source: crates/cairn-cli/tests/claude_code_pack_install.rs
+expression: body
+---
+---
+description: Direct Cairn `assemble_hot` verb — fetches the hot-memory prefix.
+argument-hint: "[--recipe <id>] [--session <id>] [--budget <tokens>] [--explain]"
+---
+
+<!-- BEGIN CAIRN PACK -->
+Run `cairn assemble_hot $ARGUMENTS`.
+
+Show the assembled prefix and the records it cites.
+<!-- END CAIRN PACK -->

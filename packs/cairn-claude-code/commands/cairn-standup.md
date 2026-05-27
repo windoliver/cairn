@@ -1,0 +1,20 @@
+---
+description: Generate a Cairn-backed standup brief.
+argument-hint: "[--days N]"
+---
+
+<!-- BEGIN CAIRN PACK -->
+Generate a standup brief.
+
+1. Parse `--days N` from `$ARGUMENTS` (default 1).
+2. Spawn the `trace-summarizer` subagent: summarize sessions in the last N
+   days.
+3. Spawn the `context-loader` subagent: surface open threads in the same
+   window.
+4. Combine into a single brief:
+   - **Completed:** ...
+   - **In progress:** ...
+   - **Blocked:** ...
+
+Cite at least one Cairn record id per bullet.
+<!-- END CAIRN PACK -->

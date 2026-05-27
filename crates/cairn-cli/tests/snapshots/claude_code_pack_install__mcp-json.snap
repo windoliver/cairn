@@ -1,0 +1,17 @@
+---
+source: crates/cairn-cli/tests/claude_code_pack_install.rs
+expression: mcp
+---
+{
+  "mcpServers": {
+    "cairn": {
+      "_pack": "cairn-claude-code@0.1.0",
+      "args": [
+        "--vault",
+        "<PROJECT_DIR>",
+        "mcp"
+      ],
+      "command": "cairn"
+    }
+  }
+}

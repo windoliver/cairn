@@ -357,11 +357,47 @@ expression: json
       ],
       "contract": "WorkflowOrchestrator",
       "name": "cairn-workflows"
+    },
+    {
+      "cases": [
+        {
+          "id": "pack_json_parses",
+          "status": "ok",
+          "tier": 1
+        },
+        {
+          "id": "pack_pass_a",
+          "status": "ok",
+          "tier": 1
+        },
+        {
+          "id": "pack_pass_b",
+          "status": "ok",
+          "tier": 1
+        },
+        {
+          "id": "pack_paths_present",
+          "status": "ok",
+          "tier": 1
+        },
+        {
+          "id": "pack_subagent_frontmatter",
+          "status": "ok",
+          "tier": 1
+        },
+        {
+          "id": "pack_install_round_trip",
+          "status": "ok",
+          "tier": 2
+        }
+      ],
+      "contract": "pack",
+      "name": "cairn-claude-code"
     }
   ],
   "summary": {
     "failed": 0,
-    "ok": 54,
+    "ok": 60,
     "pending": 6
   }
 }
