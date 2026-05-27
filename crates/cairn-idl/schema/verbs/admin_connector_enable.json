@@ -1,0 +1,48 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cairn.dev/schema/cairn.mcp.v1/verbs/admin_connector_enable.json",
+  "title": "Cairn verb: admin_connector_enable",
+  "x-cairn-contract": "cairn.mcp.v1",
+  "x-cairn-verb-id": "admin_connector_enable",
+  "x-cairn-capability": "cairn.mcp.v1.extension.admin",
+  "x-cairn-auth": "signed_chain",
+  "x-cairn-extension": "cairn.admin.v1",
+  "x-cairn-cli": {
+    "command": "connector-enable",
+    "flags": [
+      { "name": "name", "long": "name", "value_source": "string", "cli_exemplar": "github" }
+    ]
+  },
+  "x-cairn-skill-triggers": {
+    "positive_triggers": [
+      "use when the operator wants to re-enable a previously disabled data connector",
+      "use when the user says 'enable the github connector', 'turn on the linear connector', or 'start connector polling'"
+    ],
+    "negative_triggers": [
+      "do NOT use to disable a connector — that belongs to admin_connector_disable",
+      "do NOT use to trigger a one-off backfill — that belongs to admin_connector_backfill"
+    ],
+    "exclusivity_hints": "this is the sole connector-enable surface for the cairn.admin.v1 extension"
+  },
+  "type": "object",
+  "$defs": {
+    "Args": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1 }
+      }
+    },
+    "Data": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "enabled", "last_changed_at"],
+      "properties": {
+        "name":            { "type": "string",  "minLength": 1 },
+        "enabled":         { "type": "boolean" },
+        "last_changed_at": { "type": "string",  "format": "date-time", "minLength": 20 }
+      }
+    }
+  }
+}

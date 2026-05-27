@@ -1,0 +1,59 @@
+{
+  "$defs": {
+    "Args": {
+      "additionalProperties": false,
+      "properties": {
+        "artifact_path": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "dry_run": {
+          "type": "boolean"
+        },
+        "local_machine_id": {
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "artifact_path",
+        "dry_run",
+        "local_machine_id"
+      ],
+      "type": "object"
+    },
+    "Data": {
+      "additionalProperties": false,
+      "properties": {
+        "backup_id": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "frontier_step": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "restored_records": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "tombstones_replayed": {
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "restored_records",
+        "tombstones_replayed",
+        "frontier_step",
+        "backup_id"
+      ],
+      "type": "object"
+    }
+  },
+  "$id": "https://cairn.dev/schema/cairn.mcp.v1/verbs/admin_restore.input.json",
+  "$ref": "#/$defs/Args",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Cairn verb input: admin_restore",
+  "x-cairn-contract": "cairn.mcp.v1"
+}

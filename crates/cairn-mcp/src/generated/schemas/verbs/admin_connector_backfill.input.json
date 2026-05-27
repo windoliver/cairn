@@ -1,0 +1,58 @@
+{
+  "$defs": {
+    "Args": {
+      "additionalProperties": false,
+      "properties": {
+        "from": {
+          "format": "date-time",
+          "minLength": 20,
+          "type": "string"
+        },
+        "name": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "rate_per_sec": {
+          "minimum": 0.001,
+          "type": "number"
+        },
+        "to": {
+          "format": "date-time",
+          "minLength": 20,
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "from",
+        "to",
+        "rate_per_sec"
+      ],
+      "type": "object"
+    },
+    "Data": {
+      "additionalProperties": false,
+      "properties": {
+        "started_at": {
+          "format": "date-time",
+          "minLength": 20,
+          "type": "string"
+        },
+        "workflow_id": {
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "workflow_id",
+        "started_at"
+      ],
+      "type": "object"
+    }
+  },
+  "$id": "https://cairn.dev/schema/cairn.mcp.v1/verbs/admin_connector_backfill.input.json",
+  "$ref": "#/$defs/Args",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Cairn verb input: admin_connector_backfill",
+  "x-cairn-contract": "cairn.mcp.v1"
+}

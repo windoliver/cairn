@@ -1,0 +1,83 @@
+{
+  "$defs": {
+    "Args": {
+      "additionalProperties": false,
+      "properties": {
+        "apply": {
+          "type": "boolean"
+        },
+        "from_ord": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "kind": {
+          "enum": [
+            "upsert",
+            "forget_record",
+            "expire",
+            "evolve"
+          ],
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "from_ord",
+        "apply"
+      ],
+      "type": "object"
+    },
+    "Data": {
+      "additionalProperties": false,
+      "properties": {
+        "events": {
+          "items": {
+            "$ref": "#/$defs/StepEvent"
+          },
+          "type": "array"
+        },
+        "steps_applied": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "steps_visited": {
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "steps_visited",
+        "steps_applied",
+        "events"
+      ],
+      "type": "object"
+    },
+    "StepEvent": {
+      "additionalProperties": false,
+      "properties": {
+        "idempotent": {
+          "type": "boolean"
+        },
+        "name": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "ord": {
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "ord",
+        "name",
+        "idempotent"
+      ],
+      "type": "object"
+    }
+  },
+  "$id": "https://cairn.dev/schema/cairn.mcp.v1/verbs/admin_replay_wal.input.json",
+  "$ref": "#/$defs/Args",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Cairn verb input: admin_replay_wal",
+  "x-cairn-contract": "cairn.mcp.v1"
+}

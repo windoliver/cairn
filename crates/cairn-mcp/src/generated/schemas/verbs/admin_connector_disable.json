@@ -1,0 +1,84 @@
+{
+  "$defs": {
+    "Args": {
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "reason": {
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "type": "object"
+    },
+    "Data": {
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "last_changed_at": {
+          "format": "date-time",
+          "minLength": 20,
+          "type": "string"
+        },
+        "name": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "reason": {
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "enabled",
+        "last_changed_at"
+      ],
+      "type": "object"
+    }
+  },
+  "$id": "https://cairn.dev/schema/cairn.mcp.v1/verbs/admin_connector_disable.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Cairn verb: admin_connector_disable",
+  "type": "object",
+  "x-cairn-auth": "signed_chain",
+  "x-cairn-capability": "cairn.mcp.v1.extension.admin",
+  "x-cairn-cli": {
+    "command": "connector-disable",
+    "flags": [
+      {
+        "cli_exemplar": "github",
+        "long": "name",
+        "name": "name",
+        "value_source": "string"
+      },
+      {
+        "long": "reason",
+        "name": "reason",
+        "value_source": "string"
+      }
+    ]
+  },
+  "x-cairn-contract": "cairn.mcp.v1",
+  "x-cairn-extension": "cairn.admin.v1",
+  "x-cairn-skill-triggers": {
+    "exclusivity_hints": "this is the sole connector-disable surface for the cairn.admin.v1 extension",
+    "negative_triggers": [
+      "do NOT use to enable a connector — that belongs to admin_connector_enable",
+      "do NOT use to trigger a one-off backfill — that belongs to admin_connector_backfill"
+    ],
+    "positive_triggers": [
+      "use when the operator wants to stop a data connector from polling",
+      "use when the user says 'disable the github connector', 'pause the linear connector', or 'stop connector polling'"
+    ]
+  },
+  "x-cairn-verb-id": "admin_connector_disable"
+}

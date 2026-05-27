@@ -1,0 +1,97 @@
+{
+  "$defs": {
+    "Args": {
+      "additionalProperties": false,
+      "properties": {
+        "artifact_path": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "dry_run": {
+          "type": "boolean"
+        },
+        "local_machine_id": {
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "artifact_path",
+        "dry_run",
+        "local_machine_id"
+      ],
+      "type": "object"
+    },
+    "Data": {
+      "additionalProperties": false,
+      "properties": {
+        "backup_id": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "frontier_step": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "restored_records": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "tombstones_replayed": {
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "restored_records",
+        "tombstones_replayed",
+        "frontier_step",
+        "backup_id"
+      ],
+      "type": "object"
+    }
+  },
+  "$id": "https://cairn.dev/schema/cairn.mcp.v1/verbs/admin_restore.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Cairn verb: admin_restore",
+  "type": "object",
+  "x-cairn-auth": "signed_chain",
+  "x-cairn-capability": "cairn.mcp.v1.extension.admin",
+  "x-cairn-cli": {
+    "command": "restore-v2",
+    "flags": [
+      {
+        "cli_exemplar": "/tmp/cairn-snaps/snap-01ABCDEF.cairn-snap.tar",
+        "long": "artifact-path",
+        "name": "artifact_path",
+        "value_source": "string"
+      },
+      {
+        "long": "dry-run",
+        "name": "dry_run",
+        "value_source": "bool"
+      },
+      {
+        "cli_exemplar": "MACHINE-A",
+        "long": "local-machine-id",
+        "name": "local_machine_id",
+        "value_source": "string"
+      }
+    ]
+  },
+  "x-cairn-contract": "cairn.mcp.v1",
+  "x-cairn-extension": "cairn.admin.v1",
+  "x-cairn-skill-triggers": {
+    "exclusivity_hints": "this is the sole vault-restore surface for the cairn.admin.v1 extension",
+    "negative_triggers": [
+      "do NOT use to create a new snapshot — that belongs to admin_snapshot",
+      "do NOT use to replay individual WAL steps — that belongs to admin_replay_wal"
+    ],
+    "positive_triggers": [
+      "use when the operator wants to restore the vault from a previously created snapshot artifact",
+      "use when the user says 'restore from snapshot', 'apply a cairn backup', or 'roll back the vault'",
+      "use with dry_run=true to validate a snapshot before applying it"
+    ]
+  },
+  "x-cairn-verb-id": "admin_restore"
+}
