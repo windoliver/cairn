@@ -2745,6 +2745,9 @@ fn append_skill_lint_source(
     let lane = yaml_scalar(frontmatter, "lane").unwrap_or_default();
     let uses = yaml_scalar(frontmatter, "uses");
     let files_to = yaml_scalar(frontmatter, "files_to");
+    let requires = yaml_string_list(frontmatter, "requires");
+    let provides = yaml_string_list(frontmatter, "provides");
+    let conflicts = yaml_string_list(frontmatter, "conflicts");
     let candidate_id = yaml_scalar(frontmatter, "candidate_id")
         .or(source.candidate_hint)
         .unwrap_or_default();
@@ -2786,9 +2789,9 @@ fn append_skill_lint_source(
         gate_report_passed,
         rollback_version_count,
         existing_paths,
-        requires: vec![],
-        provides: vec![],
-        conflicts: vec![],
+        requires,
+        provides,
+        conflicts,
     });
     Ok(())
 }
@@ -2837,6 +2840,50 @@ fn yaml_scalar(frontmatter: &str, key: &str) -> Option<String> {
             None
         }
     })
+}
+
+fn yaml_string_list(frontmatter: &str, key: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let lines: Vec<&str> = frontmatter.lines().collect();
+    let mut i = 0;
+    while i < lines.len() {
+        if let Some(rest) = lines[i].strip_prefix(&format!("{key}:")) {
+            let inline = rest.trim();
+            if !inline.is_empty() {
+                if let Some(arr) = inline.strip_prefix('[').and_then(|s| s.strip_suffix(']')) {
+                    for item in arr.split(',') {
+                        let value = item.trim().trim_matches('"').trim_matches('\'');
+                        if !value.is_empty() {
+                            out.push(value.to_owned());
+                        }
+                    }
+                } else {
+                    let value = inline.trim_matches('"').trim_matches('\'');
+                    if !value.is_empty() {
+                        out.push(value.to_owned());
+                    }
+                }
+                return out;
+            }
+            let mut j = i + 1;
+            while j < lines.len() {
+                if let Some(item) = lines[j].trim_start().strip_prefix("- ") {
+                    let value = item.trim().trim_matches('"').trim_matches('\'');
+                    if !value.is_empty() {
+                        out.push(value.to_owned());
+                    }
+                    j += 1;
+                } else if lines[j].trim().is_empty() {
+                    j += 1;
+                } else {
+                    break;
+                }
+            }
+            return out;
+        }
+        i += 1;
+    }
+    out
 }
 
 fn resolver_triggers(path: &Path) -> anyhow::Result<Vec<String>> {
