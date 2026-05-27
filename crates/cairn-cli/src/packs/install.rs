@@ -445,9 +445,10 @@ fn remove_legacy_commands(
 /// ownership in comments. The bundled Claude pack also accepts legacy
 /// unscoped guarded markers from pre-scoped installs.
 fn is_pack_owned(content: &str, pack_id: &str) -> bool {
-    content.contains(&format!("BEGIN CAIRN PACK {pack_id}"))
-        || content.contains(&format!("@pack: {pack_id}"))
-        || (pack_id == "cairn-claude-code" && content.contains("BEGIN CAIRN PACK -->"))
+    content.contains(&format!("<!-- BEGIN CAIRN PACK {pack_id} -->"))
+        || content.contains(&format!("<!-- END CAIRN PACK {pack_id} -->"))
+        || content.contains(&format!("<!-- @pack: {pack_id} -->"))
+        || (pack_id == "cairn-claude-code" && content.contains("<!-- BEGIN CAIRN PACK -->"))
 }
 
 fn write_pack_file(
@@ -904,6 +905,74 @@ Other pack command body.\n\
                 .any(|w| w.contains("cairn-context.md")),
             "preservation warning must mention command path; got {:?}",
             receipt.warnings
+        );
+    }
+
+    #[test]
+    fn external_pack_preserves_command_owned_by_prefix_pack_id() {
+        let tmp = tempdir().unwrap();
+        let pack_dir = tmp.path().join("pack");
+        let project_dir = tmp.path().join("project");
+        std::fs::create_dir_all(&pack_dir).unwrap();
+        std::fs::create_dir_all(project_dir.join(".codex/commands")).unwrap();
+        write_sample_codex_pack(
+            &pack_dir,
+            "# Context Loader\n\n<!-- @pack: sample-pack -->\nFresh subagent body.\n",
+        );
+        let target = project_dir.join(".codex/commands/cairn-context.md");
+        let prefix_pack_command = "\
+<!-- BEGIN CAIRN PACK sample-pack-extra -->\n\
+Prefix pack command body.\n\
+<!-- END CAIRN PACK sample-pack-extra -->\n";
+        std::fs::write(&target, prefix_pack_command).unwrap();
+
+        let receipt = install_sample_codex_pack(&pack_dir, &project_dir).expect("install ok");
+
+        let after = std::fs::read_to_string(&target).unwrap();
+        assert_eq!(
+            after, prefix_pack_command,
+            "command owned by prefix pack id must be preserved"
+        );
+        assert!(
+            receipt
+                .files_skipped
+                .iter()
+                .any(|p| p.ends_with("cairn-context.md")),
+            "prefix-pack command must be recorded as skipped; got {:?}",
+            receipt
+        );
+    }
+
+    #[test]
+    fn external_pack_preserves_subagent_owned_by_prefix_pack_id() {
+        let tmp = tempdir().unwrap();
+        let pack_dir = tmp.path().join("pack");
+        let project_dir = tmp.path().join("project");
+        std::fs::create_dir_all(&pack_dir).unwrap();
+        std::fs::create_dir_all(project_dir.join(".codex/agents")).unwrap();
+        write_sample_codex_pack(
+            &pack_dir,
+            "# Context Loader\n\n<!-- @pack: sample-pack -->\nFresh subagent body.\n",
+        );
+        let target = project_dir.join(".codex/agents/context-loader.md");
+        let prefix_pack_subagent =
+            "# Context Loader\n\n<!-- @pack: sample-pack-extra -->\nPrefix pack subagent body.\n";
+        std::fs::write(&target, prefix_pack_subagent).unwrap();
+
+        let receipt = install_sample_codex_pack(&pack_dir, &project_dir).expect("install ok");
+
+        let after = std::fs::read_to_string(&target).unwrap();
+        assert_eq!(
+            after, prefix_pack_subagent,
+            "subagent owned by prefix pack id must be preserved"
+        );
+        assert!(
+            receipt
+                .files_skipped
+                .iter()
+                .any(|p| p.ends_with("context-loader.md")),
+            "prefix-pack subagent must be recorded as skipped; got {:?}",
+            receipt
         );
     }
 
