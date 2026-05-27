@@ -126,7 +126,14 @@ fn install_subagents(
             .project_dir
             .join(harness_agent_dir(manifest.harness))
             .join(format!("{}.md", subagent.id));
-        write_pack_file(&opts.project_dir, &target, &bytes, opts.force, receipt)?;
+        write_pack_file(
+            &opts.project_dir,
+            &target,
+            &bytes,
+            opts.force,
+            &manifest.pack_id,
+            receipt,
+        )?;
     }
     Ok(())
 }
@@ -143,7 +150,14 @@ fn install_commands(
             .project_dir
             .join(harness_command_dir(manifest.harness))
             .join(format!("{}.md", command.id));
-        write_pack_file(&opts.project_dir, &target, &bytes, opts.force, receipt)?;
+        write_pack_file(
+            &opts.project_dir,
+            &target,
+            &bytes,
+            opts.force,
+            &manifest.pack_id,
+            receipt,
+        )?;
     }
     Ok(())
 }
@@ -170,7 +184,14 @@ fn install_hooks(
         Harness::Codex | Harness::Gemini => {
             let bytes = source.read_file("hooks/hooks.json")?;
             let target = opts.project_dir.join(harness_hook_file(manifest.harness));
-            write_pack_file(&opts.project_dir, &target, &bytes, opts.force, receipt)
+            write_pack_file(
+                &opts.project_dir,
+                &target,
+                &bytes,
+                opts.force,
+                &manifest.pack_id,
+                receipt,
+            )
         }
     }
 }
@@ -191,7 +212,54 @@ fn install_manual(
         let injected = crate::packs::merge::inject_block(existing, manual_text)?;
         write_text(&opts.project_dir, &target, &injected, receipt)
     } else {
-        write_pack_file(&opts.project_dir, &target, &bytes, opts.force, receipt)
+        let manual_text = std::str::from_utf8(&bytes).map_err(|e| PackError::ManifestInvalid {
+            reason: format!("manual_fragment is not UTF-8: {e}"),
+        })?;
+        let existing = read_optional_text(&target)?;
+        let injected = inject_pack_manual_block(existing, manual_text, &manifest.pack_id, &target)?;
+        write_text(&opts.project_dir, &target, &injected, receipt)
+    }
+}
+
+fn inject_pack_manual_block(
+    existing: Option<String>,
+    block_body: &str,
+    pack_id: &str,
+    target: &Path,
+) -> Result<String, PackError> {
+    let begin_marker = format!("<!-- BEGIN CAIRN PACK {pack_id} -->");
+    let end_marker = format!("<!-- END CAIRN PACK {pack_id} -->");
+    if !block_body.starts_with(&begin_marker) || !block_body.trim_end().ends_with(&end_marker) {
+        return Err(PackError::MergeConflict {
+            file: target.display().to_string(),
+            reason: format!("block_body must be wrapped with CAIRN PACK `{pack_id}` markers"),
+        });
+    }
+
+    let normalised_body = block_body.trim_end();
+    let Some(existing) = existing else {
+        return Ok(format!("{normalised_body}\n"));
+    };
+
+    let begin = existing.find(&begin_marker);
+    let end = existing.find(&end_marker);
+    match (begin, end) {
+        (Some(b), Some(e)) if b < e => {
+            let end_after = e + end_marker.len();
+            let mut out = String::with_capacity(existing.len() + normalised_body.len());
+            out.push_str(&existing[..b]);
+            out.push_str(normalised_body);
+            out.push_str(&existing[end_after..]);
+            Ok(out)
+        }
+        (None, None) => {
+            let separator = if existing.ends_with('\n') { "" } else { "\n" };
+            Ok(format!("{existing}{separator}{normalised_body}\n"))
+        }
+        _ => Err(PackError::MergeConflict {
+            file: target.display().to_string(),
+            reason: format!("existing file has unbalanced CAIRN PACK `{pack_id}` markers"),
+        }),
     }
 }
 
@@ -368,21 +436,13 @@ fn remove_legacy_commands(
     Ok(())
 }
 
-/// Substrings the installer treats as pack-owned markers on re-install.
-/// Any `.md` file containing one of these is treated as a previous
-/// version's emission and upgraded in place (no `--force` needed).
+/// Returns true when an existing install target carries this pack's
+/// ownership marker and can be upgraded without `--force`.
 ///
-/// - `"BEGIN CAIRN PACK"` matches slash-command bodies and the
-///   CLAUDE.md manual fragment (both wrap content with
-///   `<!-- BEGIN CAIRN PACK ... -->`).
-/// - `"@pack: cairn-claude-code"` matches subagent files, which use
-///   a comment-based marker directly after the frontmatter.
-const PACK_OWNED_MARKERS: &[&str] = &["BEGIN CAIRN PACK", "@pack: cairn-claude-code"];
-
-fn is_pack_owned(content: &str) -> bool {
-    PACK_OWNED_MARKERS
-        .iter()
-        .any(|marker| content.contains(marker))
+/// `BEGIN CAIRN PACK` covers guarded command/manual bodies. `@pack:
+/// <pack_id>` covers subagent files that declare ownership in comments.
+fn is_pack_owned(content: &str, pack_id: &str) -> bool {
+    content.contains("BEGIN CAIRN PACK") || content.contains(&format!("@pack: {pack_id}"))
 }
 
 fn write_pack_file(
@@ -390,6 +450,7 @@ fn write_pack_file(
     target: &Path,
     bytes: &[u8],
     force: bool,
+    pack_id: &str,
     receipt: &mut PackInstallReceipt,
 ) -> Result<(), PackError> {
     reject_symlink(project_dir, target)?;
@@ -407,7 +468,7 @@ fn write_pack_file(
         // otherwise safety fixes in later releases never reach
         // existing installs.
         let existing_str = std::str::from_utf8(&existing).unwrap_or("");
-        let pack_owned = is_pack_owned(existing_str);
+        let pack_owned = is_pack_owned(existing_str, pack_id);
         if !force && !pack_owned {
             // User-modified file with no pack marker. Preserve, warn.
             receipt.warnings.push(format!(
@@ -607,6 +668,7 @@ fn merge_mcp_json(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::packs::source::FsPackSource;
     use tempfile::tempdir;
 
     fn opts(dir: &Path) -> PackInstallOpts {
@@ -615,6 +677,80 @@ mod tests {
             project_dir: dir.to_path_buf(),
             force: false,
         }
+    }
+
+    fn write_sample_codex_pack(root: &Path, subagent_body: &str) {
+        std::fs::create_dir(root.join("agents")).expect("create agents dir");
+        std::fs::create_dir(root.join("commands")).expect("create commands dir");
+        std::fs::create_dir(root.join("hooks")).expect("create hooks dir");
+        std::fs::write(
+            root.join("pack.json"),
+            r#"{
+  "schema": "cairn-pack/v1",
+  "pack_id": "sample-pack",
+  "name": "sample-pack",
+  "version": "1.0.0",
+  "harness": "codex",
+  "cairn_mcp_compat": ">=1.0.0",
+  "description": "Sample Codex harness pack.",
+  "requires_capabilities": [],
+  "subagents": [
+    {
+      "id": "context-loader",
+      "path": "agents/context-loader.md",
+      "uses_mcp_tools": ["status"]
+    }
+  ],
+  "commands": [
+    {
+      "id": "cairn-context",
+      "path": "commands/cairn-context.md",
+      "kind": "verb-direct",
+      "verb": "status"
+    }
+  ],
+  "hooks": {
+    "SessionStart": {
+      "command": "cairn status --json"
+    }
+  },
+  "manual_fragment": "AGENTS.md"
+}
+"#,
+        )
+        .expect("write pack.json");
+        std::fs::write(root.join("agents/context-loader.md"), subagent_body)
+            .expect("write subagent");
+        std::fs::write(
+            root.join("commands/cairn-context.md"),
+            "<!-- BEGIN CAIRN PACK sample-pack -->\nRun Cairn context retrieval.\n<!-- END CAIRN PACK sample-pack -->\n",
+        )
+        .expect("write command");
+        std::fs::write(
+            root.join("AGENTS.md"),
+            "<!-- BEGIN CAIRN PACK sample-pack -->\nSample pack instructions.\n<!-- END CAIRN PACK sample-pack -->\n",
+        )
+        .expect("write AGENTS.md");
+        std::fs::write(
+            root.join("hooks/hooks.json"),
+            r#"{"hooks":{"SessionStart":[{"command":"cairn status --json"}]}}"#,
+        )
+        .expect("write hooks.json");
+    }
+
+    fn install_sample_codex_pack(
+        pack_dir: &Path,
+        project_dir: &Path,
+    ) -> Result<PackInstallReceipt, PackError> {
+        let source = FsPackSource::new(pack_dir.to_path_buf());
+        install_pack_from_source(
+            &source,
+            &PackInstallOpts {
+                harness: Harness::Codex,
+                project_dir: project_dir.to_path_buf(),
+                force: false,
+            },
+        )
     }
 
     #[test]
@@ -643,6 +779,84 @@ mod tests {
         // Every file in the second run should be in skipped (already
         // matching) — no merges either.
         assert!(second.files_merged.is_empty(), "second run merges nothing");
+    }
+
+    #[test]
+    fn codex_manual_merges_pack_block_into_existing_agents_md() {
+        let tmp = tempdir().unwrap();
+        let pack_dir = tmp.path().join("pack");
+        let project_dir = tmp.path().join("project");
+        std::fs::create_dir_all(&pack_dir).unwrap();
+        std::fs::create_dir_all(&project_dir).unwrap();
+        write_sample_codex_pack(
+            &pack_dir,
+            "# Context Loader\n\n<!-- @pack: sample-pack -->\nFresh subagent body.\n",
+        );
+        std::fs::write(
+            project_dir.join("AGENTS.md"),
+            "# User Manual\n\nUser content.\n",
+        )
+        .unwrap();
+
+        let receipt = install_sample_codex_pack(&pack_dir, &project_dir).expect("install ok");
+
+        let agents = std::fs::read_to_string(project_dir.join("AGENTS.md")).unwrap();
+        assert!(
+            agents.contains("# User Manual\n\nUser content."),
+            "existing manual content must be preserved; got {agents}"
+        );
+        assert!(
+            agents.contains("<!-- BEGIN CAIRN PACK sample-pack -->")
+                && agents.contains("Sample pack instructions.")
+                && agents.contains("<!-- END CAIRN PACK sample-pack -->"),
+            "pack manual block must be injected; got {agents}"
+        );
+        assert!(
+            receipt
+                .files_merged
+                .iter()
+                .any(|p| p.ends_with("AGENTS.md")),
+            "AGENTS.md must be recorded as merged; got {:?}",
+            receipt
+        );
+    }
+
+    #[test]
+    fn external_pack_owned_subagent_upgrades_without_force() {
+        let tmp = tempdir().unwrap();
+        let pack_dir = tmp.path().join("pack");
+        let project_dir = tmp.path().join("project");
+        std::fs::create_dir_all(&pack_dir).unwrap();
+        std::fs::create_dir_all(&project_dir).unwrap();
+        let fresh = "# Context Loader\n\n<!-- @pack: sample-pack -->\nFresh subagent body.\n";
+        write_sample_codex_pack(&pack_dir, fresh);
+
+        install_sample_codex_pack(&pack_dir, &project_dir).expect("first install ok");
+        let target = project_dir.join(".codex/agents/context-loader.md");
+        let stale = "# Context Loader\n\n<!-- @pack: sample-pack -->\nStale subagent body.\n";
+        std::fs::write(&target, stale).unwrap();
+
+        let receipt =
+            install_sample_codex_pack(&pack_dir, &project_dir).expect("second install ok");
+
+        let after = std::fs::read_to_string(&target).unwrap();
+        assert_eq!(after, fresh, "pack-owned stale subagent must be upgraded");
+        assert!(
+            receipt
+                .files_merged
+                .iter()
+                .any(|p| p.ends_with("context-loader.md")),
+            "updated subagent must be recorded as merged; got {:?}",
+            receipt
+        );
+        assert!(
+            !receipt
+                .warnings
+                .iter()
+                .any(|w| w.contains("context-loader.md")),
+            "pack-owned subagent must not be treated as user-modified; got {:?}",
+            receipt.warnings
+        );
     }
 
     #[cfg(unix)]
