@@ -11,15 +11,12 @@ use std::process::ExitCode;
 use anyhow::{Context as _, Result};
 use clap::{Arg, ArgMatches, Command};
 
-use cairn_core::contract::AdminStateStore as _;
 use cairn_core::contract::backfill_spawner::{BackfillSpawner, BackfillSpec};
 use cairn_core::contract::memory_store::StoreError;
 use cairn_core::domain::Identity;
 use cairn_core::domain::admin::{AdminContext, AdminError, AdminRole};
-use cairn_core::verbs::admin::{
-    CAP_CONNECTOR_BACKFILL, CAP_CONNECTOR_DISABLE, CAP_CONNECTOR_ENABLE,
-    connector::{self, BackfillRequest, ConnectorDisableRequest, ConnectorEnableRequest},
-    ensure_admin_capability,
+use cairn_core::verbs::admin::connector::{
+    self, BackfillRequest, ConnectorDisableRequest, ConnectorEnableRequest,
 };
 use cairn_store_sqlite::SqliteAdminStateStore;
 
@@ -118,18 +115,6 @@ fn dispatch(matches: &ArgMatches, vault_root: &Path) -> Result<ExitCode> {
                 .clone();
             let actor = parse_actor(sub)?;
 
-            // Capability pre-check.
-            let has_op = admin
-                .has_any_operator()
-                .map_err(|e| anyhow::anyhow!("{e}"))
-                .context("query admin_roles")?;
-            if let Err(e) =
-                ensure_admin_capability(CAP_CONNECTOR_ENABLE, /*config_enabled=*/ true, has_op)
-            {
-                eprintln!("cairn admin connector enable: {e}");
-                return Ok(ExitCode::from(e.exit_code()));
-            }
-
             let ctx = AdminContext::new(actor, AdminRole::Operator);
             let req = ConnectorEnableRequest { name };
             match connector::enable(&ctx, &req, &admin) {
@@ -147,20 +132,6 @@ fn dispatch(matches: &ArgMatches, vault_root: &Path) -> Result<ExitCode> {
                 .clone();
             let actor = parse_actor(sub)?;
             let reason = sub.get_one::<String>("reason").cloned();
-
-            // Capability pre-check.
-            let has_op = admin
-                .has_any_operator()
-                .map_err(|e| anyhow::anyhow!("{e}"))
-                .context("query admin_roles")?;
-            if let Err(e) = ensure_admin_capability(
-                CAP_CONNECTOR_DISABLE,
-                /*config_enabled=*/ true,
-                has_op,
-            ) {
-                eprintln!("cairn admin connector disable: {e}");
-                return Ok(ExitCode::from(e.exit_code()));
-            }
 
             let ctx = AdminContext::new(actor, AdminRole::Operator);
             let req = ConnectorDisableRequest { name, reason };
@@ -198,20 +169,6 @@ fn dispatch(matches: &ArgMatches, vault_root: &Path) -> Result<ExitCode> {
                 .transpose()
                 .context("--rate-per-sec must be a positive float")?
                 .unwrap_or(10.0);
-
-            // Capability pre-check.
-            let has_op = admin
-                .has_any_operator()
-                .map_err(|e| anyhow::anyhow!("{e}"))
-                .context("query admin_roles")?;
-            if let Err(e) = ensure_admin_capability(
-                CAP_CONNECTOR_BACKFILL,
-                /*config_enabled=*/ true,
-                has_op,
-            ) {
-                eprintln!("cairn admin connector backfill: {e}");
-                return Ok(ExitCode::from(e.exit_code()));
-            }
 
             let ctx = AdminContext::new(actor, AdminRole::Operator);
             let spawner = NoopSpawner;

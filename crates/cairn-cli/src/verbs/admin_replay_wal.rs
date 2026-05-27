@@ -11,13 +11,9 @@ use std::process::ExitCode;
 use anyhow::{Context as _, Result};
 use clap::{Arg, ArgAction, ArgMatches, Command};
 
-use cairn_core::contract::AdminStateStore as _;
 use cairn_core::domain::Identity;
 use cairn_core::domain::admin::{AdminContext, AdminRole};
-use cairn_core::verbs::admin::{
-    CAP_REPLAY_WAL, ensure_admin_capability,
-    replay_wal::{ReplayWalRequest, run as replay_wal_run},
-};
+use cairn_core::verbs::admin::replay_wal::{ReplayWalRequest, run as replay_wal_run};
 use cairn_core::wal::WalKind;
 use cairn_store_sqlite::SqliteAdminStateStore;
 
@@ -100,17 +96,10 @@ fn dispatch(matches: &ArgMatches, vault_root: &Path) -> Result<ExitCode> {
         .map_err(|e| anyhow::anyhow!("{e}"))
         .context("open admin state store")?;
 
-    // Capability pre-check — `has_any_operator` is a runtime guard;
-    // `config_enabled` is hard-coded `true` until the admin config field
-    // lands in `CairnConfig` (TODO: wire `config.admin.enabled` once §6.5 lands).
-    let has_op = admin
-        .has_any_operator()
-        .map_err(|e| anyhow::anyhow!("{e}"))
-        .context("query admin_roles")?;
-    if let Err(e) = ensure_admin_capability(CAP_REPLAY_WAL, /*config_enabled=*/ true, has_op) {
-        eprintln!("cairn admin replay-wal: {e}");
-        return Ok(ExitCode::from(e.exit_code()));
-    }
+    // Capability pre-check intentionally lives at the SDK/MCP boundary
+    // (spec §7.4). CLI dispatches directly into the core verb so tests
+    // and operator-grant bootstrap can land without negotiating the
+    // extension first.
 
     let ctx = AdminContext::new(actor, AdminRole::Operator);
     let req = ReplayWalRequest {
