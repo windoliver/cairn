@@ -547,6 +547,110 @@ impl<T: Transport> Sdk<T> {
         Err(unimplemented("forget"))
     }
 
+    // ── cairn.admin.v1 — issue #161 ─────────────────────────────────────
+    //
+    // SDK is the capability-pre-check boundary per spec §7.4. Each admin
+    // wrapper gates on the umbrella `cairn.mcp.v1.extension.admin`
+    // capability via `require_capability`, then returns `Unimplemented`
+    // until the SDK transport layer wires the same adapter graph the CLI
+    // and MCP surfaces use (deferred — Gap 8 follow-up).
+
+    /// `admin_snapshot` — produce a vault snapshot tarball.
+    ///
+    /// # Errors
+    /// - [`SdkError::CapabilityUnavailable`] when `cairn.admin.v1` is not
+    ///   negotiated.
+    /// - [`SdkError::Unimplemented`] until the SDK adapter graph lands.
+    pub fn admin_snapshot(
+        &self,
+        _args: &cairn_core::generated::verbs::admin_snapshot::AdminSnapshotArgs,
+    ) -> Result<
+        VerbResponse<cairn_core::generated::verbs::admin_snapshot::AdminSnapshotData>,
+        SdkError,
+    > {
+        self.require_capability(Some("cairn.mcp.v1.extension.admin"))?;
+        Err(unimplemented("admin_snapshot"))
+    }
+
+    /// `admin_restore` — restore a vault from a snapshot artifact.
+    ///
+    /// # Errors
+    /// See [`Self::admin_snapshot`].
+    pub fn admin_restore(
+        &self,
+        _args: &cairn_core::generated::verbs::admin_restore::AdminRestoreArgs,
+    ) -> Result<VerbResponse<cairn_core::generated::verbs::admin_restore::AdminRestoreData>, SdkError>
+    {
+        self.require_capability(Some("cairn.mcp.v1.extension.admin"))?;
+        Err(unimplemented("admin_restore"))
+    }
+
+    /// `admin_replay_wal` — walk the WAL step graph; `--apply` re-executes.
+    ///
+    /// # Errors
+    /// See [`Self::admin_snapshot`].
+    pub fn admin_replay_wal(
+        &self,
+        _args: &cairn_core::generated::verbs::admin_replay_wal::AdminReplayWalArgs,
+    ) -> Result<
+        VerbResponse<cairn_core::generated::verbs::admin_replay_wal::AdminReplayWalData>,
+        SdkError,
+    > {
+        self.require_capability(Some("cairn.mcp.v1.extension.admin"))?;
+        Err(unimplemented("admin_replay_wal"))
+    }
+
+    /// `admin_connector_enable` — flip the connector_state row to enabled.
+    ///
+    /// # Errors
+    /// See [`Self::admin_snapshot`].
+    pub fn admin_connector_enable(
+        &self,
+        _args: &cairn_core::generated::verbs::admin_connector_enable::AdminConnectorEnableArgs,
+    ) -> Result<
+        VerbResponse<
+            cairn_core::generated::verbs::admin_connector_enable::AdminConnectorEnableData,
+        >,
+        SdkError,
+    > {
+        self.require_capability(Some("cairn.mcp.v1.extension.admin"))?;
+        Err(unimplemented("admin_connector_enable"))
+    }
+
+    /// `admin_connector_disable` — flip the connector_state row to disabled.
+    ///
+    /// # Errors
+    /// See [`Self::admin_snapshot`].
+    pub fn admin_connector_disable(
+        &self,
+        _args: &cairn_core::generated::verbs::admin_connector_disable::AdminConnectorDisableArgs,
+    ) -> Result<
+        VerbResponse<
+            cairn_core::generated::verbs::admin_connector_disable::AdminConnectorDisableData,
+        >,
+        SdkError,
+    > {
+        self.require_capability(Some("cairn.mcp.v1.extension.admin"))?;
+        Err(unimplemented("admin_connector_disable"))
+    }
+
+    /// `admin_connector_backfill` — spawn a bounded backfill workflow.
+    ///
+    /// # Errors
+    /// See [`Self::admin_snapshot`].
+    pub fn admin_connector_backfill(
+        &self,
+        _args: &cairn_core::generated::verbs::admin_connector_backfill::AdminConnectorBackfillArgs,
+    ) -> Result<
+        VerbResponse<
+            cairn_core::generated::verbs::admin_connector_backfill::AdminConnectorBackfillData,
+        >,
+        SdkError,
+    > {
+        self.require_capability(Some("cairn.mcp.v1.extension.admin"))?;
+        Err(unimplemented("admin_connector_backfill"))
+    }
+
     /// Reject with [`SdkError::CapabilityUnavailable`] when `required` is
     /// not advertised by `status()`. Verbs whose IDL declares no
     /// capability (`None`) are unconditionally allowed.
