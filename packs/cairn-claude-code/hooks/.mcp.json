@@ -3,7 +3,7 @@
   "mcpServers": {
     "cairn": {
       "command": "cairn",
-      "args": ["mcp"]
+      "args": ["--vault", "{{PROJECT_DIR}}", "mcp"]
     }
   }
 }

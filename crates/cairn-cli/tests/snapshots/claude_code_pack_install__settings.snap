@@ -9,7 +9,7 @@ expression: settings
         "_pack": "cairn-claude-code@0.1.0",
         "hooks": [
           {
-            "command": "cairn hook PostToolUse",
+            "command": "cairn --vault <PROJECT_DIR> hook PostToolUse",
             "type": "command"
           }
         ],
@@ -21,7 +21,7 @@ expression: settings
         "_pack": "cairn-claude-code@0.1.0",
         "hooks": [
           {
-            "command": "cairn hook PreToolUse",
+            "command": "cairn --vault <PROJECT_DIR> hook PreToolUse",
             "type": "command"
           }
         ],
@@ -33,7 +33,7 @@ expression: settings
         "_pack": "cairn-claude-code@0.1.0",
         "hooks": [
           {
-            "command": "cairn hook SessionStart",
+            "command": "cairn --vault <PROJECT_DIR> hook SessionStart",
             "type": "command"
           }
         ],
@@ -45,7 +45,7 @@ expression: settings
         "_pack": "cairn-claude-code@0.1.0",
         "hooks": [
           {
-            "command": "cairn hook Stop",
+            "command": "cairn --vault <PROJECT_DIR> hook Stop",
             "type": "command"
           }
         ],
@@ -57,7 +57,7 @@ expression: settings
         "_pack": "cairn-claude-code@0.1.0",
         "hooks": [
           {
-            "command": "cairn hook UserPromptSubmit",
+            "command": "cairn --vault <PROJECT_DIR> hook UserPromptSubmit",
             "type": "command"
           }
         ],

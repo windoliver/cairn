@@ -68,12 +68,20 @@ fn install_bundled_pack_into_tempdir() {
         insta::assert_snapshot!(format!("command-{id}"), body);
     }
 
+    // The canonical project_dir is rendered into the install-time
+    // hook/MCP command strings. Tempdir paths are non-deterministic
+    // so we redact them to `<PROJECT_DIR>` before snapshotting.
+    let canonical = std::fs::canonicalize(tmp.path()).unwrap();
+    let canonical_display = canonical.display().to_string();
+    let redact = |s: String| -> String { s.replace(&canonical_display, "<PROJECT_DIR>") };
+
     // 4. settings.json (post-merge).
-    let settings = std::fs::read_to_string(tmp.path().join(".claude/settings.json")).unwrap();
+    let settings =
+        redact(std::fs::read_to_string(tmp.path().join(".claude/settings.json")).unwrap());
     insta::assert_snapshot!("settings", settings);
 
     // 5. .mcp.json (post-merge).
-    let mcp = std::fs::read_to_string(tmp.path().join(".mcp.json")).unwrap();
+    let mcp = redact(std::fs::read_to_string(tmp.path().join(".mcp.json")).unwrap());
     insta::assert_snapshot!("mcp-json", mcp);
 
     // 6. CLAUDE.md (block-injected).

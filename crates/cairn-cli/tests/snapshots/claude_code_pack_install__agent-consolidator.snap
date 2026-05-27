@@ -28,8 +28,14 @@ via `lint`, then persist a summary record covering them.
 
 ## Boundaries
 
-- Never call `mcp__cairn__forget`. Consolidation is additive, not
-  destructive.
+- This subagent is the ONLY one in the pack that writes. Writes are
+  additive only — never destructive.
+- Never call `mcp__cairn__forget`. Consolidation never deletes.
+- `lint` allowlist is granted for read access only. Never set
+  `fix=true`, `write_report=true`, or `fix_skill_plan=true`.
 - Always cluster size 2..=8. Larger sets land in a separate run.
-- If `summarize` returns `CapabilityUnavailable` for `persist`, fall back
-  to `persist=false` and return the synthesis without writing.
+- `summarize` may legitimately set `persist=true` — but ONLY after
+  picking a cluster as described above. Never persist a summary the
+  user did not request.
+- If `summarize` returns `CapabilityUnavailable` for `persist`, fall
+  back to `persist=false` and return the synthesis without writing.

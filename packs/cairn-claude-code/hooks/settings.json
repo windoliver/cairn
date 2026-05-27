@@ -2,19 +2,19 @@
   "_pack": "cairn-claude-code@0.1.0",
   "hooks": {
     "SessionStart": [
-      { "matcher": "*", "hooks": [{ "type": "command", "command": "cairn hook SessionStart" }] }
+      { "matcher": "*", "hooks": [{ "type": "command", "command": "cairn --vault {{PROJECT_DIR}} hook SessionStart" }] }
     ],
     "UserPromptSubmit": [
-      { "matcher": "*", "hooks": [{ "type": "command", "command": "cairn hook UserPromptSubmit" }] }
+      { "matcher": "*", "hooks": [{ "type": "command", "command": "cairn --vault {{PROJECT_DIR}} hook UserPromptSubmit" }] }
     ],
     "PreToolUse": [
-      { "matcher": "*", "hooks": [{ "type": "command", "command": "cairn hook PreToolUse" }] }
+      { "matcher": "*", "hooks": [{ "type": "command", "command": "cairn --vault {{PROJECT_DIR}} hook PreToolUse" }] }
     ],
     "PostToolUse": [
-      { "matcher": "*", "hooks": [{ "type": "command", "command": "cairn hook PostToolUse" }] }
+      { "matcher": "*", "hooks": [{ "type": "command", "command": "cairn --vault {{PROJECT_DIR}} hook PostToolUse" }] }
     ],
     "Stop": [
-      { "matcher": "*", "hooks": [{ "type": "command", "command": "cairn hook Stop" }] }
+      { "matcher": "*", "hooks": [{ "type": "command", "command": "cairn --vault {{PROJECT_DIR}} hook Stop" }] }
     ]
   }
 }

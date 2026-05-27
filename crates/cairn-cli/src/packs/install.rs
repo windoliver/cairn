@@ -101,43 +101,17 @@ pub fn install_pack(opts: &PackInstallOpts) -> Result<PackInstallReceipt, PackEr
         write_pack_file(&opts.project_dir, &target, bytes, opts.force, &mut receipt)?;
     }
 
-    // 3. hooks/settings.json → .claude/settings.json (merged).
+    // 3 + 4: hooks/settings.json + hooks/.mcp.json (merged).
     let pack_id_at_version = format!("{}@{}", manifest.pack_id, manifest.version);
-    let pack_settings_bytes = dir
-        .get_file("hooks/settings.json")
-        .ok_or_else(|| PackError::ManifestInvalid {
-            reason: "embedded pack missing hooks/settings.json".to_owned(),
-        })?
-        .contents();
-    let pack_settings: Value = serde_json::from_slice(pack_settings_bytes)?;
-    let settings_target = opts.project_dir.join(".claude/settings.json");
-    let existing_settings = read_optional_json(&settings_target)?;
-    let merged_settings = crate::packs::merge::merge_settings_json(
-        existing_settings,
-        &pack_settings,
-        &pack_id_at_version,
-    )?;
-    write_json_pretty(
+    let project_dir_token = render_project_dir(&opts.project_dir);
+    install_hook_payloads(
+        dir,
         &opts.project_dir,
-        &settings_target,
-        &merged_settings,
+        opts.force,
+        &project_dir_token,
+        &pack_id_at_version,
         &mut receipt,
     )?;
-
-    // 4. hooks/.mcp.json → project .mcp.json (deep merge of mcpServers).
-    if let Some(mcp_file) = dir.get_file("hooks/.mcp.json") {
-        let pack_mcp: Value = serde_json::from_slice(mcp_file.contents())?;
-        let mcp_target = opts.project_dir.join(".mcp.json");
-        let existing_mcp = read_optional_json(&mcp_target)?;
-        let merged_mcp = merge_mcp_json(
-            existing_mcp,
-            &pack_mcp,
-            &pack_id_at_version,
-            opts.force,
-            &mut receipt.warnings,
-        )?;
-        write_json_pretty(&opts.project_dir, &mcp_target, &merged_mcp, &mut receipt)?;
-    }
 
     // 5. manual.md → CLAUDE.md (block-injected).
     let manual_bytes = dir.get_file(&manifest.manual_fragment).unwrap().contents();
@@ -171,6 +145,75 @@ pub fn install_pack(opts: &PackInstallOpts) -> Result<PackInstallReceipt, PackEr
     }
 
     Ok(receipt)
+}
+
+/// Write the pack's hook bindings (`settings.json`) and MCP server
+/// registration (`.mcp.json`) into the target project, substituting
+/// `{{PROJECT_DIR}}` with the canonical install path.
+fn install_hook_payloads(
+    dir: &include_dir::Dir<'_>,
+    project_dir: &Path,
+    force: bool,
+    project_dir_token: &str,
+    pack_id_at_version: &str,
+    receipt: &mut PackInstallReceipt,
+) -> Result<(), PackError> {
+    let pack_settings_bytes = dir
+        .get_file("hooks/settings.json")
+        .ok_or_else(|| PackError::ManifestInvalid {
+            reason: "embedded pack missing hooks/settings.json".to_owned(),
+        })?
+        .contents();
+    let pack_settings_text =
+        std::str::from_utf8(pack_settings_bytes).map_err(|e| PackError::ManifestInvalid {
+            reason: format!("hooks/settings.json is not UTF-8: {e}"),
+        })?;
+    let pack_settings: Value =
+        serde_json::from_str(&pack_settings_text.replace("{{PROJECT_DIR}}", project_dir_token))?;
+    let settings_target = project_dir.join(".claude/settings.json");
+    let existing_settings = read_optional_json(&settings_target)?;
+    let merged_settings = crate::packs::merge::merge_settings_json(
+        existing_settings,
+        &pack_settings,
+        pack_id_at_version,
+    )?;
+    write_json_pretty(project_dir, &settings_target, &merged_settings, receipt)?;
+
+    if let Some(mcp_file) = dir.get_file("hooks/.mcp.json") {
+        let mcp_text =
+            std::str::from_utf8(mcp_file.contents()).map_err(|e| PackError::ManifestInvalid {
+                reason: format!("hooks/.mcp.json is not UTF-8: {e}"),
+            })?;
+        let pack_mcp: Value =
+            serde_json::from_str(&mcp_text.replace("{{PROJECT_DIR}}", project_dir_token))?;
+        let mcp_target = project_dir.join(".mcp.json");
+        let existing_mcp = read_optional_json(&mcp_target)?;
+        let merged_mcp = merge_mcp_json(
+            existing_mcp,
+            &pack_mcp,
+            pack_id_at_version,
+            force,
+            &mut receipt.warnings,
+        )?;
+        write_json_pretty(project_dir, &mcp_target, &merged_mcp, receipt)?;
+    }
+    Ok(())
+}
+
+/// Render `project_dir` for embedding into JSON hook/MCP command
+/// strings. Canonicalizes when possible so the saved command points
+/// at a real absolute path; falls back to the requested path
+/// otherwise. The returned string has every `\` and `"` escaped so
+/// it's safe to substitute into a JSON string literal without
+/// breaking the surrounding JSON.
+fn render_project_dir(project_dir: &Path) -> String {
+    let canonical =
+        std::fs::canonicalize(project_dir).unwrap_or_else(|_| project_dir.to_path_buf());
+    canonical
+        .display()
+        .to_string()
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
 }
 
 /// Legacy slash command file names emitted by the pre-pack inline
@@ -642,6 +685,38 @@ Confirm the user wants to forget the named Cairn record, then run:
     }
 
     #[test]
+    fn install_renders_project_dir_into_mcp_and_hooks() {
+        let tmp = tempdir().unwrap();
+        install_pack(&opts(tmp.path())).expect("install ok");
+
+        let mcp: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(tmp.path().join(".mcp.json")).unwrap())
+                .unwrap();
+        let args = mcp["mcpServers"]["cairn"]["args"].as_array().unwrap();
+        // Expect `--vault <canonical-project-dir> mcp`.
+        assert_eq!(args[0], "--vault", "first arg must be --vault");
+        let canonical = std::fs::canonicalize(tmp.path()).unwrap();
+        assert_eq!(
+            args[1].as_str().unwrap(),
+            canonical.display().to_string(),
+            "vault arg must be the canonical project dir"
+        );
+        assert_eq!(args[2], "mcp", "verb must follow --vault");
+
+        let settings: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(tmp.path().join(".claude/settings.json")).unwrap(),
+        )
+        .unwrap();
+        let session_start_cmd = settings["hooks"]["SessionStart"][0]["hooks"][0]["command"]
+            .as_str()
+            .unwrap();
+        assert!(
+            session_start_cmd.starts_with(&format!("cairn --vault {} hook ", canonical.display())),
+            "hook command must include canonical --vault; got `{session_start_cmd}`"
+        );
+    }
+
+    #[test]
     fn install_preserves_user_owned_mcp_server_entry() {
         // A project already has its own mcpServers.cairn pointing at a
         // custom binary with a tenant-specific arg. Install must NOT
@@ -713,7 +788,9 @@ Confirm the user wants to forget the named Cairn record, then run:
             serde_json::from_str(&std::fs::read_to_string(tmp.path().join(".mcp.json")).unwrap())
                 .unwrap();
         assert_eq!(stored["mcpServers"]["cairn"]["command"], "cairn");
-        assert_eq!(stored["mcpServers"]["cairn"]["args"][0], "mcp");
+        let args = stored["mcpServers"]["cairn"]["args"].as_array().unwrap();
+        assert_eq!(args[0], "--vault");
+        assert_eq!(args[2], "mcp");
     }
 
     #[test]
