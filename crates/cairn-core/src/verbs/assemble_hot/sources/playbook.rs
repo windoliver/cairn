@@ -322,8 +322,7 @@ fn render_budgeted_playbooks(
     let active_index = ordered_records.len().saturating_sub(1);
     let active_block_len = ordered_records
         .get(active_index)
-        .map(|(_, record)| render_record_block(record).len() as u64)
-        .unwrap_or(0);
+        .map_or(0, |(_, record)| render_record_block(record).len() as u64);
     for (idx, (trace, record)) in ordered_records.into_iter().enumerate() {
         let block = render_record_block(record);
         let reserved_bytes = if idx == active_index {

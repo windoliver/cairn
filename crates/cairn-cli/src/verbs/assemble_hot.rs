@@ -487,13 +487,17 @@ async fn load_hot_bodies(
                         remaining,
                         skill_graph_snapshot.as_ref(),
                     );
-                    loaded_records.extend(records.iter().filter_map(|record| {
-                        segment
-                            .included
+                    loaded_records.extend(
+                        records
                             .iter()
-                            .any(|trace| trace.record_id == record.id)
-                            .then(|| LoadedRecordTrace::from(record))
-                    }));
+                            .filter(|record| {
+                                segment
+                                    .included
+                                    .iter()
+                                    .any(|trace| trace.record_id == record.id)
+                            })
+                            .map(LoadedRecordTrace::from),
+                    );
                     segment.body
                 }
             }

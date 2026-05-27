@@ -397,12 +397,8 @@ fn skill_graph_explain_for_candidates(
     candidates: &[SearchCandidate],
     snapshot: Option<&crate::pipeline::skillify::SkillLintSnapshot>,
 ) -> Option<Vec<Option<crate::pipeline::skillify::SkillGraphExplain>>> {
-    let Some(explain) = explain else {
-        return None;
-    };
-    let Some(snapshot) = snapshot else {
-        return None;
-    };
+    let explain = explain?;
+    let snapshot = snapshot?;
 
     let resolver = crate::pipeline::skillify::SkillGraphResolver::new(snapshot);
     Some(

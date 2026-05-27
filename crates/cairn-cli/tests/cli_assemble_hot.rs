@@ -85,7 +85,7 @@ fn project_playbook_record(
         entity: Some("ingest".to_owned()),
         ..ScopeTuple::default()
     };
-    record.body = body.to_owned();
+    body.clone_into(&mut record.body);
     record.updated_at = Rfc3339Timestamp::parse(updated_at).expect("updated_at");
     record
         .extra_frontmatter
