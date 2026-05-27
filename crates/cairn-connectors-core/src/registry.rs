@@ -880,6 +880,19 @@ impl ConnectorRegistry {
             .get(name)
             .ok_or_else(|| ConnectorError::fatal_msg(format!("unknown connector {name}")))?;
 
+        // #161 Task 4.4: honor connector_state.enabled. None (no row) defaults to enabled.
+        if let Some(admin) = self.admin_state.as_ref() {
+            let enabled = admin
+                .get_connector_state(name)
+                .ok()
+                .flatten()
+                .is_none_or(|r| r.enabled);
+            if !enabled {
+                tracing::debug!(connector = %name, "poll_now skipped: disabled via cairn.admin.v1");
+                return Ok(());
+            }
+        }
+
         let last_cursor = entry.cursor.lock().await.clone();
 
         // Load credential from the store (Finding H). Fall back to an empty
