@@ -3,7 +3,7 @@
 #
 # Wraps every automatable gate from CLAUDE.md §8 plus the
 # docs/site/src/maintainers/beta-readiness.md runbook. Exits 0 only when
-# every required gate passes; manual gates (9-15) are listed at the end of
+# every required gate passes; manual gates (9-16) are listed at the end of
 # the run and never claimed as passed.
 #
 # Modes:
@@ -35,7 +35,7 @@ Usage: beta-readiness.sh [--quick|--full]
 
 Honors CAIRN_BIN, CARGO_TARGET_DIR, RUST_LOG.
 
-Manual gates (9-15 in docs/site/src/maintainers/beta-readiness.md) are
+Manual gates (9-16 in docs/site/src/maintainers/beta-readiness.md) are
 listed after the automated run and never claimed as passed.
 EOF
     exit 0
@@ -106,11 +106,12 @@ print_manual_gates() {
 manual gates remaining (see docs/site/src/maintainers/beta-readiness.md):
   - 9:  capability sync (cairn status --json vs reference/capability-matrix.md)
   - 10: contract freeze verified (contract-drift CI job + ADR 0004)
-  - 11: migration guide review (usage/migration/v0.X-to-v0.Y.md)
-  - 12: known limitations (status.md vs capability matrix)
-  - 13: cassette replay (cargo run -p cairn-bench -- coherence run --gate beta)
-  - 14: privacy posture (forget round-trip + presidio scrub)
-  - 15: release notes draft
+  - 11: release channel policy frozen (ADR 0005 + brief §16.b)
+  - 12: migration guide review (usage/migration/v0.X-to-v0.Y.md)
+  - 13: known limitations (status.md vs capability matrix)
+  - 14: cassette replay (cargo run -p cairn-bench -- coherence run --gate beta)
+  - 15: privacy posture (forget round-trip + presidio scrub)
+  - 16: release notes draft
 EOF
 }
 
