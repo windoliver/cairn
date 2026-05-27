@@ -34,6 +34,15 @@ pub struct SkillLintSkill {
     pub rollback_version_count: u32,
     /// Paths present in the snapshot.
     pub existing_paths: Vec<String>,
+    /// Capability, lane, or skill ids this skill needs before activation.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub requires: Vec<String>,
+    /// Capability ids this skill contributes.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub provides: Vec<String>,
+    /// Skill ids, lanes, or capability ids incompatible with this skill.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub conflicts: Vec<String>,
 }
 
 /// Skill lint issue category.

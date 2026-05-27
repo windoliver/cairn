@@ -230,6 +230,9 @@ async fn resolver_trigger_fails_collision_with_snapshot() {
             gate_report_passed: true,
             rollback_version_count: 1,
             existing_paths: vec![],
+            requires: vec![],
+            provides: vec![],
+            conflicts: vec![],
         }],
     };
     let ctx = GateRunContext {
@@ -1109,6 +1112,9 @@ async fn e2e_smoke_runner_fails_when_trigger_resolves_ambiguously() {
             gate_report_passed: true,
             rollback_version_count: 1,
             existing_paths: vec![],
+            requires: vec![],
+            provides: vec![],
+            conflicts: vec![],
         }],
     };
     let ctx = GateRunContext {
@@ -1183,6 +1189,9 @@ async fn resolver_trigger_rejects_substring_shadowing() {
             gate_report_passed: true,
             rollback_version_count: 1,
             existing_paths: vec![],
+            requires: vec![],
+            provides: vec![],
+            conflicts: vec![],
         }],
     };
     let ctx = GateRunContext {

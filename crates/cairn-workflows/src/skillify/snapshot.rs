@@ -204,6 +204,9 @@ fn read_live_skill(vault_root: &Path, path: &Path) -> std::io::Result<SkillLintS
         gate_report_passed: true,
         rollback_version_count: 1,
         existing_paths,
+        requires: vec![],
+        provides: vec![],
+        conflicts: vec![],
     })
 }
 
@@ -257,6 +260,9 @@ fn read_candidate_skill(
         gate_report_passed: true,
         rollback_version_count: 1,
         existing_paths,
+        requires: vec![],
+        provides: vec![],
+        conflicts: vec![],
     })
 }
 

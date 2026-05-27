@@ -1119,6 +1119,9 @@ impl GateRunner for CheckResolvableAndDryRunner {
             gate_report_passed: true,
             rollback_version_count: 1,
             existing_paths: vec![format!("bundle/scripts/{}.sh", ctx.authored.slug)],
+            requires: vec![],
+            provides: vec![],
+            conflicts: vec![],
         };
 
         let mut merged = ctx.snapshot.clone();

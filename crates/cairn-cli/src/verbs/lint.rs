@@ -2786,6 +2786,9 @@ fn append_skill_lint_source(
         gate_report_passed,
         rollback_version_count,
         existing_paths,
+        requires: vec![],
+        provides: vec![],
+        conflicts: vec![],
     });
     Ok(())
 }
@@ -2812,6 +2815,9 @@ fn push_candidate_lint_placeholder(
         gate_report_passed: candidate_gate_report_passed(vault_root, candidate_id)?,
         rollback_version_count: rollback_version_count(vault_root, candidate_id),
         existing_paths,
+        requires: vec![],
+        provides: vec![],
+        conflicts: vec![],
     });
     Ok(())
 }

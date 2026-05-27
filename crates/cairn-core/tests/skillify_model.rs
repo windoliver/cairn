@@ -229,6 +229,37 @@ fn gate_report_with_all_required_gates_passed_is_ready() {
 }
 
 #[test]
+fn skill_lint_skill_graph_metadata_round_trips() {
+    let snapshot = SkillLintSnapshot {
+        skills: vec![SkillLintSkill {
+            skill_id: "deploy-hotfix".to_owned(),
+            lane: "deploy.hotfix".to_owned(),
+            path: "skills/skill_deploy-hotfix.md".to_owned(),
+            uses: Some("skills/scripts/deploy-hotfix.sh".to_owned()),
+            resolver_triggers: vec!["deploy hotfix".to_owned()],
+            files_to: Some("wiki/summaries/".to_owned()),
+            gate_report_passed: true,
+            rollback_version_count: 1,
+            existing_paths: vec!["skills/scripts/deploy-hotfix.sh".to_owned()],
+            requires: vec!["shell.exec".to_owned()],
+            provides: vec!["deploy.hotfix".to_owned()],
+            conflicts: vec!["deploy.rollback".to_owned()],
+        }],
+    };
+
+    let yaml = yaml_serde::to_string(&snapshot).expect("serialize");
+    assert!(yaml.contains("requires:"));
+    assert!(yaml.contains("provides:"));
+    assert!(yaml.contains("conflicts:"));
+
+    let parsed: SkillLintSnapshot = yaml_serde::from_str(&yaml).expect("deserialize");
+    let parsed_skill = parsed.skills.first().expect("skill");
+    assert_eq!(parsed_skill.requires, ["shell.exec"]);
+    assert_eq!(parsed_skill.provides, ["deploy.hotfix"]);
+    assert_eq!(parsed_skill.conflicts, ["deploy.rollback"]);
+}
+
+#[test]
 fn lint_reports_missing_script_and_duplicate_lane() {
     let snapshot = SkillLintSnapshot {
         skills: vec![
@@ -242,6 +273,9 @@ fn lint_reports_missing_script_and_duplicate_lane() {
                 gate_report_passed: true,
                 rollback_version_count: 1,
                 existing_paths: vec!["skills/skill_a.md".to_owned()],
+                requires: vec![],
+                provides: vec![],
+                conflicts: vec![],
             },
             SkillLintSkill {
                 skill_id: "skill-b".to_owned(),
@@ -256,6 +290,9 @@ fn lint_reports_missing_script_and_duplicate_lane() {
                     "skills/skill_b.md".to_owned(),
                     "skills/scripts/b.sh".to_owned(),
                 ],
+                requires: vec![],
+                provides: vec![],
+                conflicts: vec![],
             },
         ],
     };
@@ -287,6 +324,9 @@ fn lint_reports_invalid_filing_rules_and_resolver_triggers() {
                 gate_report_passed: true,
                 rollback_version_count: 1,
                 existing_paths: vec!["skills/skill_b.md".to_owned()],
+                requires: vec![],
+                provides: vec![],
+                conflicts: vec![],
             },
             SkillLintSkill {
                 skill_id: "skill-a".to_owned(),
@@ -298,6 +338,9 @@ fn lint_reports_invalid_filing_rules_and_resolver_triggers() {
                 gate_report_passed: true,
                 rollback_version_count: 1,
                 existing_paths: vec!["skills/skill_a.md".to_owned()],
+                requires: vec![],
+                provides: vec![],
+                conflicts: vec![],
             },
         ],
     };
