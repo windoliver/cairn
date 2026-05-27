@@ -23,6 +23,7 @@ use rmcp::{
 };
 
 use cairn_core::config::CairnConfig;
+use cairn_core::contract::admin_state::AdminStateStore;
 use cairn_core::contract::federation_transport::FederationTransport;
 use cairn_core::contract::memory_store::{ListArgs, MemoryStore};
 use cairn_core::domain::identity::Identity;
@@ -549,9 +550,16 @@ impl CairnMcpHandler {
             evaluation_runtime_ready: self.evaluation_runtime_ready
                 && self.config.evaluation.enabled,
             federation_runtime_ready: self.federation_runtime_ready && self.federation.is_some(),
-            // admin_runtime_ready is not yet plumbed through the MCP handler
-            // (wired in phase 6 of issue #161). Until then, hold dark.
-            admin_runtime_ready: false,
+            // admin_runtime_ready: true iff at least one operator row
+            // exists in the admin_state store. When no vault root is
+            // bound (e.g. `CairnMcpHandler::new()`) the store cannot
+            // be probed so we hold dark — fail-closed per brief §15.
+            admin_runtime_ready: self.vault_root.as_ref().is_some_and(|root| {
+                let db = root.join(".cairn").join("cairn.db");
+                cairn_store_sqlite::SqliteAdminStateStore::open(&db)
+                    .and_then(|s| s.has_any_operator())
+                    .unwrap_or(false)
+            }),
             contract_phase: cairn_core::status::Phase::V0_1,
         };
 
@@ -716,11 +724,14 @@ impl ServerHandler for CairnMcpHandler {
         // cannot honor end-to-end.
         let advertised_caps = self.build_status_response().capabilities;
         let federation_ready = crate::federation_tools::runtime_ready(&advertised_caps);
+        let admin_ready = crate::admin_tools::runtime_ready(&advertised_caps);
         let mut tools: Vec<Tool> = TOOLS
             .iter()
             .filter(|decl| {
                 if crate::federation_tools::is_federation_tool(decl.name) {
                     federation_ready
+                } else if crate::admin_tools::is_admin_tool(decl.name) {
+                    admin_ready
                 } else {
                     true
                 }
@@ -858,6 +869,20 @@ impl ServerHandler for CairnMcpHandler {
                     return Ok(crate::coord_tools::dispatch(&name, arguments));
                 }
 
+                // Admin extension routing (brief §7, issue #161).
+                // The IDL TOOLS array exposes the six admin verbs.
+                // Dispatch routes through the verb layer when the vault
+                // root is known; returns `CapabilityUnavailable` when
+                // the wiring constants are dark (ADMIN_MCP_DISPATCH_WIRED
+                // = false) or when no vault root is bound.
+                if crate::admin_tools::is_admin_tool(name.as_ref()) {
+                    return Ok(crate::admin_tools::dispatch(
+                        &name,
+                        arguments,
+                        self.vault_root.as_deref(),
+                    ));
+                }
+
                 // Federation extension routing (brief §12.a, issue
                 // #123). The IDL TOOLS array exposes
                 // `propose_share`, `accept_share`, and `revoke_share`
@@ -882,18 +907,20 @@ impl ServerHandler for CairnMcpHandler {
                 let config = self.config.clone();
 
                 let Some(request_verb) = request_verb else {
-                    // Filter federation verbs out of the available-verbs
-                    // hint while the federation extension is unwired —
+                    // Filter extension verbs out of the available-verbs
+                    // hint while their capabilities are unwired —
                     // brief §15 fail-closed: never advertise a verb
                     // tools/list itself does not surface.
-                    let federation_ready = crate::federation_tools::runtime_ready(
-                        &self.build_status_response().capabilities,
-                    );
+                    let status_caps = self.build_status_response().capabilities;
+                    let federation_ready = crate::federation_tools::runtime_ready(&status_caps);
+                    let admin_ready = crate::admin_tools::runtime_ready(&status_caps);
                     let available: Vec<&str> = TOOLS
                         .iter()
                         .filter(|d| {
                             if crate::federation_tools::is_federation_tool(d.name) {
                                 federation_ready
+                            } else if crate::admin_tools::is_admin_tool(d.name) {
+                                admin_ready
                             } else {
                                 true
                             }

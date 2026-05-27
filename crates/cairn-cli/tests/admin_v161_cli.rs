@@ -19,6 +19,7 @@ fn bootstrap_vault(vault: &std::path::Path) {
 
 #[test]
 fn admin_grant_succeeds_and_persists_operator_role() {
+    use cairn_core::contract::admin_state::AdminStateStore;
     let vault = tempfile::tempdir().expect("vault tempdir");
     bootstrap_vault(vault.path());
 
@@ -40,7 +41,6 @@ fn admin_grant_succeeds_and_persists_operator_role() {
     let db_path = vault.path().join(".cairn").join("cairn.db");
     let admin =
         cairn_store_sqlite::SqliteAdminStateStore::open(&db_path).expect("open admin store");
-    use cairn_core::contract::admin_state::AdminStateStore;
     assert!(
         admin.has_any_operator().expect("query operators"),
         "grant should persist an operator row"
@@ -139,6 +139,7 @@ fn admin_replay_wal_apply_with_operator_escalates_not_yet_wired() {
 
 #[test]
 fn admin_connector_enable_writes_row_with_operator_role() {
+    use cairn_core::contract::admin_state::AdminStateStore;
     let vault = tempfile::tempdir().expect("vault tempdir");
     bootstrap_vault(vault.path());
 
@@ -172,7 +173,6 @@ fn admin_connector_enable_writes_row_with_operator_role() {
     let db_path = vault.path().join(".cairn").join("cairn.db");
     let admin =
         cairn_store_sqlite::SqliteAdminStateStore::open(&db_path).expect("open admin store");
-    use cairn_core::contract::admin_state::AdminStateStore;
     let row = admin
         .get_connector_state("github")
         .expect("query state")
@@ -182,6 +182,7 @@ fn admin_connector_enable_writes_row_with_operator_role() {
 
 #[test]
 fn admin_connector_disable_writes_row_with_reason() {
+    use cairn_core::contract::admin_state::AdminStateStore;
     let vault = tempfile::tempdir().expect("vault tempdir");
     bootstrap_vault(vault.path());
 
@@ -217,7 +218,6 @@ fn admin_connector_disable_writes_row_with_reason() {
     let db_path = vault.path().join(".cairn").join("cairn.db");
     let admin =
         cairn_store_sqlite::SqliteAdminStateStore::open(&db_path).expect("open admin store");
-    use cairn_core::contract::admin_state::AdminStateStore;
     let row = admin
         .get_connector_state("github")
         .expect("query state")
