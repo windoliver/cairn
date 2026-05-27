@@ -56,6 +56,11 @@ impl PackSource for EmbeddedPackSource {
 }
 
 /// Filesystem pack source rooted at an author-provided directory.
+///
+/// This source rejects lexical path escapes and static symlinks in
+/// pack-relative paths. It assumes the pack directory is not concurrently
+/// mutated while verification or install is reading it; it is not a race-free
+/// operating-system sandbox for hostile concurrent filesystem changes.
 pub struct FsPackSource {
     root: PathBuf,
 }
@@ -193,6 +198,26 @@ mod tests {
         let err = source
             .read_file("agents/foo.md")
             .expect_err("symlink rejected");
+        assert!(
+            err.to_string().contains("symlink"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fs_source_rejects_symlinked_parent_directories() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let outside = tempfile::tempdir().expect("outside tempdir");
+        std::fs::write(outside.path().join("foo.md"), b"outside").expect("write outside file");
+        std::os::unix::fs::symlink(outside.path(), tmp.path().join("agents"))
+            .expect("create symlinked parent");
+        let source = FsPackSource::new(tmp.path().to_path_buf());
+
+        assert!(!source.has_file("agents/foo.md"));
+        let err = source
+            .read_file("agents/foo.md")
+            .expect_err("symlinked parent rejected");
         assert!(
             err.to_string().contains("symlink"),
             "unexpected error: {err}"
