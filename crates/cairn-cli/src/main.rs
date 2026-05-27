@@ -1673,6 +1673,22 @@ fn agent_default_harness(agent: cairn_cli::skill::Agent) -> cairn_cli::skill::Ha
 }
 
 fn run_plugins(matches: &ArgMatches) -> ExitCode {
+    if let Some(("verify", sub)) = matches.subcommand()
+        && let Some(path) = sub.get_one::<std::path::PathBuf>("pack-path")
+    {
+        let strict = sub.get_flag("strict");
+        let json = sub.get_flag("json");
+        let report = plugins::verify::run_pack_path(path);
+        let text = if json {
+            plugins::verify::render_json(&report)
+        } else {
+            plugins::verify::render_human(&report)
+        };
+        let mut stdout = std::io::stdout().lock();
+        let _ = writeln!(stdout, "{}", text.trim_end_matches('\n'));
+        return ExitCode::from(plugins::verify::exit_code(&report, strict));
+    }
+
     let registry_result = if matches.subcommand_name() == Some("verify") {
         plugins::host::register_all_for_verify()
     } else {

@@ -5,11 +5,12 @@
 //! Tier 3 — snapshot test (delegated to `tests/claude_code_pack_install.rs`).
 
 use serde::Serialize;
+use std::path::Path;
 use tempfile::tempdir;
 
 use crate::packs::install::{PackInstallOpts, install_pack};
 use crate::packs::manifest::{Harness, PackError, PackManifest};
-use crate::packs::source::EmbeddedPackSource;
+use crate::packs::source::{EmbeddedPackSource, FsPackSource, PackSource};
 
 /// Tier of a conformance case.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -71,60 +72,7 @@ pub fn run_pack_conformance(pack_id: &str) -> Vec<CaseOutcome> {
         }
     };
     let source = EmbeddedPackSource::new("cairn-claude-code", dir);
-    let manifest: Result<PackManifest, PackError> = dir
-        .get_file("pack.json")
-        .ok_or_else(|| PackError::ManifestInvalid {
-            reason: "missing pack.json".to_owned(),
-        })
-        .and_then(|f| Ok(serde_json::from_slice::<PackManifest>(f.contents())?));
-
-    let manifest = match manifest {
-        Ok(m) => m,
-        Err(e) => {
-            out.push(CaseOutcome {
-                id: "pack_json_parses",
-                name: "pack.json parses".to_owned(),
-                tier: Tier::One,
-                status: Err(format!("{e:#}")),
-            });
-            return out;
-        }
-    };
-    out.push(CaseOutcome {
-        id: "pack_json_parses",
-        name: "pack.json parses".to_owned(),
-        tier: Tier::One,
-        status: Ok(()),
-    });
-
-    out.push(CaseOutcome {
-        id: "pack_pass_a",
-        name: "Pass A structural validation".to_owned(),
-        tier: Tier::One,
-        status: manifest.validate_pass_a().map_err(|e| format!("{e:#}")),
-    });
-    out.push(CaseOutcome {
-        id: "pack_pass_b",
-        name: "Pass B cross-reference validation".to_owned(),
-        tier: Tier::One,
-        status: manifest.validate_pass_b().map_err(|e| format!("{e:#}")),
-    });
-    out.push(CaseOutcome {
-        id: "pack_paths_present",
-        name: "all referenced paths present".to_owned(),
-        tier: Tier::One,
-        status: manifest
-            .assert_all_paths_present(&source)
-            .map_err(|e| format!("{e:#}")),
-    });
-    out.push(CaseOutcome {
-        id: "pack_subagent_frontmatter",
-        name: "subagent frontmatter tools match manifest".to_owned(),
-        tier: Tier::One,
-        status: manifest
-            .assert_subagent_frontmatter_matches_manifest(&source)
-            .map_err(|e| format!("{e:#}")),
-    });
+    out.extend(run_pack_source_conformance(&source));
 
     // Tier 2: install round-trip.
     let case = || -> Result<(), PackError> {
@@ -160,6 +108,138 @@ pub fn run_pack_conformance(pack_id: &str) -> Vec<CaseOutcome> {
     });
 
     out
+}
+
+/// Run the pack-verify suite for an author-provided pack directory.
+#[must_use]
+pub fn run_pack_path_conformance(path: &Path) -> Vec<CaseOutcome> {
+    let source = FsPackSource::new(path.to_path_buf());
+    run_pack_source_conformance(&source)
+}
+
+/// Run source-backed pack conformance checks shared by bundled and external packs.
+#[must_use]
+pub fn run_pack_source_conformance(source: &dyn PackSource) -> Vec<CaseOutcome> {
+    let mut out = Vec::new();
+    let manifest_bytes = match source.read_file("pack.json") {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            out.push(CaseOutcome {
+                id: "pack_json_parses",
+                name: "pack.json parses".to_owned(),
+                tier: Tier::One,
+                status: Err(format!("{e:#}")),
+            });
+            return out;
+        }
+    };
+
+    let manifest = match serde_json::from_slice::<PackManifest>(&manifest_bytes) {
+        Ok(m) => {
+            out.push(CaseOutcome {
+                id: "pack_json_parses",
+                name: "pack.json parses".to_owned(),
+                tier: Tier::One,
+                status: Ok(()),
+            });
+            m
+        }
+        Err(e) => {
+            out.push(CaseOutcome {
+                id: "pack_json_parses",
+                name: "pack.json parses".to_owned(),
+                tier: Tier::One,
+                status: Err(format!("{e:#}")),
+            });
+            return out;
+        }
+    };
+
+    out.push(CaseOutcome {
+        id: "pack_pass_a",
+        name: "Pass A structural validation".to_owned(),
+        tier: Tier::One,
+        status: manifest.validate_pass_a().map_err(|e| format!("{e:#}")),
+    });
+    out.push(CaseOutcome {
+        id: "pack_pass_b",
+        name: "Pass B cross-reference validation".to_owned(),
+        tier: Tier::One,
+        status: manifest.validate_pass_b().map_err(|e| format!("{e:#}")),
+    });
+    out.push(CaseOutcome {
+        id: "pack_paths_present",
+        name: "all referenced paths present".to_owned(),
+        tier: Tier::One,
+        status: manifest
+            .assert_all_paths_present(source)
+            .map_err(|e| format!("{e:#}")),
+    });
+    out.extend(run_harness_static_checks(&manifest, source));
+    out
+}
+
+/// Run harness-specific static checks against source-backed pack content.
+#[must_use]
+pub fn run_harness_static_checks(
+    manifest: &PackManifest,
+    source: &dyn PackSource,
+) -> Vec<CaseOutcome> {
+    match manifest.harness {
+        Harness::ClaudeCode => vec![CaseOutcome {
+            id: "pack_subagent_frontmatter",
+            name: "subagent frontmatter tools match manifest".to_owned(),
+            tier: Tier::One,
+            status: manifest
+                .assert_subagent_frontmatter_matches_manifest(source)
+                .map_err(|e| format!("{e:#}")),
+        }],
+        Harness::Codex => vec![CaseOutcome {
+            id: "pack_codex_static_files",
+            name: "Codex manual and hooks files are valid".to_owned(),
+            tier: Tier::One,
+            status: assert_manual_and_hook_json(manifest, source, "AGENTS.md")
+                .map_err(|e| format!("{e:#}")),
+        }],
+        Harness::Gemini => vec![CaseOutcome {
+            id: "pack_gemini_static_files",
+            name: "Gemini manual and hooks files are valid".to_owned(),
+            tier: Tier::One,
+            status: assert_manual_and_hook_json(manifest, source, "GEMINI.md")
+                .map_err(|e| format!("{e:#}")),
+        }],
+    }
+}
+
+fn assert_manual_and_hook_json(
+    manifest: &PackManifest,
+    source: &dyn PackSource,
+    expected_manual: &str,
+) -> Result<(), PackError> {
+    if manifest.manual_fragment != expected_manual {
+        return Err(PackError::ManifestInvalid {
+            reason: format!(
+                "manual_fragment `{}` must be `{expected_manual}` for {:?}",
+                manifest.manual_fragment, manifest.harness
+            ),
+        });
+    }
+
+    let manual_bytes = source.read_file(expected_manual)?;
+    let manual = std::str::from_utf8(&manual_bytes).map_err(|e| PackError::ManifestInvalid {
+        reason: format!("{expected_manual} is not UTF-8: {e}"),
+    })?;
+    let begin = format!("<!-- BEGIN CAIRN PACK {} -->", manifest.pack_id);
+    let end = format!("<!-- END CAIRN PACK {} -->", manifest.pack_id);
+    if !manual.contains(&begin) || !manual.contains(&end) {
+        return Err(PackError::ManifestInvalid {
+            reason: format!("{expected_manual} must contain guarded block `{begin}` ... `{end}`"),
+        });
+    }
+
+    let hooks_bytes = source.read_file("hooks/hooks.json")?;
+    serde_json::from_slice::<serde_json::Value>(&hooks_bytes)?;
+    Ok(())
 }
 
 /// Pack ids the verify suite knows how to run.

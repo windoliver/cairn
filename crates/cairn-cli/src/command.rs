@@ -865,6 +865,15 @@ fn plugins_subcommand() -> clap::Command {
             clap::Command::new("verify")
                 .about("Run the conformance suite against every loaded plugin")
                 .arg(
+                    clap::Arg::new("pack-path")
+                        .long("pack-path")
+                        .value_name("DIR")
+                        .value_parser(clap::value_parser!(std::path::PathBuf))
+                        .help(
+                            "Verify an external cairn-pack/v1 directory instead of bundled plugins",
+                        ),
+                )
+                .arg(
                     clap::Arg::new("strict")
                         .long("strict")
                         .action(clap::ArgAction::SetTrue)

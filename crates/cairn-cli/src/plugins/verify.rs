@@ -5,6 +5,7 @@ use cairn_core::contract::conformance::{
     CaseOutcome, CaseStatus, Tier, run_conformance_for_plugin,
 };
 use cairn_core::contract::registry::PluginRegistry;
+use std::path::Path;
 
 /// Aggregated outcome of a verify run.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -127,36 +128,81 @@ pub fn run(registry: &PluginRegistry) -> VerifyReport {
     // exercise the full pack install pipeline.
     for pack_id in crate::packs::verify::bundled_pack_ids() {
         let pack_outcomes = crate::packs::verify::run_pack_conformance(pack_id);
-        let mut cases = Vec::with_capacity(pack_outcomes.len());
-        for o in pack_outcomes {
-            let tier = match o.tier {
-                crate::packs::verify::Tier::One => Tier::One,
-                crate::packs::verify::Tier::Two | crate::packs::verify::Tier::Three => Tier::Two,
-            };
-            let status = match o.status {
-                Ok(()) => {
-                    summary.ok += 1;
-                    CaseStatus::Ok
-                }
-                Err(reason) => {
-                    summary.failed += 1;
-                    CaseStatus::Failed { message: reason }
-                }
-            };
-            cases.push(CaseOutcome {
-                id: o.id,
-                tier,
-                status,
-            });
-        }
-        plugins.push(PluginReport {
-            name: pack_id.to_string(),
-            contract: "pack".to_string(),
-            cases,
-        });
+        let mut pack_report = report_from_pack_outcomes(pack_id.to_string(), pack_outcomes);
+        summary.ok += pack_report.summary.ok;
+        summary.pending += pack_report.summary.pending;
+        summary.failed += pack_report.summary.failed;
+        plugins.append(&mut pack_report.plugins);
     }
 
     VerifyReport { plugins, summary }
+}
+
+/// Verify an external cairn-pack/v1 directory as a single synthetic plugin report.
+#[must_use]
+pub fn run_pack_path(path: &Path) -> VerifyReport {
+    let outcomes = crate::packs::verify::run_pack_path_conformance(path);
+    report_from_pack_outcomes(pack_name_from_path(path), outcomes)
+}
+
+/// Best-effort pack name extraction for user-facing reports.
+#[must_use]
+pub fn pack_name_from_path(path: &Path) -> String {
+    let manifest_path = path.join("pack.json");
+    std::fs::read(&manifest_path)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+        .and_then(|json| {
+            json.get("pack_id")
+                .and_then(serde_json::Value::as_str)
+                .or_else(|| json.get("name").and_then(serde_json::Value::as_str))
+                .map(ToOwned::to_owned)
+        })
+        .or_else(|| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .map(ToOwned::to_owned)
+        })
+        .unwrap_or_else(|| path.display().to_string())
+}
+
+/// Convert pack verifier outcomes into the stable `plugins verify` report shape.
+#[must_use]
+pub fn report_from_pack_outcomes(
+    name: String,
+    outcomes: Vec<crate::packs::verify::CaseOutcome>,
+) -> VerifyReport {
+    let mut summary = Summary::default();
+    let mut cases = Vec::with_capacity(outcomes.len());
+    for o in outcomes {
+        let tier = match o.tier {
+            crate::packs::verify::Tier::One => Tier::One,
+            crate::packs::verify::Tier::Two | crate::packs::verify::Tier::Three => Tier::Two,
+        };
+        let status = match o.status {
+            Ok(()) => {
+                summary.ok += 1;
+                CaseStatus::Ok
+            }
+            Err(reason) => {
+                summary.failed += 1;
+                CaseStatus::Failed { message: reason }
+            }
+        };
+        cases.push(CaseOutcome {
+            id: o.id,
+            tier,
+            status,
+        });
+    }
+    VerifyReport {
+        plugins: vec![PluginReport {
+            name,
+            contract: "pack".to_string(),
+            cases,
+        }],
+        summary,
+    }
 }
 
 /// Exit code for the given report under the requested strictness.
