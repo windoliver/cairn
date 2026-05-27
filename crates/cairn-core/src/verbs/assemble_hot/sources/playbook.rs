@@ -4,7 +4,9 @@ use std::collections::BTreeSet;
 
 use crate::domain::record::MemoryRecord;
 use crate::domain::taxonomy::MemoryKind;
-use crate::pipeline::skillify::{SkillGraphResolver, SkillLintSkill, SkillLintSnapshot};
+use crate::pipeline::skillify::{
+    SkillGraphIssue, SkillGraphIssueKind, SkillGraphResolver, SkillLintSkill, SkillLintSnapshot,
+};
 use crate::verbs::assemble_hot::admissibility::admit;
 use crate::verbs::assemble_hot::inclusion::{
     ExclusionReason, ExclusionTrace, InclusionTrace, LoadedSegment,
@@ -75,10 +77,24 @@ pub fn select_with_budget(
     let resolver = SkillGraphResolver::new(&snapshot);
     let active_skill_id = playbook_skill_id(active_record);
     let closure = resolver.resolve_prerequisites(&active_skill_id);
-    let mut ordered_records = prerequisite_records(&closure.prerequisites, &admissible);
+    let conflict_excluded =
+        conflicting_prerequisites(&closure.issues, &closure.prerequisites, &admissible);
+    let mut conflict_exclusions = Vec::new();
+    let mut ordered_records = Vec::new();
+    for (trace, record) in prerequisite_records(&closure.prerequisites, &admissible) {
+        if conflict_excluded.contains(playbook_skill_id(record).as_str()) {
+            conflict_exclusions.push(ExclusionTrace {
+                record_id: trace.record_id,
+                reason: ExclusionReason::BeyondTopK,
+            });
+        } else {
+            ordered_records.push((trace, record));
+        }
+    }
     ordered_records.push((active_trace, active_record));
 
     let mut segment = render_budgeted_playbooks(ordered_records, max_body_bytes);
+    segment.excluded.extend(conflict_exclusions);
     let mut accounted: BTreeSet<String> = segment
         .included
         .iter()
@@ -176,6 +192,47 @@ fn prerequisite_records<'a>(
                 .iter()
                 .find(|(_, record)| playbook_skill_id(record) == *skill_id)
                 .cloned()
+        })
+        .collect()
+}
+
+fn conflicting_prerequisites(
+    issues: &[SkillGraphIssue],
+    prerequisites: &[String],
+    records: &[(InclusionTrace, &MemoryRecord)],
+) -> BTreeSet<String> {
+    let prerequisite_set: BTreeSet<&str> = prerequisites.iter().map(String::as_str).collect();
+    let mut excluded = BTreeSet::new();
+    for issue in issues {
+        if issue.kind != SkillGraphIssueKind::Conflict {
+            continue;
+        }
+        if prerequisite_set.contains(issue.skill_id.as_str()) {
+            excluded.insert(issue.skill_id.clone());
+        }
+        for skill_id in playbook_reference_matches(issue.reference.as_str(), records) {
+            if prerequisite_set.contains(skill_id.as_str()) {
+                excluded.insert(skill_id);
+            }
+        }
+    }
+    excluded
+}
+
+fn playbook_reference_matches(
+    reference: &str,
+    records: &[(InclusionTrace, &MemoryRecord)],
+) -> Vec<String> {
+    records
+        .iter()
+        .filter_map(|(_, record)| {
+            let skill_id = playbook_skill_id(record);
+            (skill_id == reference
+                || playbook_lane(record) == reference
+                || playbook_string_list(record, "provides")
+                    .iter()
+                    .any(|provided| provided == reference))
+            .then_some(skill_id)
         })
         .collect()
 }
@@ -323,6 +380,29 @@ mod tests {
 
         assert_eq!(seg.included.len(), 1);
         assert_eq!(seg.included[0].record_id, active.id);
+        assert!(seg.excluded.iter().any(|trace| {
+            trace.record_id == prereq.id && trace.reason == ExclusionReason::BeyondTopK
+        }));
+    }
+
+    #[test]
+    fn playbook_excludes_prerequisite_that_conflicts_with_active_playbook() {
+        let prereq = playbook_record("01HQZX9F5N0000000000000001", "2026-04-20T12:00:00Z")
+            .with_graph_metadata("run-tests", "test.run", &[], &["cap.test"], &["ship-pr"]);
+        let active = playbook_record("01HQZX9F5N0000000000000002", "2026-04-22T14:00:00Z")
+            .with_graph_metadata("ship-pr", "ship.pr", &["cap.test"], &["cap.ship"], &[]);
+        let recs = [&prereq, &active];
+
+        let seg = select_with_budget(&input_with(&recs), Some(4096));
+
+        assert_eq!(
+            seg.included
+                .iter()
+                .map(|trace| trace.record_id.as_str())
+                .collect::<Vec<_>>(),
+            vec![active.id.as_str()]
+        );
+        assert!(!seg.body.contains("run-tests"));
         assert!(seg.excluded.iter().any(|trace| {
             trace.record_id == prereq.id && trace.reason == ExclusionReason::BeyondTopK
         }));
