@@ -580,6 +580,10 @@ fn admin_subcommand() -> clap::Command {
         .subcommand(admin_restore_subcommand())
         .subcommand(admin_sre_subcommand())
         .subcommand(admin_workflow_subcommand())
+        // cairn.admin.v1 verbs (Gap 2 — #161)
+        .subcommand(verbs::admin_grant::build_subcommand())
+        .subcommand(verbs::admin_replay_wal::build_subcommand())
+        .subcommand(verbs::admin_connector::build_subcommand())
 }
 
 fn admin_sre_subcommand() -> clap::Command {
@@ -797,33 +801,57 @@ fn admin_reindex_subcommand() -> clap::Command {
 
 fn admin_snapshot_subcommand() -> clap::Command {
     clap::Command::new("snapshot")
-        .about("Prepare a vault backup snapshot")
+        .about("Produce a vault snapshot tarball (cairn.admin.v1)")
         .arg(
             clap::Arg::new("backup")
                 .long("backup")
                 .required(true)
                 .value_name("PATH")
-                .help("Destination path for the prepared backup"),
+                .help("Output directory for the .cairn-snap.tar artifact"),
+        )
+        .arg(
+            clap::Arg::new("label")
+                .long("label")
+                .value_name("STRING")
+                .help("Optional human-readable label embedded in the snapshot manifest"),
+        )
+        .arg(
+            clap::Arg::new("actor")
+                .long("actor")
+                .value_name("IDENTITY")
+                .help("Operator identity wire form (e.g. hmn:alice)"),
         )
         .arg(json_arg("Emit JSON output"))
 }
 
 fn admin_restore_subcommand() -> clap::Command {
     clap::Command::new("restore")
-        .about("Prepare a restore operation from a backup")
+        .about("Restore a vault from a backup directory or .cairn-snap.tar artifact")
         .arg(
             clap::Arg::new("from")
                 .long("from")
                 .required(true)
                 .value_name("PATH")
-                .help("Source backup path to restore from"),
+                .help("Path to the backup directory (v0.1) or .cairn-snap.tar artifact (v0.2)"),
         )
         .arg(
             clap::Arg::new("into")
                 .long("into")
                 .required(true)
                 .value_name("PATH")
-                .help("Destination vault path to restore into"),
+                .help("Target directory to restore into (v0.1 dispatch path)"),
+        )
+        .arg(
+            clap::Arg::new("actor")
+                .long("actor")
+                .value_name("IDENTITY")
+                .help("Operator identity wire form (e.g. hmn:alice); cairn.admin.v1 only"),
+        )
+        .arg(
+            clap::Arg::new("dry-run")
+                .long("dry-run")
+                .action(clap::ArgAction::SetTrue)
+                .help("Validate preconditions without applying the restore; cairn.admin.v1 only"),
         )
         .arg(json_arg("Emit JSON output"))
 }

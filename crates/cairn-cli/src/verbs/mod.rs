@@ -5,8 +5,11 @@ use std::path::Path;
 use cairn_core::config::{CairnConfig, EmbeddingProvider};
 
 pub mod admin_archive_session;
+pub mod admin_connector;
+pub mod admin_grant;
 pub mod admin_model_fetch;
 pub mod admin_reindex;
+pub mod admin_replay_wal;
 pub mod admin_restore;
 pub mod admin_snapshot;
 /// Hidden dev/E2E surface for issue #92 — drives the scheduler against

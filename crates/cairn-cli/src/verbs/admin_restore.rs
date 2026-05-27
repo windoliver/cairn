@@ -32,12 +32,26 @@ pub fn run(sub: &ArgMatches, _vault_root: &Path) -> ExitCode {
         status: "accepted",
     };
 
-    // NOTE: forget-replay on restore is temporarily skipped here; it is
-    // re-wired through the new verb fn + SqliteConsentLog in Tasks 2.5/2.6.
     let restore_result =
         super::admin_snapshot::validate_non_overlapping_paths("backup", &from, "restore", &into)
             .and_then(|()| super::admin_snapshot::validate_backup_root(&from))
-            .and_then(|()| super::admin_snapshot::materialize_backup_artifact(&from, &into));
+            .and_then(|()| super::admin_snapshot::materialize_backup_artifact(&from, &into))
+            .and_then(|()| {
+                // #161: forget-replay through the SqliteConsentLog adapter
+                // that replaced the inline helper. Tombstones recorded
+                // since the backup was taken are re-applied to the
+                // restored DB before reads resume — same semantics as the
+                // v0.1 `replay_current_forgets` inline path.
+                use cairn_core::contract::snapshot_artifact::ConsentLog as _;
+                use cairn_store_sqlite::SqliteConsentLog;
+                let live_db = from.join(".cairn").join("cairn.db");
+                let restored_db = into.join(".cairn").join("cairn.db");
+                let consent = SqliteConsentLog::new(live_db, restored_db);
+                consent
+                    .apply_post_restore_purge()
+                    .map(|_| ())
+                    .map_err(|e| anyhow::anyhow!("replay-current-forgets via ConsentLog: {e}"))
+            });
     if let Err(error) = restore_result {
         eprintln!("cairn admin restore: {error:#}");
         return ExitCode::from(74);
