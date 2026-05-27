@@ -56,6 +56,7 @@ pub fn install_pack(opts: &PackInstallOpts) -> Result<PackInstallReceipt, PackEr
     manifest.validate_pass_a()?;
     manifest.validate_pass_b()?;
     manifest.assert_all_paths_present(dir)?;
+    manifest.assert_subagent_frontmatter_matches_manifest(dir)?;
 
     if manifest.harness != opts.harness {
         // Both sides typed as Harness enum; this branch is unreachable in v1.
@@ -70,6 +71,15 @@ pub fn install_pack(opts: &PackInstallOpts) -> Result<PackInstallReceipt, PackEr
         version: manifest.version.clone(),
         ..Default::default()
     };
+
+    // 0. Migrate legacy pre-pack slash commands (issue #182).
+    //    Prior cairn-cli versions inlined four commands —
+    //    remember.md / forget.md / recall.md / graph.md — wrapped with
+    //    `<!-- BEGIN CAIRN AGENT SKILL -->`. The pack supersedes them
+    //    with `cairn-*` verb-direct commands; the legacy ones (notably
+    //    `forget.md`, which committed without --dry-run) MUST be
+    //    removed on upgrade so the safer new path is canonical.
+    remove_legacy_commands(&opts.project_dir, &mut receipt)?;
 
     // 1. Subagents → .claude/agents/<id>.md
     for s in &manifest.subagents {
@@ -161,6 +171,44 @@ pub fn install_pack(opts: &PackInstallOpts) -> Result<PackInstallReceipt, PackEr
     }
 
     Ok(receipt)
+}
+
+/// Legacy slash command file names emitted by the pre-pack inline
+/// installer. Removed on upgrade if the file body carries the old
+/// `BEGIN CAIRN AGENT SKILL` marker.
+const LEGACY_COMMAND_NAMES: &[&str] = &["remember.md", "forget.md", "recall.md", "graph.md"];
+
+/// Marker that identifies a file as written by the pre-pack inline
+/// installer (see `cairn-cli/src/skill.rs` on main prior to #182).
+const LEGACY_PACK_MARKER: &str = "BEGIN CAIRN AGENT SKILL";
+
+fn remove_legacy_commands(
+    project_dir: &Path,
+    receipt: &mut PackInstallReceipt,
+) -> Result<(), PackError> {
+    let commands_dir = project_dir.join(".claude/commands");
+    for name in LEGACY_COMMAND_NAMES {
+        let target = commands_dir.join(name);
+        if !target.exists() {
+            continue;
+        }
+        // Safety: only remove if the file carries the legacy marker.
+        // A user-authored file with the same name is preserved.
+        let body = std::fs::read_to_string(&target).unwrap_or_default();
+        if !body.contains(LEGACY_PACK_MARKER) {
+            receipt.warnings.push(format!(
+                "preserved user-modified legacy command `{}`; manual cleanup recommended",
+                target.display()
+            ));
+            continue;
+        }
+        std::fs::remove_file(&target)?;
+        receipt.warnings.push(format!(
+            "removed legacy pre-pack command `{}` (superseded by cairn-* commands)",
+            target.display()
+        ));
+    }
+    Ok(())
 }
 
 /// Substrings the installer treats as pack-owned markers on re-install.
@@ -438,6 +486,64 @@ mod tests {
         // Every file in the second run should be in skipped (already
         // matching) — no merges either.
         assert!(second.files_merged.is_empty(), "second run merges nothing");
+    }
+
+    #[test]
+    fn install_removes_legacy_pre_pack_slash_commands() {
+        // Seed a tempdir with the legacy pre-pack inline output: a
+        // `forget.md` that ran `cairn forget --record` WITHOUT
+        // --dry-run. Install must remove it so users can't reach the
+        // destructive shortcut.
+        let tmp = tempdir().unwrap();
+        let legacy_forget = r#"---
+description: Forget a Cairn record after explicit confirmation
+argument-hint: <record-id>
+---
+
+<!-- BEGIN CAIRN AGENT SKILL -->
+Confirm the user wants to forget the named Cairn record, then run:
+
+`cairn forget --record "$ARGUMENTS"`
+<!-- END CAIRN AGENT SKILL -->
+"#;
+        let cmd_dir = tmp.path().join(".claude/commands");
+        std::fs::create_dir_all(&cmd_dir).unwrap();
+        std::fs::write(cmd_dir.join("forget.md"), legacy_forget).unwrap();
+        std::fs::write(
+            cmd_dir.join("remember.md"),
+            "<!-- BEGIN CAIRN AGENT SKILL -->\nold\n",
+        )
+        .unwrap();
+        // Plus a USER-AUTHORED file at one of the legacy names with NO
+        // legacy marker — must be preserved.
+        std::fs::write(
+            cmd_dir.join("recall.md"),
+            "# my custom recall\n\nuser content\n",
+        )
+        .unwrap();
+
+        let receipt = install_pack(&opts(tmp.path())).expect("install ok");
+
+        assert!(
+            !cmd_dir.join("forget.md").exists(),
+            "legacy forget.md must be removed"
+        );
+        assert!(
+            !cmd_dir.join("remember.md").exists(),
+            "legacy remember.md must be removed"
+        );
+        assert!(
+            cmd_dir.join("recall.md").exists(),
+            "user-authored recall.md must be preserved"
+        );
+        assert!(
+            receipt
+                .warnings
+                .iter()
+                .any(|w| w.contains("legacy pre-pack command") && w.contains("forget.md")),
+            "warning must mention removed forget.md; got {:?}",
+            receipt.warnings
+        );
     }
 
     #[test]

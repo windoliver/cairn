@@ -101,6 +101,14 @@ pub fn run_pack_conformance(pack_id: &str) -> Vec<CaseOutcome> {
             .assert_all_paths_present(dir)
             .map_err(|e| format!("{e:#}")),
     });
+    out.push(CaseOutcome {
+        id: "pack_subagent_frontmatter",
+        name: "subagent frontmatter tools match manifest".to_owned(),
+        tier: Tier::One,
+        status: manifest
+            .assert_subagent_frontmatter_matches_manifest(dir)
+            .map_err(|e| format!("{e:#}")),
+    });
 
     // Tier 2: install round-trip.
     let case = || -> Result<(), PackError> {

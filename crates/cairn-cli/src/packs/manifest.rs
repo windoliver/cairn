@@ -408,6 +408,82 @@ impl PackManifest {
 
         Ok(())
     }
+
+    /// Validate that every subagent file's `tools:` frontmatter
+    /// matches the manifest's `uses_mcp_tools` declaration exactly.
+    ///
+    /// The runtime allowlist that Claude Code enforces is the
+    /// markdown frontmatter, NOT the manifest. Without this check, a
+    /// pack can declare a safe set in `uses_mcp_tools` but ship a
+    /// subagent file that grants extra tools (e.g. reintroducing
+    /// `mcp__cairn__forget` into `forget-planner`). This is the
+    /// safety-critical check.
+    ///
+    /// # Errors
+    /// Returns [`PackError::ManifestInvalid`] when a subagent's
+    /// frontmatter and manifest disagree, with the offending diff
+    /// in the reason field.
+    pub fn assert_subagent_frontmatter_matches_manifest(
+        &self,
+        dir: &include_dir::Dir<'_>,
+    ) -> Result<(), PackError> {
+        for s in &self.subagents {
+            let bytes = dir
+                .get_file(&s.path)
+                .ok_or_else(|| PackError::ManifestInvalid {
+                    reason: format!("subagent `{}` references missing file `{}`", s.id, s.path),
+                })?
+                .contents();
+            let text = std::str::from_utf8(bytes).map_err(|e| PackError::ManifestInvalid {
+                reason: format!("subagent `{}` file is not UTF-8: {e}", s.id),
+            })?;
+
+            let fm_tools =
+                extract_frontmatter_tools(text).ok_or_else(|| PackError::ManifestInvalid {
+                    reason: format!(
+                        "subagent `{}` frontmatter is missing or has no `tools:` line",
+                        s.id
+                    ),
+                })?;
+
+            let manifest_set: std::collections::BTreeSet<&str> =
+                s.uses_mcp_tools.iter().map(String::as_str).collect();
+            if fm_tools != manifest_set {
+                let only_in_fm: Vec<&&str> = fm_tools.difference(&manifest_set).collect();
+                let only_in_manifest: Vec<&&str> = manifest_set.difference(&fm_tools).collect();
+                return Err(PackError::ManifestInvalid {
+                    reason: format!(
+                        "subagent `{}` frontmatter tools diverge from manifest uses_mcp_tools: \
+                         only in frontmatter={only_in_fm:?}, only in manifest={only_in_manifest:?}",
+                        s.id
+                    ),
+                });
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Parse a Claude Code subagent markdown file and return the set of
+/// bare MCP tool names from the frontmatter `tools:` line.
+///
+/// Returns `None` if the file doesn't start with `---`, the
+/// frontmatter is malformed, or there's no `tools:` line. The
+/// `mcp__cairn__` prefix is stripped from each entry.
+fn extract_frontmatter_tools(text: &str) -> Option<std::collections::BTreeSet<&str>> {
+    let rest = text.strip_prefix("---\n")?;
+    let (frontmatter, _) = rest.split_once("\n---")?;
+    let tools_line = frontmatter.lines().find_map(|l| l.strip_prefix("tools:"))?;
+    let mut out = std::collections::BTreeSet::new();
+    for entry in tools_line.split(',') {
+        let trimmed = entry.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let bare = trimmed.strip_prefix("mcp__cairn__").unwrap_or(trimmed);
+        out.insert(bare);
+    }
+    Some(out)
 }
 
 #[cfg(test)]
@@ -739,5 +815,41 @@ mod presence_tests {
         });
         let err = m.assert_all_paths_present(dir).unwrap_err();
         assert!(matches!(err, PackError::ManifestInvalid { .. }));
+    }
+}
+
+#[cfg(test)]
+mod frontmatter_tests {
+    use super::*;
+
+    #[test]
+    fn bundled_pack_frontmatter_matches_manifest() {
+        let dir = &crate::packs::embed::CAIRN_CLAUDE_CODE_PACK;
+        let m: PackManifest =
+            serde_json::from_slice(dir.get_file("pack.json").unwrap().contents()).unwrap();
+        m.assert_subagent_frontmatter_matches_manifest(dir)
+            .expect("bundled pack subagent frontmatter must match manifest");
+    }
+
+    #[test]
+    fn extracts_tools_from_minimal_frontmatter() {
+        let body = "---\nname: x\ntools: mcp__cairn__search, mcp__cairn__retrieve\n---\nbody\n";
+        let tools = extract_frontmatter_tools(body).expect("parsed");
+        assert!(tools.contains("search"));
+        assert!(tools.contains("retrieve"));
+        assert_eq!(tools.len(), 2);
+    }
+
+    #[test]
+    fn extra_tool_in_frontmatter_is_detected() {
+        // Construct an in-memory pack-like manifest, and verify the
+        // mismatch detection by hand-crafting a frontmatter that has
+        // an extra tool not in `uses_mcp_tools`.
+        let body = "---\nname: leaky\ntools: mcp__cairn__retrieve, mcp__cairn__forget\n---\nbody\n";
+        let tools = extract_frontmatter_tools(body).expect("parsed");
+        let manifest: std::collections::BTreeSet<&str> = ["retrieve"].iter().copied().collect();
+        // Frontmatter has `forget` that the manifest doesn't.
+        let only_in_fm: Vec<&&str> = tools.difference(&manifest).collect();
+        assert!(only_in_fm.iter().any(|t| ***t == *"forget"));
     }
 }
