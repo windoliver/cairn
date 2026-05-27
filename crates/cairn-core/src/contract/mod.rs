@@ -64,7 +64,6 @@ pub use registry::{PluginError, PluginName, PluginRegistry};
 pub use version::{ContractVersion, VersionRange};
 
 pub use admin_state::{AdminStateStore, ConnectorStateRow};
-pub use backfill_spawner::{BackfillSpec, BackfillSpawner};
 pub use agent_provider::{
     AgentBudgetConsumed, AgentCostBudget, AgentIdentity, AgentOutput, AgentOutputSchema,
     AgentProvider, AgentProviderCapabilities, AgentProviderError, AgentProviderPlugin, AgentRun,
@@ -72,6 +71,7 @@ pub use agent_provider::{
     AgentToolAttempt, AgentToolCall, AgentToolPolicyOutcome, AgentWallClockBudget, CairnVerb,
     evaluate_tool_policy, validate_output,
 };
+pub use backfill_spawner::{BackfillSpawner, BackfillSpec};
 pub use connector_consent::{
     ConnectorConsentJournal, ConnectorConsentLookup, ConsentGrant, ConsentGrantId,
 };

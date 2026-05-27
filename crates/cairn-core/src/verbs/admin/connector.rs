@@ -212,7 +212,7 @@ mod tests {
 
 // ── backfill verb ─────────────────────────────────────────────────────────────
 
-use crate::contract::backfill_spawner::{BackfillSpec, BackfillSpawner};
+use crate::contract::backfill_spawner::{BackfillSpawner, BackfillSpec};
 use crate::domain::workflow::WorkflowId;
 use chrono::{DateTime, Utc};
 
