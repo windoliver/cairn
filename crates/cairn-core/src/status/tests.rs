@@ -677,18 +677,22 @@ fn admin_capability_absent_when_runtime_not_ready() {
 }
 
 #[test]
-fn admin_capability_present_when_runtime_ready() {
-    // Mirror of the above: with admin_runtime_ready = true AND
-    // ADMIN_EXTENSION_WIRED = true (current state), capability IS advertised.
+fn admin_capability_advertise_matches_wired_constant() {
+    // With admin_runtime_ready = true, the capability is advertised
+    // iff ADMIN_EXTENSION_WIRED is true. The test is valid in both
+    // phases (dark today; flipped once all surfaces land).
     let gates = CapabilityGates {
         admin_runtime_ready: true,
         ..gates(true, false, None)
     };
     let caps = advertise(&gates);
-    assert!(
-        caps.iter()
-            .any(|c| matches!(c, Capabilities::CairnMcpV1ExtensionAdmin)),
-        "admin capability must be present when wired + runtime_ready; got {caps:?}"
+    let present = caps
+        .iter()
+        .any(|c| matches!(c, Capabilities::CairnMcpV1ExtensionAdmin));
+    assert_eq!(
+        present,
+        wiring::ADMIN_EXTENSION_WIRED,
+        "admin capability presence must track ADMIN_EXTENSION_WIRED; got {caps:?}"
     );
 }
 

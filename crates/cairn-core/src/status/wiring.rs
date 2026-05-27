@@ -183,21 +183,38 @@ pub const fn federation_extension_ready() -> bool {
 
 /// `cairn.admin.v1` extension capability registration (issue #161).
 ///
-/// Live as of issue #161 phase 6. Capability advertisement is gated by
-/// runtime `admin.enabled` config + `has_any_operator()` (see
-/// [`admin_extension_ready`]); the build-time constant simply allows the
-/// gate to even consider advertising.
-pub const ADMIN_EXTENSION_WIRED: bool = true;
+/// Set to `true` only when every surface that should serve the verbs
+/// (CLI, MCP, SDK) is wired AND each per-surface dispatch constant below
+/// is also `true`. Setting this alone advertises the capability without
+/// a backing dispatch — which is a brief-§15 fail-closed violation.
+pub const ADMIN_EXTENSION_WIRED: bool = false;
+
+/// `true` only when `cairn admin {snapshot, restore, replay-wal, connector …}`
+/// subcommands route through the new `cairn-core::verbs::admin::*` fns.
+/// Until then the old `cairn-cli` code paths run and the new verb fns are
+/// not reachable from the binary.
+pub const ADMIN_CLI_DISPATCH_WIRED: bool = false;
+
+/// `true` only when `cairn-mcp` registers tool decls + handler dispatch
+/// for the six admin verbs. Until then MCP `list_tools` MUST NOT include
+/// `admin.*` and `tools/call` for them MUST return error.
+pub const ADMIN_MCP_DISPATCH_WIRED: bool = false;
 
 /// Truth-table gate for advertising the `cairn.admin.v1` extension.
-/// All three preconditions must hold: build-time wiring, runtime config
-/// opt-in, and at least one operator identity present in `admin_roles`.
 ///
-/// Unlike other `*_ready` helpers in this module, this is not a `const fn`
-/// because it depends on runtime state (config + DB).
+/// All preconditions must hold: build-time wiring, both per-surface
+/// dispatch constants, runtime config opt-in, and at least one operator
+/// identity present in `admin_roles`. If ANY is false, the capability is
+/// not advertised — brief §15 "fail closed" / CLAUDE.md §4 invariant 6.
+///
+/// Not a `const fn` because it depends on runtime state (config + DB).
 #[must_use]
 pub fn admin_extension_ready(config_enabled: bool, has_operator: bool) -> bool {
-    ADMIN_EXTENSION_WIRED && config_enabled && has_operator
+    ADMIN_EXTENSION_WIRED
+        && ADMIN_CLI_DISPATCH_WIRED
+        && ADMIN_MCP_DISPATCH_WIRED
+        && config_enabled
+        && has_operator
 }
 
 #[cfg(test)]
@@ -206,14 +223,17 @@ mod admin_extension_ready_tests {
 
     #[test]
     fn truth_table() {
-        // Exercise the four runtime combos. With ADMIN_EXTENSION_WIRED = true
-        // (live as of #161 phase 6), the helper is true iff BOTH config and
-        // has_operator are true; otherwise false.
+        // The helper is true iff ALL of {WIRED, CLI_DISPATCH_WIRED,
+        // MCP_DISPATCH_WIRED, config_enabled, has_operator} hold. With any
+        // of the build-time constants `false`, the last row collapses to
+        // `false` — exactly what we want during phased rollout.
+        let all_wired =
+            ADMIN_EXTENSION_WIRED && ADMIN_CLI_DISPATCH_WIRED && ADMIN_MCP_DISPATCH_WIRED;
         let cases = [
             (false, false, false),
             (false, true, false),
             (true, false, false),
-            (true, true, ADMIN_EXTENSION_WIRED),
+            (true, true, all_wired),
         ];
         for (config, has_op, expected) in cases {
             assert_eq!(

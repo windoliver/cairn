@@ -162,15 +162,24 @@ mod tests {
         }
     }
 
-    // Positive case: with all gates satisfied, the helper returns Ok(()).
-    // Phase 6 flip (`ADMIN_EXTENSION_WIRED = true`) makes this reachable.
+    // Positive case: with all runtime gates true, the helper returns
+    // Ok(()) iff every build-time constant is also true. The test reads
+    // the constants directly so it stays valid through the phased flip.
     #[test]
-    fn negotiated_when_wired_config_and_operator_all_true() {
+    fn negotiated_when_all_gates_true_tracks_wired_constants() {
+        use crate::status::wiring;
+        let all_wired = wiring::ADMIN_EXTENSION_WIRED
+            && wiring::ADMIN_CLI_DISPATCH_WIRED
+            && wiring::ADMIN_MCP_DISPATCH_WIRED;
         for &cap in ADMIN_CAPABILITIES {
-            ensure_admin_capability(
+            let result = ensure_admin_capability(
                 cap, /*config_enabled=*/ true, /*has_operator=*/ true,
-            )
-            .expect("all gates true → Ok");
+            );
+            assert_eq!(
+                result.is_ok(),
+                all_wired,
+                "{cap}: expected Ok iff all build-time wired constants are true"
+            );
         }
     }
 
