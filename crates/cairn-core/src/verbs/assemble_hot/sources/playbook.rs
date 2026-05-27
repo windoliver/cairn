@@ -73,16 +73,22 @@ pub fn select_with_budget(
         };
     };
 
-    let snapshot = playbook_snapshot(&admissible);
+    let graph_snapshot = inputs.skill_graph_snapshot;
+    let snapshot = playbook_snapshot(&admissible, graph_snapshot);
     let resolver = SkillGraphResolver::new(&snapshot);
-    let active_skill_id = playbook_skill_id(active_record);
+    let active_skill_id = playbook_skill_id(active_record, graph_snapshot);
     let closure = resolver.resolve_prerequisites(&active_skill_id);
-    let conflict_excluded =
-        conflicting_prerequisites(&closure.issues, &closure.prerequisites, &admissible);
+    let conflict_excluded = conflicting_prerequisites(
+        &closure.issues,
+        &closure.prerequisites,
+        &admissible,
+        graph_snapshot,
+    );
     let mut conflict_exclusions = Vec::new();
     let mut ordered_records = Vec::new();
-    for (trace, record) in prerequisite_records(&closure.prerequisites, &admissible) {
-        if conflict_excluded.contains(playbook_skill_id(record).as_str()) {
+    for (trace, record) in prerequisite_records(&closure.prerequisites, &admissible, graph_snapshot)
+    {
+        if conflict_excluded.contains(playbook_skill_id(record, graph_snapshot).as_str()) {
             conflict_exclusions.push(ExclusionTrace {
                 record_id: trace.record_id,
                 reason: ExclusionReason::BeyondTopK,
@@ -126,22 +132,34 @@ pub fn select_with_budget(
     }
 }
 
-fn playbook_skill_id(record: &MemoryRecord) -> String {
-    record
+fn playbook_skill_id(record: &MemoryRecord, graph_snapshot: Option<&SkillLintSnapshot>) -> String {
+    if let Some(skill_id) = record
         .extra_frontmatter
         .get("skill_id")
         .and_then(serde_json::Value::as_str)
-        .unwrap_or(record.id.as_str())
-        .to_owned()
+        .filter(|skill_id| !skill_id.trim().is_empty())
+    {
+        return skill_id.to_owned();
+    }
+    if let Some(skill) = snapshot_skill_for_playbook(record, graph_snapshot) {
+        return skill.skill_id.clone();
+    }
+    record.id.as_str().to_owned()
 }
 
-fn playbook_lane(record: &MemoryRecord) -> String {
-    record
+fn playbook_lane(record: &MemoryRecord, graph_snapshot: Option<&SkillLintSnapshot>) -> String {
+    if let Some(lane) = record
         .extra_frontmatter
         .get("lane")
         .and_then(serde_json::Value::as_str)
-        .unwrap_or(record.id.as_str())
-        .to_owned()
+        .filter(|lane| !lane.trim().is_empty())
+    {
+        return lane.to_owned();
+    }
+    if let Some(skill) = snapshot_skill_for_playbook(record, graph_snapshot) {
+        return skill.lane.clone();
+    }
+    record.id.as_str().to_owned()
 }
 
 fn playbook_string_list(record: &MemoryRecord, key: &str) -> Vec<String> {
@@ -159,38 +177,90 @@ fn playbook_string_list(record: &MemoryRecord, key: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
-fn playbook_snapshot(records: &[(InclusionTrace, &MemoryRecord)]) -> SkillLintSnapshot {
+fn playbook_snapshot(
+    records: &[(InclusionTrace, &MemoryRecord)],
+    graph_snapshot: Option<&SkillLintSnapshot>,
+) -> SkillLintSnapshot {
     SkillLintSnapshot {
         skills: records
             .iter()
-            .map(|(_, record)| SkillLintSkill {
-                skill_id: playbook_skill_id(record),
-                lane: playbook_lane(record),
-                path: record.id.as_str().to_owned(),
-                uses: None,
-                resolver_triggers: vec![],
-                files_to: Some("wiki/summaries/".to_owned()),
-                gate_report_passed: true,
-                rollback_version_count: 1,
-                existing_paths: vec![],
-                requires: playbook_string_list(record, "requires"),
-                provides: playbook_string_list(record, "provides"),
-                conflicts: playbook_string_list(record, "conflicts"),
+            .map(|(_, record)| {
+                let skill = snapshot_skill_for_playbook(record, graph_snapshot);
+                SkillLintSkill {
+                    skill_id: playbook_skill_id(record, graph_snapshot),
+                    lane: playbook_lane(record, graph_snapshot),
+                    path: record.id.as_str().to_owned(),
+                    uses: None,
+                    resolver_triggers: vec![],
+                    files_to: Some("wiki/summaries/".to_owned()),
+                    gate_report_passed: true,
+                    rollback_version_count: 1,
+                    existing_paths: vec![],
+                    requires: merged_graph_list(record, "requires", skill.map(|s| &s.requires)),
+                    provides: merged_graph_list(record, "provides", skill.map(|s| &s.provides)),
+                    conflicts: merged_graph_list(record, "conflicts", skill.map(|s| &s.conflicts)),
+                }
             })
             .collect(),
     }
 }
 
+fn snapshot_skill_for_playbook<'a>(
+    record: &MemoryRecord,
+    graph_snapshot: Option<&'a SkillLintSnapshot>,
+) -> Option<&'a SkillLintSkill> {
+    let snapshot = graph_snapshot?;
+    if let Some(skill_id) = record
+        .extra_frontmatter
+        .get("skill_id")
+        .and_then(serde_json::Value::as_str)
+        .filter(|skill_id| !skill_id.trim().is_empty())
+    {
+        return snapshot
+            .skills
+            .iter()
+            .find(|skill| skill.skill_id == skill_id);
+    }
+    let lane = record
+        .extra_frontmatter
+        .get("lane")
+        .and_then(serde_json::Value::as_str)
+        .filter(|lane| !lane.trim().is_empty())?;
+    let mut matches = snapshot.skills.iter().filter(|skill| skill.lane == lane);
+    let skill = matches.next()?;
+    matches.next().is_none().then_some(skill)
+}
+
+fn merged_graph_list(
+    record: &MemoryRecord,
+    key: &str,
+    snapshot_values: Option<&Vec<String>>,
+) -> Vec<String> {
+    let mut out: BTreeSet<String> = snapshot_values
+        .into_iter()
+        .flatten()
+        .filter(|value| !value.trim().is_empty())
+        .cloned()
+        .collect();
+    out.extend(
+        playbook_string_list(record, key)
+            .into_iter()
+            .filter(|value| !value.trim().is_empty()),
+    );
+    out.into_iter().collect()
+}
+
 fn prerequisite_records<'a>(
     prerequisites: &[String],
     records: &'a [(InclusionTrace, &'a MemoryRecord)],
+    graph_snapshot: Option<&SkillLintSnapshot>,
 ) -> Vec<(InclusionTrace, &'a MemoryRecord)> {
     prerequisites
         .iter()
         .filter_map(|skill_id| {
             records
                 .iter()
-                .find(|(_, record)| playbook_skill_id(record) == *skill_id)
+                .find(|(_, record)| playbook_skill_id(record, graph_snapshot) == *skill_id)
                 .cloned()
         })
         .collect()
@@ -200,6 +270,7 @@ fn conflicting_prerequisites(
     issues: &[SkillGraphIssue],
     prerequisites: &[String],
     records: &[(InclusionTrace, &MemoryRecord)],
+    graph_snapshot: Option<&SkillLintSnapshot>,
 ) -> BTreeSet<String> {
     let prerequisite_set: BTreeSet<&str> = prerequisites.iter().map(String::as_str).collect();
     let mut excluded = BTreeSet::new();
@@ -210,7 +281,9 @@ fn conflicting_prerequisites(
         if prerequisite_set.contains(issue.skill_id.as_str()) {
             excluded.insert(issue.skill_id.clone());
         }
-        for skill_id in playbook_reference_matches(issue.reference.as_str(), records) {
+        for skill_id in
+            playbook_reference_matches(issue.reference.as_str(), records, graph_snapshot)
+        {
             if prerequisite_set.contains(skill_id.as_str()) {
                 excluded.insert(skill_id);
             }
@@ -222,14 +295,16 @@ fn conflicting_prerequisites(
 fn playbook_reference_matches(
     reference: &str,
     records: &[(InclusionTrace, &MemoryRecord)],
+    graph_snapshot: Option<&SkillLintSnapshot>,
 ) -> Vec<String> {
     records
         .iter()
         .filter_map(|(_, record)| {
-            let skill_id = playbook_skill_id(record);
+            let skill = snapshot_skill_for_playbook(record, graph_snapshot);
+            let skill_id = playbook_skill_id(record, graph_snapshot);
             (skill_id == reference
-                || playbook_lane(record) == reference
-                || playbook_string_list(record, "provides")
+                || playbook_lane(record, graph_snapshot) == reference
+                || merged_graph_list(record, "provides", skill.map(|s| &s.provides))
                     .iter()
                     .any(|provided| provided == reference))
             .then_some(skill_id)
@@ -303,6 +378,7 @@ mod tests {
             pinned_candidates: &[],
             project_candidates: &[],
             playbook_candidates: records,
+            skill_graph_snapshot: None,
             rolling_summary_candidates: &[],
             user_signal_candidates: &[],
             now: Rfc3339Timestamp::parse("2026-04-22T15:00:00Z").expect("valid"),

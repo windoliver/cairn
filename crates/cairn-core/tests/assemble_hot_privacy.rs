@@ -20,6 +20,7 @@ fn make_input<'a>(
         pinned_candidates: pinned,
         project_candidates: &[],
         playbook_candidates: &[],
+        skill_graph_snapshot: None,
         rolling_summary_candidates: &[],
         user_signal_candidates: &[],
         now: Rfc3339Timestamp::parse("2026-04-22T15:00:00Z").expect("valid"),
