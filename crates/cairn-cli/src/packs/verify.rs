@@ -8,7 +8,7 @@ use serde::Serialize;
 use std::path::Path;
 use tempfile::tempdir;
 
-use crate::packs::install::{PackInstallOpts, install_pack};
+use crate::packs::install::{PackInstallOpts, install_pack_from_source};
 use crate::packs::manifest::{Harness, PackError, PackManifest};
 use crate::packs::source::{EmbeddedPackSource, FsPackSource, PackSource};
 
@@ -73,40 +73,6 @@ pub fn run_pack_conformance(pack_id: &str) -> Vec<CaseOutcome> {
     };
     let source = EmbeddedPackSource::new("cairn-claude-code", dir);
     out.extend(run_pack_source_conformance(&source));
-
-    // Tier 2: install round-trip.
-    let case = || -> Result<(), PackError> {
-        let tmp = tempdir().map_err(PackError::Io)?;
-        let opts = PackInstallOpts {
-            harness: Harness::ClaudeCode,
-            project_dir: tmp.path().to_path_buf(),
-            force: false,
-        };
-        let first = install_pack(&opts)?;
-        let second = install_pack(&opts)?;
-        if !second.files_created.is_empty() || !second.files_merged.is_empty() {
-            return Err(PackError::ManifestInvalid {
-                reason: format!(
-                    "round-trip not idempotent: created={} merged={}",
-                    second.files_created.len(),
-                    second.files_merged.len()
-                ),
-            });
-        }
-        if first.files_created.is_empty() {
-            return Err(PackError::ManifestInvalid {
-                reason: "first install created no files".to_owned(),
-            });
-        }
-        Ok(())
-    };
-    out.push(CaseOutcome {
-        id: "pack_install_round_trip",
-        name: "install round-trip is idempotent".to_owned(),
-        tier: Tier::Two,
-        status: case().map_err(|e| format!("{e:#}")),
-    });
-
     out
 }
 
@@ -176,7 +142,41 @@ pub fn run_pack_source_conformance(source: &dyn PackSource) -> Vec<CaseOutcome> 
             .map_err(|e| format!("{e:#}")),
     });
     out.extend(run_harness_static_checks(&manifest, source));
+    out.push(CaseOutcome {
+        id: "pack_install_round_trip",
+        name: "install round-trip is idempotent".to_owned(),
+        tier: Tier::Two,
+        status: run_install_round_trip(source).map_err(|e| format!("{e:#}")),
+    });
     out
+}
+
+fn run_install_round_trip(source: &dyn PackSource) -> Result<(), PackError> {
+    let manifest_bytes = source.read_file("pack.json")?;
+    let manifest: PackManifest = serde_json::from_slice(&manifest_bytes)?;
+    let tmp = tempdir().map_err(PackError::Io)?;
+    let opts = PackInstallOpts {
+        harness: manifest.harness,
+        project_dir: tmp.path().to_path_buf(),
+        force: false,
+    };
+    let first = install_pack_from_source(source, &opts)?;
+    if first.files_created.is_empty() {
+        return Err(PackError::ManifestInvalid {
+            reason: "first install created no files".to_owned(),
+        });
+    }
+    let second = install_pack_from_source(source, &opts)?;
+    if !second.files_created.is_empty() || !second.files_merged.is_empty() {
+        return Err(PackError::ManifestInvalid {
+            reason: format!(
+                "round-trip not idempotent: created={} merged={}",
+                second.files_created.len(),
+                second.files_merged.len()
+            ),
+        });
+    }
+    Ok(())
 }
 
 /// Run harness-specific static checks against source-backed pack content.

@@ -96,6 +96,13 @@ fn plugins_verify_pack_path_json_reports_pack_contract() {
     let first = &v["plugins"].as_array().expect("plugins array")[0];
     assert_eq!(first["name"], "sample-pack");
     assert_eq!(first["contract"], "pack");
+    let cases = first["cases"].as_array().expect("cases array");
+    assert!(
+        cases
+            .iter()
+            .any(|case| { case["id"] == "pack_install_round_trip" && case["status"] == "ok" }),
+        "expected successful pack_install_round_trip case in {cases:#?}"
+    );
 }
 
 #[cfg(unix)]

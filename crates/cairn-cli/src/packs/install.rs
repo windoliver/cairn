@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use serde_json::Value;
 
 use crate::packs::manifest::{Harness, PackError, PackManifest};
-use crate::packs::source::EmbeddedPackSource;
+use crate::packs::source::{EmbeddedPackSource, PackSource};
 
 /// Install options.
 #[derive(Debug, Clone)]
@@ -48,23 +48,30 @@ pub fn install_pack(opts: &PackInstallOpts) -> Result<PackInstallReceipt, PackEr
         crate::packs::bundled_pack_for(opts.harness).ok_or_else(|| PackError::ManifestInvalid {
             reason: format!("no bundled pack available for harness `{:?}`", opts.harness),
         })?;
-    let source = EmbeddedPackSource::new("cairn-claude-code", dir);
+    let source = EmbeddedPackSource::new("bundled pack", dir);
+    install_pack_from_source(&source, opts)
+}
 
-    let manifest_bytes = dir
-        .get_file("pack.json")
-        .ok_or_else(|| PackError::ManifestInvalid {
-            reason: "embedded pack missing pack.json".to_owned(),
-        })?
-        .contents();
-    let manifest: PackManifest = serde_json::from_slice(manifest_bytes)?;
+/// Install a pack from any source into `opts.project_dir`.
+///
+/// # Errors
+/// Returns [`PackError`] on validation failure, IO failure, or
+/// non-recoverable merge conflict.
+pub fn install_pack_from_source(
+    source: &dyn PackSource,
+    opts: &PackInstallOpts,
+) -> Result<PackInstallReceipt, PackError> {
+    let manifest_bytes = source.read_file("pack.json")?;
+    let manifest: PackManifest = serde_json::from_slice(&manifest_bytes)?;
 
     manifest.validate_pass_a()?;
     manifest.validate_pass_b()?;
-    manifest.assert_all_paths_present(&source)?;
-    manifest.assert_subagent_frontmatter_matches_manifest(&source)?;
+    manifest.assert_all_paths_present(source)?;
+    if manifest.harness == Harness::ClaudeCode {
+        manifest.assert_subagent_frontmatter_matches_manifest(source)?;
+    }
 
     if manifest.harness != opts.harness {
-        // Both sides typed as Harness enum; this branch is unreachable in v1.
         return Err(PackError::HarnessMismatch {
             want: format!("{:?}", manifest.harness),
             got: format!("{:?}", opts.harness),
@@ -77,64 +84,19 @@ pub fn install_pack(opts: &PackInstallOpts) -> Result<PackInstallReceipt, PackEr
         ..Default::default()
     };
 
-    // 0. Migrate legacy pre-pack slash commands (issue #182).
-    //    Prior cairn-cli versions inlined four commands —
-    //    remember.md / forget.md / recall.md / graph.md — wrapped with
-    //    `<!-- BEGIN CAIRN AGENT SKILL -->`. The pack supersedes them
-    //    with `cairn-*` verb-direct commands; the legacy ones (notably
-    //    `forget.md`, which committed without --dry-run) MUST be
-    //    removed on upgrade so the safer new path is canonical.
-    remove_legacy_commands(&opts.project_dir, &mut receipt)?;
-
-    // 1. Subagents → .claude/agents/<id>.md
-    for s in &manifest.subagents {
-        let bytes = dir.get_file(&s.path).unwrap().contents();
-        let target = opts
-            .project_dir
-            .join(".claude/agents")
-            .join(format!("{}.md", s.id));
-        write_pack_file(&opts.project_dir, &target, bytes, opts.force, &mut receipt)?;
+    if manifest.harness == Harness::ClaudeCode {
+        // Migrate legacy pre-pack slash commands (issue #182). Prior
+        // cairn-cli versions inlined four Claude commands wrapped with
+        // `<!-- BEGIN CAIRN AGENT SKILL -->`; the pack supersedes them.
+        remove_legacy_commands(&opts.project_dir, &mut receipt)?;
     }
 
-    // 2. Commands → .claude/commands/<id>.md
-    for c in &manifest.commands {
-        let bytes = dir.get_file(&c.path).unwrap().contents();
-        let target = opts
-            .project_dir
-            .join(".claude/commands")
-            .join(format!("{}.md", c.id));
-        write_pack_file(&opts.project_dir, &target, bytes, opts.force, &mut receipt)?;
-    }
+    install_subagents(source, &manifest, opts, &mut receipt)?;
+    install_commands(source, &manifest, opts, &mut receipt)?;
+    install_hooks(source, &manifest, opts, &mut receipt)?;
+    install_manual(source, &manifest, opts, &mut receipt)?;
 
-    // 3 + 4: hooks/settings.json + hooks/.mcp.json (merged).
-    let pack_id_at_version = format!("{}@{}", manifest.pack_id, manifest.version);
-    let project_dir_token = render_project_dir(&opts.project_dir);
-    install_hook_payloads(
-        dir,
-        &opts.project_dir,
-        opts.force,
-        &project_dir_token,
-        &pack_id_at_version,
-        &mut receipt,
-    )?;
-
-    // 5. manual.md → CLAUDE.md (block-injected).
-    let manual_bytes = dir.get_file(&manifest.manual_fragment).unwrap().contents();
-    let manual_text =
-        std::str::from_utf8(manual_bytes).map_err(|e| PackError::ManifestInvalid {
-            reason: format!("manual_fragment is not UTF-8: {e}"),
-        })?;
-    let claude_md_target = opts.project_dir.join("CLAUDE.md");
-    let existing_claude = read_optional_text(&claude_md_target)?;
-    let injected = crate::packs::merge::inject_block(existing_claude, manual_text)?;
-    write_text(
-        &opts.project_dir,
-        &claude_md_target,
-        &injected,
-        &mut receipt,
-    )?;
-
-    // 6. Capability advertise — soft check via canonical Capabilities enum.
+    // Capability advertise — soft check via canonical Capabilities enum.
     //    A pack capability is "known" iff serde can deserialize it as the
     //    canonical enum. Pass B already enforced this; here we use the
     //    same predicate to surface a `degraded` flag if any required
@@ -152,25 +114,133 @@ pub fn install_pack(opts: &PackInstallOpts) -> Result<PackInstallReceipt, PackEr
     Ok(receipt)
 }
 
+fn install_subagents(
+    source: &dyn PackSource,
+    manifest: &PackManifest,
+    opts: &PackInstallOpts,
+    receipt: &mut PackInstallReceipt,
+) -> Result<(), PackError> {
+    for subagent in &manifest.subagents {
+        let bytes = source.read_file(&subagent.path)?;
+        let target = opts
+            .project_dir
+            .join(harness_agent_dir(manifest.harness))
+            .join(format!("{}.md", subagent.id));
+        write_pack_file(&opts.project_dir, &target, &bytes, opts.force, receipt)?;
+    }
+    Ok(())
+}
+
+fn install_commands(
+    source: &dyn PackSource,
+    manifest: &PackManifest,
+    opts: &PackInstallOpts,
+    receipt: &mut PackInstallReceipt,
+) -> Result<(), PackError> {
+    for command in &manifest.commands {
+        let bytes = source.read_file(&command.path)?;
+        let target = opts
+            .project_dir
+            .join(harness_command_dir(manifest.harness))
+            .join(format!("{}.md", command.id));
+        write_pack_file(&opts.project_dir, &target, &bytes, opts.force, receipt)?;
+    }
+    Ok(())
+}
+
+fn install_hooks(
+    source: &dyn PackSource,
+    manifest: &PackManifest,
+    opts: &PackInstallOpts,
+    receipt: &mut PackInstallReceipt,
+) -> Result<(), PackError> {
+    match manifest.harness {
+        Harness::ClaudeCode => {
+            let pack_id_at_version = format!("{}@{}", manifest.pack_id, manifest.version);
+            let project_dir_token = render_project_dir(&opts.project_dir);
+            install_hook_payloads(
+                source,
+                &opts.project_dir,
+                opts.force,
+                &project_dir_token,
+                &pack_id_at_version,
+                receipt,
+            )
+        }
+        Harness::Codex | Harness::Gemini => {
+            let bytes = source.read_file("hooks/hooks.json")?;
+            let target = opts.project_dir.join(harness_hook_file(manifest.harness));
+            write_pack_file(&opts.project_dir, &target, &bytes, opts.force, receipt)
+        }
+    }
+}
+
+fn install_manual(
+    source: &dyn PackSource,
+    manifest: &PackManifest,
+    opts: &PackInstallOpts,
+    receipt: &mut PackInstallReceipt,
+) -> Result<(), PackError> {
+    let bytes = source.read_file(&manifest.manual_fragment)?;
+    let target = opts.project_dir.join(harness_manual_file(manifest.harness));
+    if manifest.harness == Harness::ClaudeCode {
+        let manual_text = std::str::from_utf8(&bytes).map_err(|e| PackError::ManifestInvalid {
+            reason: format!("manual_fragment is not UTF-8: {e}"),
+        })?;
+        let existing = read_optional_text(&target)?;
+        let injected = crate::packs::merge::inject_block(existing, manual_text)?;
+        write_text(&opts.project_dir, &target, &injected, receipt)
+    } else {
+        write_pack_file(&opts.project_dir, &target, &bytes, opts.force, receipt)
+    }
+}
+
+const fn harness_agent_dir(harness: Harness) -> &'static str {
+    match harness {
+        Harness::ClaudeCode => ".claude/agents",
+        Harness::Codex => ".codex/agents",
+        Harness::Gemini => ".gemini/agents",
+    }
+}
+
+const fn harness_command_dir(harness: Harness) -> &'static str {
+    match harness {
+        Harness::ClaudeCode => ".claude/commands",
+        Harness::Codex => ".codex/commands",
+        Harness::Gemini => ".gemini/commands",
+    }
+}
+
+const fn harness_hook_file(harness: Harness) -> &'static str {
+    match harness {
+        Harness::ClaudeCode => ".claude/settings.json",
+        Harness::Codex => ".codex/hooks.json",
+        Harness::Gemini => ".gemini/hooks.json",
+    }
+}
+
+const fn harness_manual_file(harness: Harness) -> &'static str {
+    match harness {
+        Harness::ClaudeCode => "CLAUDE.md",
+        Harness::Codex => "AGENTS.md",
+        Harness::Gemini => "GEMINI.md",
+    }
+}
+
 /// Write the pack's hook bindings (`settings.json`) and MCP server
 /// registration (`.mcp.json`) into the target project, substituting
 /// `{{PROJECT_DIR}}` with the canonical install path.
 fn install_hook_payloads(
-    dir: &include_dir::Dir<'_>,
+    source: &dyn PackSource,
     project_dir: &Path,
     force: bool,
     project_dir_token: &str,
     pack_id_at_version: &str,
     receipt: &mut PackInstallReceipt,
 ) -> Result<(), PackError> {
-    let pack_settings_bytes = dir
-        .get_file("hooks/settings.json")
-        .ok_or_else(|| PackError::ManifestInvalid {
-            reason: "embedded pack missing hooks/settings.json".to_owned(),
-        })?
-        .contents();
+    let pack_settings_bytes = source.read_file("hooks/settings.json")?;
     let pack_settings_text =
-        std::str::from_utf8(pack_settings_bytes).map_err(|e| PackError::ManifestInvalid {
+        std::str::from_utf8(&pack_settings_bytes).map_err(|e| PackError::ManifestInvalid {
             reason: format!("hooks/settings.json is not UTF-8: {e}"),
         })?;
     let project_dir_shell = shell_single_quote(project_dir_token);
@@ -188,11 +258,11 @@ fn install_hook_payloads(
     )?;
     write_json_pretty(project_dir, &settings_target, &merged_settings, receipt)?;
 
-    if let Some(mcp_file) = dir.get_file("hooks/.mcp.json") {
-        let mcp_text =
-            std::str::from_utf8(mcp_file.contents()).map_err(|e| PackError::ManifestInvalid {
-                reason: format!("hooks/.mcp.json is not UTF-8: {e}"),
-            })?;
+    if source.has_file("hooks/.mcp.json") {
+        let mcp_bytes = source.read_file("hooks/.mcp.json")?;
+        let mcp_text = std::str::from_utf8(&mcp_bytes).map_err(|e| PackError::ManifestInvalid {
+            reason: format!("hooks/.mcp.json is not UTF-8: {e}"),
+        })?;
         let pack_mcp: Value = serde_json::from_str(
             &mcp_text
                 .replace(
