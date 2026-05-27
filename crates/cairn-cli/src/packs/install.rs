@@ -119,7 +119,13 @@ pub fn install_pack(opts: &PackInstallOpts) -> Result<PackInstallReceipt, PackEr
         let pack_mcp: Value = serde_json::from_slice(mcp_file.contents())?;
         let mcp_target = opts.project_dir.join(".mcp.json");
         let existing_mcp = read_optional_json(&mcp_target)?;
-        let merged_mcp = merge_mcp_json(existing_mcp, &pack_mcp, &pack_id_at_version)?;
+        let merged_mcp = merge_mcp_json(
+            existing_mcp,
+            &pack_mcp,
+            &pack_id_at_version,
+            opts.force,
+            &mut receipt.warnings,
+        )?;
         write_json_pretty(&opts.project_dir, &mcp_target, &merged_mcp, &mut receipt)?;
     }
 
@@ -300,6 +306,8 @@ fn merge_mcp_json(
     existing: Value,
     pack: &Value,
     pack_id_at_version: &str,
+    force: bool,
+    warnings: &mut Vec<String>,
 ) -> Result<Value, PackError> {
     let mut out = match existing {
         Value::Null => serde_json::json!({}),
@@ -320,6 +328,10 @@ fn merge_mcp_json(
             reason: "pack payload missing `mcpServers`".to_owned(),
         })?;
 
+    let pack_id = pack_id_at_version
+        .split_once('@')
+        .map_or(pack_id_at_version, |(id, _)| id);
+
     let out_servers = out
         .as_object_mut()
         .expect("out is object")
@@ -332,6 +344,19 @@ fn merge_mcp_json(
             reason: "existing `mcpServers` is not an object".to_owned(),
         })?;
     for (name, server) in pack_servers {
+        if let Some(existing_entry) = out_servers.get(name) {
+            // Ownership check: only replace entries this pack already
+            // wrote. User-authored entries (no `_pack`) or entries from a
+            // different pack are preserved unless `force=true`.
+            let owned_by_us = crate::packs::merge::marker_matches_pack(existing_entry, pack_id);
+            if !owned_by_us && !force {
+                warnings.push(format!(
+                    "preserved existing `mcpServers.{name}` entry not owned by pack `{pack_id}`; \
+                     pass --force to replace"
+                ));
+                continue;
+            }
+        }
         let mut tagged = server.clone();
         if let Some(obj) = tagged.as_object_mut() {
             obj.insert(
@@ -383,6 +408,81 @@ mod tests {
         // Every file in the second run should be in skipped (already
         // matching) — no merges either.
         assert!(second.files_merged.is_empty(), "second run merges nothing");
+    }
+
+    #[test]
+    fn install_preserves_user_owned_mcp_server_entry() {
+        // A project already has its own mcpServers.cairn pointing at a
+        // custom binary with a tenant-specific arg. Install must NOT
+        // overwrite it without --force.
+        let tmp = tempdir().unwrap();
+        let user_mcp = serde_json::json!({
+            "mcpServers": {
+                "cairn": {
+                    "command": "/opt/custom/cairn",
+                    "args": ["mcp", "--vault", "/data/tenant-a"]
+                }
+            }
+        });
+        std::fs::write(
+            tmp.path().join(".mcp.json"),
+            format!("{}\n", serde_json::to_string_pretty(&user_mcp).unwrap()),
+        )
+        .unwrap();
+
+        let receipt = install_pack(&opts(tmp.path())).expect("install ok");
+
+        let stored: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(tmp.path().join(".mcp.json")).unwrap())
+                .unwrap();
+        assert_eq!(
+            stored["mcpServers"]["cairn"]["command"], "/opt/custom/cairn",
+            "user-owned cairn server must be preserved"
+        );
+        assert_eq!(
+            stored["mcpServers"]["cairn"]["args"][1], "--vault",
+            "user-owned args must be preserved"
+        );
+        assert!(
+            receipt
+                .warnings
+                .iter()
+                .any(|w| w.contains("mcpServers.cairn")),
+            "warning must mention the preserved entry; got {:?}",
+            receipt.warnings
+        );
+    }
+
+    #[test]
+    fn install_force_overwrites_user_owned_mcp_server_entry() {
+        // With --force, the user-owned entry IS overwritten by pack's.
+        let tmp = tempdir().unwrap();
+        let user_mcp = serde_json::json!({
+            "mcpServers": {
+                "cairn": {
+                    "command": "/opt/custom/cairn",
+                    "args": ["mcp", "--vault", "/data/tenant-a"]
+                }
+            }
+        });
+        std::fs::write(
+            tmp.path().join(".mcp.json"),
+            format!("{}\n", serde_json::to_string_pretty(&user_mcp).unwrap()),
+        )
+        .unwrap();
+
+        install_pack(&PackInstallOpts {
+            harness: Harness::ClaudeCode,
+            project_dir: tmp.path().to_path_buf(),
+            force: true,
+        })
+        .expect("install ok");
+
+        let stored: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(tmp.path().join(".mcp.json")).unwrap())
+                .unwrap();
+        assert_eq!(stored["mcpServers"]["cairn"]["command"], "cairn");
+        assert_eq!(stored["mcpServers"]["cairn"]["args"][0], "mcp");
     }
 
     #[test]

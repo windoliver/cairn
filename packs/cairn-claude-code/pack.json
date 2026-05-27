@@ -8,8 +8,7 @@
   "description": "Reference Claude Code skill-pack for Cairn — six subagents, thirteen slash commands, five-event hook bindings.",
   "requires_capabilities": [
     "cairn.mcp.v1.search.keyword",
-    "cairn.mcp.v1.retrieve.record",
-    "cairn.mcp.v1.forget.record"
+    "cairn.mcp.v1.retrieve.record"
   ],
   "subagents": [
     { "id": "context-loader",   "path": "agents/context-loader.md",   "uses_mcp_tools": ["assemble_hot","retrieve","search"] },

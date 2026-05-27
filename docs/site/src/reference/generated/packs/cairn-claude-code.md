@@ -51,4 +51,3 @@ Reference Claude Code skill-pack for Cairn — six subagents, thirteen slash com
 
 - `cairn.mcp.v1.search.keyword`
 - `cairn.mcp.v1.retrieve.record`
-- `cairn.mcp.v1.forget.record`

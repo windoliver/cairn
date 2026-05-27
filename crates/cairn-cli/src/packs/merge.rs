@@ -14,7 +14,7 @@ const PACK_MARKER_KEY: &str = "_pack";
 ///
 /// Pack version bumps must still match prior entries so upgrades replace
 /// rather than duplicate them.
-fn marker_matches_pack(entry: &Value, pack_id: &str) -> bool {
+pub(crate) fn marker_matches_pack(entry: &Value, pack_id: &str) -> bool {
     let Some(marker) = entry.get(PACK_MARKER_KEY).and_then(Value::as_str) else {
         return false;
     };
