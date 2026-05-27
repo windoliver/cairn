@@ -9,6 +9,7 @@ use tempfile::tempdir;
 
 use crate::packs::install::{PackInstallOpts, install_pack};
 use crate::packs::manifest::{Harness, PackError, PackManifest};
+use crate::packs::source::EmbeddedPackSource;
 
 /// Tier of a conformance case.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -54,7 +55,22 @@ pub fn run_pack_conformance(pack_id: &str) -> Vec<CaseOutcome> {
         return out;
     }
 
-    let dir = crate::packs::bundled_pack_for(Harness::ClaudeCode);
+    let dir = match crate::packs::bundled_pack_for(Harness::ClaudeCode) {
+        Some(dir) => dir,
+        None => {
+            out.push(CaseOutcome {
+                id: "pack_bundled",
+                name: "pack has bundled source".to_owned(),
+                tier: Tier::One,
+                status: Err(PackError::ManifestInvalid {
+                    reason: "no bundled pack available for harness `ClaudeCode`".to_owned(),
+                }
+                .to_string()),
+            });
+            return out;
+        }
+    };
+    let source = EmbeddedPackSource::new("cairn-claude-code", dir);
     let manifest: Result<PackManifest, PackError> = dir
         .get_file("pack.json")
         .ok_or_else(|| PackError::ManifestInvalid {
@@ -98,7 +114,7 @@ pub fn run_pack_conformance(pack_id: &str) -> Vec<CaseOutcome> {
         name: "all referenced paths present".to_owned(),
         tier: Tier::One,
         status: manifest
-            .assert_all_paths_present(dir)
+            .assert_all_paths_present(&source)
             .map_err(|e| format!("{e:#}")),
     });
     out.push(CaseOutcome {
@@ -106,7 +122,7 @@ pub fn run_pack_conformance(pack_id: &str) -> Vec<CaseOutcome> {
         name: "subagent frontmatter tools match manifest".to_owned(),
         tier: Tier::One,
         status: manifest
-            .assert_subagent_frontmatter_matches_manifest(dir)
+            .assert_subagent_frontmatter_matches_manifest(&source)
             .map_err(|e| format!("{e:#}")),
     });
 

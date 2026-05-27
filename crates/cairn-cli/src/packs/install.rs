@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use serde_json::Value;
 
 use crate::packs::manifest::{Harness, PackError, PackManifest};
+use crate::packs::source::EmbeddedPackSource;
 
 /// Install options.
 #[derive(Debug, Clone)]
@@ -43,7 +44,11 @@ pub struct PackInstallReceipt {
 /// Returns [`PackError`] on validation failure, IO failure, or
 /// non-recoverable merge conflict.
 pub fn install_pack(opts: &PackInstallOpts) -> Result<PackInstallReceipt, PackError> {
-    let dir = crate::packs::bundled_pack_for(opts.harness);
+    let dir =
+        crate::packs::bundled_pack_for(opts.harness).ok_or_else(|| PackError::ManifestInvalid {
+            reason: format!("no bundled pack available for harness `{:?}`", opts.harness),
+        })?;
+    let source = EmbeddedPackSource::new("cairn-claude-code", dir);
 
     let manifest_bytes = dir
         .get_file("pack.json")
@@ -55,8 +60,8 @@ pub fn install_pack(opts: &PackInstallOpts) -> Result<PackInstallReceipt, PackEr
 
     manifest.validate_pass_a()?;
     manifest.validate_pass_b()?;
-    manifest.assert_all_paths_present(dir)?;
-    manifest.assert_subagent_frontmatter_matches_manifest(dir)?;
+    manifest.assert_all_paths_present(&source)?;
+    manifest.assert_subagent_frontmatter_matches_manifest(&source)?;
 
     if manifest.harness != opts.harness {
         // Both sides typed as Harness enum; this branch is unreachable in v1.
