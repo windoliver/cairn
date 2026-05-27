@@ -9,6 +9,30 @@ use crate::packs::manifest::PackError;
 
 const PACK_MARKER_KEY: &str = "_pack";
 
+/// Detect a `SessionStart` entry written by the pre-pack inline
+/// installer (`cairn-cli/src/skill.rs` on main prior to #182). The
+/// legacy command was hard-coded:
+///
+/// ```text
+/// cairn ingest --folder . --mode keyword >/tmp/cairn-session-start.log 2>&1 &
+/// ```
+///
+/// We scan the entry's `hooks[].command` for that signature and treat
+/// any match as legacy. False positives would require a user to write
+/// the same exact command, which is unlikely enough to accept the
+/// trade for migration completeness.
+fn is_legacy_pre_pack_hook(entry: &Value) -> bool {
+    const LEGACY_SIGNATURE: &str = "cairn ingest --folder . --mode keyword";
+    let Some(hooks) = entry.get("hooks").and_then(Value::as_array) else {
+        return false;
+    };
+    hooks.iter().any(|h| {
+        h.get("command")
+            .and_then(Value::as_str)
+            .is_some_and(|cmd| cmd.contains(LEGACY_SIGNATURE))
+    })
+}
+
 /// Return `true` iff the `_pack` marker on `entry` belongs to the same
 /// pack as `pack_id` (matching by id, ignoring any `@version` tail).
 ///
@@ -101,6 +125,14 @@ pub fn merge_settings_json(
         // Drop any prior pack-owned entries for this pack id (round-trip
         // across version bumps).
         existing_array.retain(|entry| !marker_matches_pack(entry, pack_id));
+
+        // Drop legacy pre-pack entries. The pre-pack inline installer
+        // wrote unmarked SessionStart hooks running
+        // `cairn ingest --folder . --mode keyword ... &` into
+        // `.claude/settings.json`. Without this sweep an upgrade
+        // preserves the legacy background-ingest hook as if it were
+        // user-owned, running BOTH paths on every session.
+        existing_array.retain(|entry| !is_legacy_pre_pack_hook(entry));
 
         // Append the pack entries, each tagged with the marker.
         for entry in pack_array {
@@ -213,6 +245,39 @@ mod tests {
         let twice =
             merge_settings_json(once.clone(), &pack_payload(), "cairn-claude-code@0.1.0").unwrap();
         assert_eq!(once, twice);
+    }
+
+    #[test]
+    fn merge_removes_legacy_pre_pack_session_start_hook() {
+        // Pre-pack inline installer wrote this exact SessionStart hook
+        // into .claude/settings.json (no _pack marker). Upgrade MUST
+        // remove it — otherwise both the background ingest AND the new
+        // `cairn hook SessionStart` run on every session.
+        let legacy = serde_json::json!({
+            "hooks": {
+                "SessionStart": [
+                    {
+                        "matcher": "*",
+                        "hooks": [{
+                            "type": "command",
+                            "command": "cairn ingest --folder . --mode keyword >/tmp/cairn-session-start.log 2>&1 &"
+                        }]
+                    }
+                ]
+            }
+        });
+        let out = merge_settings_json(legacy, &pack_payload(), "cairn-claude-code@0.1.0")
+            .expect("merge ok");
+        let arr = out["hooks"]["SessionStart"].as_array().unwrap();
+        assert_eq!(
+            arr.len(),
+            1,
+            "legacy hook must be removed, only pack entry remains"
+        );
+        assert_eq!(
+            arr[0][PACK_MARKER_KEY].as_str(),
+            Some("cairn-claude-code@0.1.0")
+        );
     }
 
     #[test]

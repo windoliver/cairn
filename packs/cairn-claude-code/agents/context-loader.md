@@ -18,7 +18,10 @@ context for the asked-about entity from the Cairn vault using MCP tools only.
 2. If the prefix references record ids you do not yet hold, call
    `mcp__cairn__retrieve` with `target=record` and the record id for each.
 3. If the prefix is thin (fewer than three records) or the scope is broad,
-   call `mcp__cairn__search` with `mode=hybrid` to discover adjacent records.
+   call `mcp__cairn__search` with `mode=keyword` (always available) to
+   discover adjacent records. Only escalate to `mode=semantic` or
+   `mode=hybrid` after confirming the capability is advertised
+   (the pack only requires keyword + record retrieval).
 4. Return a single concise context block. Do NOT shell out to `cairn` —
    MCP only.
 
