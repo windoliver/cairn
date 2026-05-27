@@ -8,6 +8,7 @@ use crate::domain::Rfc3339Timestamp;
 use crate::domain::record::MemoryRecord;
 use crate::domain::scope::ScopeTuple;
 use crate::domain::taxonomy::MemoryVisibility;
+use crate::pipeline::skillify::SkillLintSnapshot;
 
 /// Pre-filtered record + filesystem inputs for [`super::assemble_hot`].
 ///
@@ -45,6 +46,8 @@ pub struct HotMemoryInputs<'a> {
     pub project_candidates: &'a [&'a MemoryRecord],
     /// `playbook`-kind candidates.
     pub playbook_candidates: &'a [&'a MemoryRecord],
+    /// Optional canonical skill metadata used to enrich playbook graph edges.
+    pub skill_graph_snapshot: Option<&'a SkillLintSnapshot>,
     /// Rolling-summary `reasoning` records produced by the
     /// `ConsolidationWorkflow` (issue #90, brief §5.3).
     ///
@@ -84,6 +87,7 @@ mod tests {
             pinned_candidates: &recs,
             project_candidates: &[],
             playbook_candidates: &[],
+            skill_graph_snapshot: None,
             rolling_summary_candidates: &[],
             user_signal_candidates: &[],
             now,

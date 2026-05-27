@@ -1,10 +1,10 @@
 #![allow(missing_docs)]
 
 use cairn_core::pipeline::skillify::{
-    SkillArtifact, SkillArtifactBundle, SkillArtifactKind, SkillLintIssueKind, SkillLintSkill,
-    SkillLintSnapshot, SkillifyCandidateInput, SkillifyGate, SkillifyGateReport,
-    SkillifyGateStatus, SkillifyOutcome, SkillifySource, SkillifyStatus, SkillifyTrigger,
-    lint_skill_snapshot,
+    SkillArtifact, SkillArtifactBundle, SkillArtifactKind, SkillGraphIssueKind, SkillGraphResolver,
+    SkillLintIssueKind, SkillLintSkill, SkillLintSnapshot, SkillifyCandidateInput, SkillifyGate,
+    SkillifyGateReport, SkillifyGateStatus, SkillifyOutcome, SkillifySource, SkillifyStatus,
+    SkillifyTrigger, lint_skill_snapshot,
 };
 
 fn input(outcome: SkillifyOutcome) -> SkillifyCandidateInput {
@@ -229,6 +229,304 @@ fn gate_report_with_all_required_gates_passed_is_ready() {
 }
 
 #[test]
+fn skill_lint_skill_graph_metadata_round_trips() {
+    let snapshot = SkillLintSnapshot {
+        skills: vec![SkillLintSkill {
+            skill_id: "deploy-hotfix".to_owned(),
+            lane: "deploy.hotfix".to_owned(),
+            path: "skills/skill_deploy-hotfix.md".to_owned(),
+            uses: Some("skills/scripts/deploy-hotfix.sh".to_owned()),
+            resolver_triggers: vec!["deploy hotfix".to_owned()],
+            files_to: Some("wiki/summaries/".to_owned()),
+            gate_report_passed: true,
+            rollback_version_count: 1,
+            existing_paths: vec!["skills/scripts/deploy-hotfix.sh".to_owned()],
+            requires: vec!["shell.exec".to_owned()],
+            provides: vec!["deploy.hotfix".to_owned()],
+            conflicts: vec!["deploy.rollback".to_owned()],
+        }],
+    };
+
+    let yaml = yaml_serde::to_string(&snapshot).expect("serialize");
+    assert!(yaml.contains("requires:"));
+    assert!(yaml.contains("provides:"));
+    assert!(yaml.contains("conflicts:"));
+
+    let parsed: SkillLintSnapshot = yaml_serde::from_str(&yaml).expect("deserialize");
+    let parsed_skill = parsed.skills.first().expect("skill");
+    assert_eq!(parsed_skill.requires, ["shell.exec"]);
+    assert_eq!(parsed_skill.provides, ["deploy.hotfix"]);
+    assert_eq!(parsed_skill.conflicts, ["deploy.rollback"]);
+}
+
+fn graph_skill(
+    skill_id: &str,
+    lane: &str,
+    requires: &[&str],
+    provides: &[&str],
+    conflicts: &[&str],
+) -> SkillLintSkill {
+    SkillLintSkill {
+        skill_id: skill_id.to_owned(),
+        lane: lane.to_owned(),
+        path: format!("skills/skill_{skill_id}.md"),
+        uses: None,
+        resolver_triggers: vec![format!("run {skill_id}")],
+        files_to: Some("wiki/summaries/".to_owned()),
+        gate_report_passed: true,
+        rollback_version_count: 1,
+        existing_paths: vec![],
+        requires: requires.iter().map(|s| (*s).to_owned()).collect(),
+        provides: provides.iter().map(|s| (*s).to_owned()).collect(),
+        conflicts: conflicts.iter().map(|s| (*s).to_owned()).collect(),
+    }
+}
+
+#[test]
+fn skill_graph_resolver_orders_transitive_prereqs() {
+    let snapshot = SkillLintSnapshot {
+        skills: vec![
+            graph_skill("run-tests", "test.run", &[], &["cap.test"], &[]),
+            graph_skill("lint-diff", "lint.diff", &["cap.test"], &["cap.lint"], &[]),
+            graph_skill("ship-pr", "ship.pr", &["cap.lint"], &["cap.ship"], &[]),
+        ],
+    };
+
+    let resolver = SkillGraphResolver::new(&snapshot);
+    let closure = resolver.resolve_prerequisites("ship-pr");
+
+    assert_eq!(closure.prerequisites, ["run-tests", "lint-diff"]);
+    assert!(closure.issues.is_empty());
+}
+
+#[test]
+fn skill_graph_resolver_reports_missing_ambiguous_cycle_and_conflict() {
+    let snapshot = SkillLintSnapshot {
+        skills: vec![
+            graph_skill("a", "lane.a", &["cap.missing"], &["cap.a"], &[]),
+            graph_skill("b1", "lane.b1", &[], &["cap.shared"], &[]),
+            graph_skill("b2", "lane.b2", &[], &["cap.shared"], &[]),
+            graph_skill("c", "lane.c", &["cap.shared"], &["cap.c"], &[]),
+            graph_skill(
+                "cycle-a",
+                "lane.cycle.a",
+                &["cycle-b"],
+                &["cap.cycle.a"],
+                &[],
+            ),
+            graph_skill(
+                "cycle-b",
+                "lane.cycle.b",
+                &["cycle-a"],
+                &["cap.cycle.b"],
+                &[],
+            ),
+            graph_skill(
+                "conflict-a",
+                "lane.conflict.a",
+                &["conflict-b"],
+                &["cap.conflict.a"],
+                &["conflict-b"],
+            ),
+            graph_skill(
+                "conflict-b",
+                "lane.conflict.b",
+                &[],
+                &["cap.conflict.b"],
+                &[],
+            ),
+        ],
+    };
+
+    let resolver = SkillGraphResolver::new(&snapshot);
+    let issues = resolver.lint_all();
+    let kinds: Vec<_> = issues.iter().map(|issue| issue.kind).collect();
+
+    assert!(kinds.contains(&SkillGraphIssueKind::MissingDependency));
+    assert!(kinds.contains(&SkillGraphIssueKind::AmbiguousDependency));
+    assert!(kinds.contains(&SkillGraphIssueKind::Cycle));
+    assert!(kinds.contains(&SkillGraphIssueKind::Conflict));
+}
+
+#[test]
+fn skill_graph_resolver_reports_duplicate_lane_ambiguity() {
+    let snapshot = SkillLintSnapshot {
+        skills: vec![
+            graph_skill("root", "lane.root", &["lane.shared"], &[], &[]),
+            graph_skill("shared-a", "lane.shared", &[], &[], &[]),
+            graph_skill("shared-b", "lane.shared", &[], &[], &[]),
+        ],
+    };
+
+    let resolver = SkillGraphResolver::new(&snapshot);
+    let closure = resolver.resolve_prerequisites("root");
+
+    assert!(closure.issues.iter().any(|issue| {
+        issue.kind == SkillGraphIssueKind::AmbiguousDependency
+            && issue.skill_id == "root"
+            && issue.reference == "lane.shared"
+    }));
+}
+
+#[test]
+fn skill_graph_resolver_reports_prerequisite_declared_conflict_with_root() {
+    let snapshot = SkillLintSnapshot {
+        skills: vec![
+            graph_skill("root", "lane.root", &["leaf"], &[], &[]),
+            graph_skill("leaf", "lane.leaf", &[], &[], &["root"]),
+        ],
+    };
+
+    let resolver = SkillGraphResolver::new(&snapshot);
+    let closure = resolver.resolve_prerequisites("root");
+
+    assert_eq!(closure.prerequisites, ["leaf"]);
+    assert!(closure.issues.iter().any(|issue| {
+        issue.kind == SkillGraphIssueKind::Conflict
+            && issue.skill_id == "leaf"
+            && issue.reference == "root"
+    }));
+}
+
+#[test]
+fn skill_lint_reports_missing_graph_reference() {
+    let snapshot = SkillLintSnapshot {
+        skills: vec![
+            graph_skill(
+                "deploy-hotfix",
+                "deploy.hotfix",
+                &["cap.shell"],
+                &["cap.deploy"],
+                &[],
+            ),
+            graph_skill(
+                "ambiguous-root",
+                "deploy.ambiguous",
+                &["cap.shared"],
+                &[],
+                &[],
+            ),
+            graph_skill(
+                "shared-provider-a",
+                "deploy.shared.a",
+                &[],
+                &["cap.shared"],
+                &[],
+            ),
+            graph_skill(
+                "shared-provider-b",
+                "deploy.shared.b",
+                &[],
+                &["cap.shared"],
+                &[],
+            ),
+        ],
+    };
+
+    let findings = lint_skill_snapshot(&snapshot);
+    let missing_findings: Vec<_> = findings
+        .iter()
+        .filter(|finding| finding.message.contains("requires `cap.shell`"))
+        .collect();
+    assert_eq!(missing_findings.len(), 1);
+    let finding = missing_findings[0];
+    assert_eq!(finding.skill_id, "deploy-hotfix");
+    assert_eq!(finding.path, "skills/skill_deploy-hotfix.md");
+    assert_eq!(finding.kind, SkillLintIssueKind::MissingArtifact);
+    assert_eq!(
+        finding.message,
+        "skill `deploy-hotfix` requires `cap.shell` but no skill, lane, or capability provides it"
+    );
+
+    let ambiguous_findings: Vec<_> = findings
+        .iter()
+        .filter(|finding| finding.message.contains("requires `cap.shared`"))
+        .collect();
+    assert_eq!(ambiguous_findings.len(), 1);
+    let finding = ambiguous_findings[0];
+    assert_eq!(finding.skill_id, "ambiguous-root");
+    assert_eq!(finding.path, "skills/skill_ambiguous-root.md");
+    assert_eq!(finding.kind, SkillLintIssueKind::MissingArtifact);
+    assert_eq!(
+        finding.message,
+        "skill `ambiguous-root` requires `cap.shared` but multiple skills provide it: shared-provider-a, shared-provider-b"
+    );
+}
+
+#[test]
+fn skill_lint_reports_graph_cycle_and_conflict() {
+    let snapshot = SkillLintSnapshot {
+        skills: vec![
+            graph_skill("cycle-a", "lane.cycle.a", &["cycle-b"], &["cap.a"], &[]),
+            graph_skill("cycle-b", "lane.cycle.b", &["cycle-a"], &["cap.b"], &[]),
+            graph_skill(
+                "conflict-a",
+                "lane.conflict.a",
+                &["conflict-b"],
+                &["cap.conflict.a"],
+                &["conflict-b"],
+            ),
+            graph_skill(
+                "conflict-b",
+                "lane.conflict.b",
+                &[],
+                &["cap.conflict.b"],
+                &[],
+            ),
+        ],
+    };
+
+    let findings = lint_skill_snapshot(&snapshot);
+    let cycle_findings: Vec<_> = findings
+        .iter()
+        .filter(|finding| finding.message.contains("cycles through"))
+        .map(|finding| {
+            (
+                finding.skill_id.as_str(),
+                finding.path.as_str(),
+                finding.kind,
+                finding.message.as_str(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        cycle_findings,
+        [
+            (
+                "cycle-a",
+                "skills/skill_cycle-a.md",
+                SkillLintIssueKind::DuplicateLane,
+                "skill `cycle-a` dependency graph cycles through `cycle-a`",
+            ),
+            (
+                "cycle-b",
+                "skills/skill_cycle-b.md",
+                SkillLintIssueKind::DuplicateLane,
+                "skill `cycle-b` dependency graph cycles through `cycle-b`",
+            ),
+        ]
+    );
+
+    let conflict_findings: Vec<_> = findings
+        .iter()
+        .filter(|finding| {
+            finding
+                .message
+                .contains("conflicts with selected dependency")
+        })
+        .collect();
+    assert_eq!(conflict_findings.len(), 1);
+    let finding = conflict_findings[0];
+    assert_eq!(finding.skill_id, "conflict-a");
+    assert_eq!(finding.path, "skills/skill_conflict-a.md");
+    assert_eq!(finding.kind, SkillLintIssueKind::DuplicateLane);
+    assert_eq!(
+        finding.message,
+        "skill `conflict-a` conflicts with selected dependency `conflict-b`"
+    );
+}
+
+#[test]
 fn lint_reports_missing_script_and_duplicate_lane() {
     let snapshot = SkillLintSnapshot {
         skills: vec![
@@ -242,6 +540,9 @@ fn lint_reports_missing_script_and_duplicate_lane() {
                 gate_report_passed: true,
                 rollback_version_count: 1,
                 existing_paths: vec!["skills/skill_a.md".to_owned()],
+                requires: vec![],
+                provides: vec![],
+                conflicts: vec![],
             },
             SkillLintSkill {
                 skill_id: "skill-b".to_owned(),
@@ -256,6 +557,9 @@ fn lint_reports_missing_script_and_duplicate_lane() {
                     "skills/skill_b.md".to_owned(),
                     "skills/scripts/b.sh".to_owned(),
                 ],
+                requires: vec![],
+                provides: vec![],
+                conflicts: vec![],
             },
         ],
     };
@@ -287,6 +591,9 @@ fn lint_reports_invalid_filing_rules_and_resolver_triggers() {
                 gate_report_passed: true,
                 rollback_version_count: 1,
                 existing_paths: vec!["skills/skill_b.md".to_owned()],
+                requires: vec![],
+                provides: vec![],
+                conflicts: vec![],
             },
             SkillLintSkill {
                 skill_id: "skill-a".to_owned(),
@@ -298,6 +605,9 @@ fn lint_reports_invalid_filing_rules_and_resolver_triggers() {
                 gate_report_passed: true,
                 rollback_version_count: 1,
                 existing_paths: vec!["skills/skill_a.md".to_owned()],
+                requires: vec![],
+                provides: vec![],
+                conflicts: vec![],
             },
         ],
     };

@@ -16,6 +16,30 @@ use cairn_core::pipeline::skillify::{
     SkillArtifactKind, SkillLintSkill, SkillLintSnapshot, SkillifyGateReport, SkillifyGateStatus,
 };
 
+/// Top-level skill graph metadata parsed from skill Markdown frontmatter.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct SkillGraphMetadata {
+    /// Capabilities this skill needs.
+    pub requires: Vec<String>,
+    /// Capabilities this skill provides.
+    pub provides: Vec<String>,
+    /// Capabilities this skill conflicts with.
+    pub conflicts: Vec<String>,
+}
+
+/// Parse top-level `requires` / `provides` / `conflicts` frontmatter.
+#[must_use]
+pub(crate) fn parse_skill_graph_metadata(body: &str) -> SkillGraphMetadata {
+    let Some(fm) = frontmatter(body) else {
+        return SkillGraphMetadata::default();
+    };
+    SkillGraphMetadata {
+        requires: inline_or_list(fm, "requires"),
+        provides: inline_or_list(fm, "provides"),
+        conflicts: inline_or_list(fm, "conflicts"),
+    }
+}
+
 /// Build a [`SkillLintSnapshot`] from the vault filesystem.
 ///
 /// If `exclude_candidate_id` is `Some`, that candidate's entry is omitted from
@@ -179,6 +203,9 @@ fn read_live_skill(vault_root: &Path, path: &Path) -> std::io::Result<SkillLintS
     let uses = scalar(fm, "uses");
     let files_to = scalar(fm, "files_to");
     let resolver_triggers = inline_or_list(fm, "triggers");
+    let requires = inline_or_list(fm, "requires");
+    let provides = inline_or_list(fm, "provides");
+    let conflicts = inline_or_list(fm, "conflicts");
     if resolver_triggers.is_empty() {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
@@ -204,6 +231,9 @@ fn read_live_skill(vault_root: &Path, path: &Path) -> std::io::Result<SkillLintS
         gate_report_passed: true,
         rollback_version_count: 1,
         existing_paths,
+        requires,
+        provides,
+        conflicts,
     })
 }
 
@@ -235,6 +265,9 @@ fn read_candidate_skill(
     let uses = scalar(fm, "uses");
     let files_to = scalar(fm, "files_to");
     let resolver_triggers = inline_or_list(fm, "triggers");
+    let requires = inline_or_list(fm, "requires");
+    let provides = inline_or_list(fm, "provides");
+    let conflicts = inline_or_list(fm, "conflicts");
     if resolver_triggers.is_empty() {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
@@ -257,6 +290,9 @@ fn read_candidate_skill(
         gate_report_passed: true,
         rollback_version_count: 1,
         existing_paths,
+        requires,
+        provides,
+        conflicts,
     })
 }
 
@@ -294,8 +330,7 @@ fn inline_or_list(fm: &str, key: &str) -> Vec<String> {
     let lines: Vec<&str> = fm.lines().collect();
     let mut i = 0;
     while i < lines.len() {
-        let trimmed = lines[i].trim_start();
-        if let Some(rest) = trimmed.strip_prefix(&format!("{key}:")) {
+        if let Some(rest) = lines[i].strip_prefix(&format!("{key}:")) {
             let inline = rest.trim();
             if !inline.is_empty() {
                 if let Some(arr) = inline.strip_prefix('[').and_then(|s| s.strip_suffix(']')) {
@@ -442,6 +477,71 @@ mod tests {
         assert_eq!(snap.skills.len(), 1);
         assert_eq!(snap.skills[0].lane, "test.a");
         assert_eq!(snap.skills[0].resolver_triggers, vec!["trig a".to_owned()]);
+    }
+
+    #[test]
+    fn snapshot_parses_skill_graph_metadata() {
+        let temp = TempDir::new().unwrap();
+        let skill_path = temp.path().join("skills/skill_deploy.md");
+        write_md(
+            &skill_path,
+            "---\nname: deploy\nlane: deploy.hotfix\ntriggers: [\"deploy hotfix\"]\nrequires: [\"cap.shell\"]\nprovides: [\"cap.deploy\"]\nconflicts:\n  - rollback.force\n---\nDeploy.\n",
+        );
+
+        let snapshot = build_vault_snapshot(temp.path(), None).expect("snapshot");
+        let skill = snapshot
+            .skills
+            .iter()
+            .find(|skill| skill.skill_id == "deploy")
+            .expect("skill");
+
+        assert_eq!(skill.requires, ["cap.shell"]);
+        assert_eq!(skill.provides, ["cap.deploy"]);
+        assert_eq!(skill.conflicts, ["rollback.force"]);
+    }
+
+    #[test]
+    fn snapshot_parses_candidate_skill_graph_metadata() {
+        let temp = TempDir::new().unwrap();
+        write_md(
+            &temp
+                .path()
+                .join(".cairn/evolution/skillify/skc_graph/bundle/skills/skill_graph.md"),
+            "---\nname: deploy\nlane: deploy.hotfix\ntriggers: [\"deploy hotfix\"]\nrequires: cap.shell\nprovides:\n  - cap.deploy\nconflicts: [\"rollback.force\"]\n---\nDeploy.\n",
+        );
+        write_gate_report(temp.path(), "skc_graph", true);
+
+        let snapshot = build_vault_snapshot(temp.path(), None).expect("snapshot");
+        let skill = snapshot
+            .skills
+            .iter()
+            .find(|skill| skill.skill_id == "skc_graph")
+            .expect("skill");
+
+        assert_eq!(skill.requires, ["cap.shell"]);
+        assert_eq!(skill.provides, ["cap.deploy"]);
+        assert_eq!(skill.conflicts, ["rollback.force"]);
+    }
+
+    #[test]
+    fn snapshot_ignores_nested_skill_graph_metadata() {
+        let temp = TempDir::new().unwrap();
+        let skill_path = temp.path().join("skills/skill_deploy.md");
+        write_md(
+            &skill_path,
+            "---\nname: deploy\nlane: deploy.hotfix\ntriggers: [\"deploy hotfix\"]\nmetadata:\n  requires:\n    - cap.shell\n  provides: [\"cap.deploy\"]\n  conflicts: [\"rollback.force\"]\n---\nDeploy.\n",
+        );
+
+        let snapshot = build_vault_snapshot(temp.path(), None).expect("snapshot");
+        let skill = snapshot
+            .skills
+            .iter()
+            .find(|skill| skill.skill_id == "deploy")
+            .expect("skill");
+
+        assert!(skill.requires.is_empty());
+        assert!(skill.provides.is_empty());
+        assert!(skill.conflicts.is_empty());
     }
 
     #[test]

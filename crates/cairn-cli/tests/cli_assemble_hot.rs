@@ -11,6 +11,11 @@ use std::process::Command;
 
 use cairn_cli::vault::{BootstrapOpts, bootstrap};
 use cairn_core::config::{CairnConfig, HotMemoryRecipeStep};
+use cairn_core::contract::memory_store::MemoryStore as _;
+use cairn_core::domain::record::MemoryRecord;
+use cairn_core::domain::record::tests_export::sample_record;
+use cairn_core::domain::taxonomy::{MemoryKind, MemoryVisibility};
+use cairn_core::domain::{RecordId, Rfc3339Timestamp, ScopeTuple, TargetId};
 
 fn cli() -> Command {
     Command::new(env!("CARGO_BIN_EXE_cairn"))
@@ -60,6 +65,97 @@ fn seed_default_identity(vault: &Path) {
     );
 }
 
+fn project_playbook_record(
+    id: &str,
+    body: &str,
+    updated_at: &str,
+    skill_id: &str,
+    lane: &str,
+    requires: &[&str],
+    provides: &[&str],
+) -> MemoryRecord {
+    let mut record = sample_record();
+    record.id = RecordId::parse(id).expect("record id");
+    record.target_id = TargetId::parse(id).expect("target id");
+    record.kind = MemoryKind::Playbook;
+    record.visibility = MemoryVisibility::Project;
+    record.scope = ScopeTuple {
+        tenant: Some("default".to_owned()),
+        workspace: Some("my-vault".to_owned()),
+        entity: Some("ingest".to_owned()),
+        ..ScopeTuple::default()
+    };
+    body.clone_into(&mut record.body);
+    record.updated_at = Rfc3339Timestamp::parse(updated_at).expect("updated_at");
+    record
+        .extra_frontmatter
+        .insert("skill_id".to_owned(), serde_json::json!(skill_id));
+    record
+        .extra_frontmatter
+        .insert("lane".to_owned(), serde_json::json!(lane));
+    record
+        .extra_frontmatter
+        .insert("requires".to_owned(), serde_json::json!(requires));
+    record
+        .extra_frontmatter
+        .insert("provides".to_owned(), serde_json::json!(provides));
+    record
+}
+
+fn seed_records(vault: &Path, records: &[MemoryRecord]) {
+    let db_path = vault.join(".cairn/cairn.db");
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime");
+    rt.block_on(async {
+        let store = cairn_store_sqlite::open(&db_path)
+            .await
+            .expect("open store");
+        for record in records {
+            store.upsert(record).await.expect("upsert record");
+        }
+    });
+}
+
+fn write_skill_graph_files(vault: &Path) {
+    std::fs::create_dir_all(vault.join("skills")).expect("skills dir");
+    std::fs::write(
+        vault.join("skills/skill_test.md"),
+        "---\nskill_id: run-tests\nlane: test.run\ntriggers: [\"run tests\"]\nfiles_to: wiki/summaries/\nprovides: [\"cap.test\"]\n---\nRun tests.\n",
+    )
+    .expect("prereq skill");
+    std::fs::write(
+        vault.join("skills/skill_ship.md"),
+        "---\nskill_id: ship-pr\nlane: ship.pr\ntriggers: [\"ship pr\"]\nfiles_to: wiki/summaries/\nrequires: [\"cap.test\"]\nprovides: [\"cap.ship\"]\n---\nShip PR.\n",
+    )
+    .expect("active skill");
+}
+
+fn assemble_hot_prefix(vault: &Path) -> String {
+    let output = cli()
+        .current_dir(vault)
+        .args(["assemble_hot", "--budget", "4096", "--json"])
+        .output()
+        .expect("run assemble_hot");
+    assert!(
+        output.status.success(),
+        "exit={:?} stdout={} stderr={}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8(output.stdout).expect("utf-8 stdout");
+    let value: serde_json::Value =
+        serde_json::from_str(stdout.trim()).expect("valid JSON on stdout");
+    value
+        .pointer("/data/prefix")
+        .and_then(serde_json::Value::as_str)
+        .expect("prefix")
+        .to_owned()
+}
+
 #[test]
 fn cairn_assemble_hot_json_emits_segments() {
     let vault = tempfile::tempdir().expect("tempdir");
@@ -104,6 +200,151 @@ fn cairn_assemble_hot_json_emits_segments() {
     // Redact the volatile operation_id before snapshotting.
     let redacted = redact_operation_id(stdout.trim());
     insta::assert_snapshot!(redacted);
+}
+
+#[test]
+fn cairn_assemble_hot_includes_active_playbook_prerequisites() {
+    let vault = tempfile::tempdir().expect("tempdir");
+    bootstrap(&BootstrapOpts {
+        vault_path: vault.path().to_path_buf(),
+        force: false,
+    })
+    .expect("bootstrap vault");
+    seed_default_identity(vault.path());
+
+    let prereq = project_playbook_record(
+        "01HQZX9F5N0000000000000001",
+        "run-tests prerequisite playbook",
+        "2026-04-22T14:03:00Z",
+        "run-tests",
+        "test.run",
+        &[],
+        &["cap.test"],
+    );
+    let active = project_playbook_record(
+        "01HQZX9F5N0000000000000002",
+        "ship-pr active playbook",
+        "2026-04-22T14:05:00Z",
+        "ship-pr",
+        "ship.pr",
+        &["cap.test"],
+        &["cap.ship"],
+    );
+    seed_records(vault.path(), &[prereq, active]);
+
+    let prefix = assemble_hot_prefix(vault.path());
+
+    let prereq_idx = prefix
+        .find("run-tests prerequisite playbook")
+        .expect("prerequisite playbook in prefix");
+    let active_idx = prefix
+        .find("ship-pr active playbook")
+        .expect("active playbook in prefix");
+    assert!(
+        prereq_idx < active_idx,
+        "prerequisite should precede active playbook: {prefix}"
+    );
+}
+
+#[test]
+fn cairn_assemble_hot_uses_skill_files_for_playbook_graph_metadata() {
+    let vault = tempfile::tempdir().expect("tempdir");
+    bootstrap(&BootstrapOpts {
+        vault_path: vault.path().to_path_buf(),
+        force: false,
+    })
+    .expect("bootstrap vault");
+    seed_default_identity(vault.path());
+    write_skill_graph_files(vault.path());
+
+    let prereq = project_playbook_record(
+        "01HQZX9F5N0000000000000001",
+        "run-tests prerequisite playbook",
+        "2026-04-22T14:03:00Z",
+        "run-tests",
+        "test.run",
+        &[],
+        &[],
+    );
+    let active = project_playbook_record(
+        "01HQZX9F5N0000000000000002",
+        "ship-pr active playbook",
+        "2026-04-22T14:05:00Z",
+        "ship-pr",
+        "ship.pr",
+        &[],
+        &[],
+    );
+    seed_records(vault.path(), &[prereq, active]);
+
+    let prefix = assemble_hot_prefix(vault.path());
+
+    let prereq_idx = prefix
+        .find("run-tests prerequisite playbook")
+        .expect("prerequisite playbook in prefix");
+    let active_idx = prefix
+        .find("ship-pr active playbook")
+        .expect("active playbook in prefix");
+    assert!(
+        prereq_idx < active_idx,
+        "skill-file graph metadata should place prerequisite first: {prefix}"
+    );
+}
+
+#[test]
+fn cairn_assemble_hot_backfills_playbook_prerequisites_beyond_first_page() {
+    let vault = tempfile::tempdir().expect("tempdir");
+    bootstrap(&BootstrapOpts {
+        vault_path: vault.path().to_path_buf(),
+        force: false,
+    })
+    .expect("bootstrap vault");
+    seed_default_identity(vault.path());
+
+    let mut records = Vec::new();
+    records.push(project_playbook_record(
+        "01HQZX9F5N0000000000000001",
+        "run-tests prerequisite playbook",
+        "2026-04-22T14:03:00Z",
+        "run-tests",
+        "test.run",
+        &[],
+        &["cap.test"],
+    ));
+    records.push(project_playbook_record(
+        "01HQZX9F5N0000000000000002",
+        "ship-pr active playbook",
+        "2026-04-22T15:00:00Z",
+        "ship-pr",
+        "ship.pr",
+        &["cap.test"],
+        &["cap.ship"],
+    ));
+    for idx in 0..16 {
+        records.push(project_playbook_record(
+            &format!("01HQZX9F5N0000000000000{:03}", idx + 3),
+            &format!("filler playbook {idx}"),
+            &format!("2026-04-22T14:{:02}:00Z", idx + 4),
+            &format!("filler-{idx}"),
+            &format!("filler.{idx}"),
+            &[],
+            &[],
+        ));
+    }
+    seed_records(vault.path(), &records);
+
+    let prefix = assemble_hot_prefix(vault.path());
+
+    let prereq_idx = prefix
+        .find("run-tests prerequisite playbook")
+        .expect("older prerequisite playbook in prefix");
+    let active_idx = prefix
+        .find("ship-pr active playbook")
+        .expect("active playbook in prefix");
+    assert!(
+        prereq_idx < active_idx,
+        "older prerequisite should be backfilled before active playbook: {prefix}"
+    );
 }
 
 #[test]

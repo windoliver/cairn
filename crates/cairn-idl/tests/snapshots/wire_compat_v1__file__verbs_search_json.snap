@@ -283,7 +283,24 @@ expression: body
         "semantic_rank": { "type": "integer", "minimum": 1 },
         "rrf_score": { "type": "number" },
         "cosine": { "type": "number" },
-        "final_score": { "type": "number" }
+        "final_score": { "type": "number" },
+        "skill_graph": { "$ref": "#/$defs/SkillGraphExplain" }
+      }
+    },
+    "SkillGraphExplain": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["skill_id", "prerequisites", "diagnostics"],
+      "properties": {
+        "skill_id": { "type": "string", "minLength": 1 },
+        "prerequisites": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "diagnostics": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
+        }
       }
     },
     "filter": {

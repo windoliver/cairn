@@ -106,6 +106,7 @@ mod tests {
             pinned_candidates: &[],
             project_candidates: &[],
             playbook_candidates: &[],
+            skill_graph_snapshot: None,
             rolling_summary_candidates: &[],
             user_signal_candidates: records,
             now: Rfc3339Timestamp::parse(now).expect("valid"),

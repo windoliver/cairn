@@ -372,6 +372,10 @@ async fn run_async(
         }
     };
 
+    let skill_graph_snapshot = explain
+        .then(|| crate::verbs::lint::build_skill_lint_snapshot(&vault_root).ok())
+        .flatten();
+
     let request = cairn_core::verbs::search::SearchRequest {
         query,
         mode: match mode {
@@ -395,12 +399,27 @@ async fn run_async(
         explain,
     };
 
-    match cairn_core::verbs::search::run(&store, &config, &caps, request).await {
-        Ok(outcome) => {
+    match cairn_core::verbs::search::run_with_skill_graph_snapshot(
+        &store,
+        &config,
+        &caps,
+        request,
+        skill_graph_snapshot.as_ref(),
+    )
+    .await
+    {
+        Ok(enriched) => {
+            let outcome = enriched.outcome;
             match bm25s_scores(&store, &config, &outcome, &query_text, limit, bm25s_mode).await {
                 Ok(scores) => {
                     emit_search_metric(&vault_root, &config, mode, search_started, &outcome, None);
-                    render_outcome(&outcome, json, mode, scores.as_ref())
+                    render_outcome(
+                        &outcome,
+                        json,
+                        mode,
+                        scores.as_ref(),
+                        enriched.skill_graph.as_deref(),
+                    )
                 }
                 Err(err) => emit_bm25s_unavailable(json, &err),
             }
@@ -708,9 +727,10 @@ fn render_outcome(
     json: bool,
     mode: SearchMode,
     bm25s_scores: Option<&HashMap<String, f64>>,
+    skill_graph: Option<&[Option<cairn_core::pipeline::skillify::SkillGraphExplain>]>,
 ) -> ExitCode {
     if json {
-        emit_json(&outcome_envelope(outcome, mode, bm25s_scores));
+        emit_json(&outcome_envelope(outcome, mode, bm25s_scores, skill_graph));
     } else if outcome.candidates.is_empty() {
         println!("search: no results");
     } else {
@@ -772,10 +792,13 @@ fn outcome_envelope(
     outcome: &cairn_core::verbs::search::SearchOutcome,
     mode: SearchMode,
     bm25s_scores: Option<&HashMap<String, f64>>,
+    skill_graph: Option<&[Option<cairn_core::pipeline::skillify::SkillGraphExplain>]>,
 ) -> cairn_core::generated::envelope::Response {
     use cairn_core::generated::common::Ulid;
     use cairn_core::generated::envelope::{Response, ResponseData, ResponseStatus};
-    use cairn_core::generated::verbs::search::{Hit, HitTrust, ScoreExplain, SearchData};
+    use cairn_core::generated::verbs::search::{
+        Hit, HitTrust, ScoreExplain, SearchData, SkillGraphExplain,
+    };
     use cairn_core::policy_trace::{to_wire, to_wire_exclusions};
 
     let hits: Vec<Hit> = outcome
@@ -799,7 +822,8 @@ fn outcome_envelope(
 
     let score_explain = outcome.explain.as_ref().map(|exps| {
         exps.iter()
-            .map(|e| ScoreExplain {
+            .enumerate()
+            .map(|(idx, e)| ScoreExplain {
                 record_id: Ulid(e.record_id.as_str().to_owned()),
                 bm25_rank: e.bm25_rank.map(|r| i64::try_from(r).unwrap_or(i64::MAX)),
                 semantic_rank: e
@@ -808,6 +832,14 @@ fn outcome_envelope(
                 rrf_score: finite_or_zero(e.rrf_score),
                 cosine: finite_option(e.cosine),
                 final_score: finite_or_zero(e.final_score),
+                skill_graph: skill_graph
+                    .and_then(|items| items.get(idx))
+                    .and_then(Option::as_ref)
+                    .map(|graph| SkillGraphExplain {
+                        skill_id: graph.skill_id.clone(),
+                        prerequisites: graph.prerequisites.clone(),
+                        diagnostics: graph.diagnostics.clone(),
+                    }),
             })
             .collect()
     });
@@ -1320,7 +1352,7 @@ mod tests {
             semantic_degraded: true,
         };
 
-        let response = outcome_envelope(&outcome, SearchMode::Hybrid, None);
+        let response = outcome_envelope(&outcome, SearchMode::Hybrid, None, None);
         let Some(ResponseData::Search(data)) = response.data else {
             panic!("search outcome must map to search response data");
         };

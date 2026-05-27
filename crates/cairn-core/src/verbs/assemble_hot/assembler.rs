@@ -267,12 +267,16 @@ pub fn assemble_hot_with_inputs(
 
     let mut bodies: Vec<String> = Vec::with_capacity(recipe.len());
     let mut traces: Vec<HotStepTrace> = Vec::with_capacity(recipe.len());
+    let mut emitted_bytes = 0_u64;
+    let max_bytes = u64::from(resolved.max_bytes);
 
     for step in recipe.iter().copied() {
-        let segment = inputs_run_step(step, inputs);
+        let remaining_budget = Some(max_bytes.saturating_sub(emitted_bytes));
+        let segment = inputs_run_step(step, inputs, remaining_budget);
         if inputs.include_debug {
             traces.push(inputs_to_step_trace(step, &segment));
         }
+        emitted_bytes = emitted_bytes.saturating_add(segment.body.len() as u64);
         bodies.push(segment.body);
     }
 
@@ -305,13 +309,16 @@ pub fn assemble_hot_with_inputs(
 fn inputs_run_step(
     step: HotRecipeStep,
     inputs: &super::inputs::HotMemoryInputs<'_>,
+    remaining_budget: Option<u64>,
 ) -> super::inclusion::LoadedSegment {
     match step {
         HotRecipeStep::Purpose => super::sources::purpose::select(inputs),
         HotRecipeStep::Index => super::sources::index::select(inputs),
         HotRecipeStep::PinnedFeedback => super::sources::pinned::select(inputs),
         HotRecipeStep::TopSalienceProject => super::sources::project::select(inputs),
-        HotRecipeStep::ActivePlaybook => super::sources::playbook::select(inputs),
+        HotRecipeStep::ActivePlaybook => {
+            super::sources::playbook::select_with_budget(inputs, remaining_budget)
+        }
         HotRecipeStep::RecentUserSignal => super::sources::user_signal::select(inputs),
     }
 }
