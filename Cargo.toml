@@ -35,7 +35,7 @@ jsonschema = { version = "0.46", default-features = false }
 referencing = { version = "0.46", default-features = false }
 pretty_assertions = "1"
 proptest = "1"
-rstest = "0.23"
+rstest = "0.26"
 tempfile = "3"
 semver = "1"
 sha2 = { version = "0.10", default-features = false }
