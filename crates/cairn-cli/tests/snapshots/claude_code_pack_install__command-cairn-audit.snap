@@ -3,19 +3,22 @@ source: crates/cairn-cli/tests/claude_code_pack_install.rs
 expression: body
 ---
 ---
-description: Vault audit — librarian report + orphan forget dry-run.
+description: Vault audit — librarian report + orphan impact inspection.
 ---
 
 <!-- BEGIN CAIRN PACK -->
-Run a vault audit.
+Run a vault audit. Read-only — no destructive verbs reachable.
 
 1. Spawn the `vault-librarian` subagent: full lint report.
-2. For each orphan finding, spawn the `forget-planner` subagent with the
-   orphan record id to get a dry-run FlushPlan.
+2. For each orphan finding, spawn the `forget-planner` subagent with
+   the orphan record id. `forget-planner` does NOT call
+   `mcp__cairn__forget`; it returns a read-only impact inspection
+   (citations, broken edges, scope crossings) derived from `retrieve`,
+   `search`, and `lint`. This is informational, not a CLI FlushPlan.
 3. Render a consolidated report:
    - Lint summary (criticals / warnings / info).
-   - Orphan candidates with forget cost (records + edges that would be
-     dropped).
-4. Stop. Never commit a forget from this command — the user runs
-   `/cairn-forget` explicitly.
+   - Orphan candidates with the forget-planner impact summary
+     (records + edges that would be affected by a forget).
+4. Stop. To commit a forget, the user must run `/cairn-forget`
+   themselves; this audit never shells out to a destructive verb.
 <!-- END CAIRN PACK -->
