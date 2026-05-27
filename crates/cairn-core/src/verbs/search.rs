@@ -95,6 +95,15 @@ pub struct SearchOutcome {
     pub semantic_degraded: bool,
 }
 
+/// Search outcome plus optional per-explain-entry skill graph metadata.
+#[derive(Debug, Clone)]
+pub struct SearchOutcomeWithSkillGraph {
+    /// Standard search outcome.
+    pub outcome: SearchOutcome,
+    /// Optional graph explain payloads in lockstep with `outcome.explain`.
+    pub skill_graph: Option<Vec<Option<crate::pipeline::skillify::SkillGraphExplain>>>,
+}
+
 fn candidate_has_reasoning(candidate: &SearchCandidate) -> bool {
     // Fail closed: if the row's `record_json` won't parse, treat it as
     // potentially reasoning-bearing and exclude it from default results.
@@ -239,6 +248,38 @@ pub async fn run(
     caps: &CapabilitySet,
     request: SearchRequest,
 ) -> Result<SearchOutcome, SearchError> {
+    run_inner(store, config, caps, request).await
+}
+
+/// Run search with optional adapter-supplied skill graph metadata for explain output.
+///
+/// This keeps [`SearchRequest`] source-compatible for existing callers while
+/// letting file-system-aware adapters enrich `--explain` responses.
+pub async fn run_with_skill_graph_snapshot(
+    store: &dyn MemoryStore,
+    config: &CairnConfig,
+    caps: &CapabilitySet,
+    request: SearchRequest,
+    skill_graph_snapshot: Option<&crate::pipeline::skillify::SkillLintSnapshot>,
+) -> Result<SearchOutcomeWithSkillGraph, SearchError> {
+    let outcome = run_inner(store, config, caps, request).await?;
+    let skill_graph = skill_graph_explain_for_candidates(
+        outcome.explain.as_deref(),
+        &outcome.candidates,
+        skill_graph_snapshot,
+    );
+    Ok(SearchOutcomeWithSkillGraph {
+        outcome,
+        skill_graph,
+    })
+}
+
+async fn run_inner(
+    store: &dyn MemoryStore,
+    config: &CairnConfig,
+    caps: &CapabilitySet,
+    request: SearchRequest,
+) -> Result<SearchOutcome, SearchError> {
     if request.query.trim().is_empty() {
         return Err(SearchError::InvalidArgs {
             reason: "query is empty".to_owned(),
@@ -349,6 +390,69 @@ fn semantic_degraded(degraded_legs: &[crate::search::DegradedLeg]) -> bool {
             }
         )
     })
+}
+
+fn skill_graph_explain_for_candidates(
+    explain: Option<&[ScoreExplain]>,
+    candidates: &[SearchCandidate],
+    snapshot: Option<&crate::pipeline::skillify::SkillLintSnapshot>,
+) -> Option<Vec<Option<crate::pipeline::skillify::SkillGraphExplain>>> {
+    let Some(explain) = explain else {
+        return None;
+    };
+    let Some(snapshot) = snapshot else {
+        return None;
+    };
+
+    let resolver = crate::pipeline::skillify::SkillGraphResolver::new(snapshot);
+    Some(
+        explain
+            .iter()
+            .enumerate()
+            .map(|(idx, _)| {
+                let candidate = candidates.get(idx)?;
+                let skill_id = candidate_skill_id(candidate, snapshot)?;
+                let closure = resolver.resolve_prerequisites(&skill_id);
+                Some(crate::pipeline::skillify::SkillGraphExplain {
+                    skill_id,
+                    prerequisites: closure.prerequisites,
+                    diagnostics: closure
+                        .issues
+                        .into_iter()
+                        .map(|issue| issue.message)
+                        .collect(),
+                })
+            })
+            .collect(),
+    )
+}
+
+fn candidate_skill_id(
+    candidate: &SearchCandidate,
+    snapshot: &crate::pipeline::skillify::SkillLintSnapshot,
+) -> Option<String> {
+    let record = serde_json::from_str::<MemoryRecord>(&candidate.record_json).ok()?;
+    if let Some(skill_id) = record
+        .extra_frontmatter
+        .get("skill_id")
+        .and_then(serde_json::Value::as_str)
+        .filter(|skill_id| !skill_id.trim().is_empty())
+    {
+        return Some(skill_id.to_owned());
+    }
+
+    let lane = record
+        .extra_frontmatter
+        .get("lane")
+        .and_then(serde_json::Value::as_str)
+        .filter(|lane| !lane.trim().is_empty())?;
+    let mut matches = snapshot
+        .skills
+        .iter()
+        .filter(|skill| skill.lane == lane)
+        .map(|skill| skill.skill_id.as_str());
+    let skill_id = matches.next()?;
+    matches.next().is_none().then(|| skill_id.to_owned())
 }
 
 fn visibility_allowlist(request: &SearchRequest) -> (Vec<MemoryVisibility>, Vec<RebacDecision>) {

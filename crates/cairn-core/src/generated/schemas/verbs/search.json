@@ -242,12 +242,44 @@
         "semantic_rank": {
           "minimum": 1,
           "type": "integer"
+        },
+        "skill_graph": {
+          "$ref": "#/$defs/SkillGraphExplain"
         }
       },
       "required": [
         "record_id",
         "rrf_score",
         "final_score"
+      ],
+      "type": "object"
+    },
+    "SkillGraphExplain": {
+      "additionalProperties": false,
+      "properties": {
+        "diagnostics": {
+          "items": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "prerequisites": {
+          "items": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "skill_id": {
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "skill_id",
+        "prerequisites",
+        "diagnostics"
       ],
       "type": "object"
     },

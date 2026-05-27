@@ -1649,6 +1649,7 @@ fn search_outcome_to_result(
                 rrf_score: finite_or_zero(e.rrf_score),
                 cosine: finite_option(e.cosine),
                 final_score: finite_or_zero(e.final_score),
+                skill_graph: None,
             })
             .collect()
     });

@@ -2624,7 +2624,7 @@ struct SkillLintSource {
     resolver_path: Option<PathBuf>,
 }
 
-fn build_skill_lint_snapshot(
+pub(crate) fn build_skill_lint_snapshot(
     vault_root: &Path,
 ) -> anyhow::Result<cairn_core::pipeline::skillify::SkillLintSnapshot> {
     let mut skills = Vec::new();
