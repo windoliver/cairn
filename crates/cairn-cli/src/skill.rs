@@ -209,6 +209,11 @@ pub struct AgentIntegrationReceipt {
     pub files_updated: Vec<PathBuf>,
     /// Files left unchanged because generated content already matched.
     pub files_skipped: Vec<PathBuf>,
+    /// Non-fatal warnings from the underlying pack installer
+    /// (e.g. preserved user-owned files, legacy command migration).
+    /// Empty for harnesses that don't use the pack runtime.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
 }
 
 /// Resolves the default install directory (`~/.cairn/skills/cairn/`).
@@ -655,6 +660,7 @@ fn install_claude_code_integration(
         files_created: Vec::new(),
         files_updated: Vec::new(),
         files_skipped: Vec::new(),
+        warnings: Vec::new(),
     };
     let pack_receipt =
         crate::packs::install::install_pack(&crate::packs::install::PackInstallOpts {
@@ -672,6 +678,9 @@ fn install_claude_code_integration(
     receipt
         .files_skipped
         .extend(pack_receipt.files_skipped.iter().cloned());
+    receipt
+        .warnings
+        .extend(pack_receipt.warnings.iter().cloned());
     Ok(receipt)
 }
 
@@ -733,6 +742,7 @@ impl AgentIntegrationReceipt {
             files_created: Vec::new(),
             files_updated: Vec::new(),
             files_skipped: Vec::new(),
+            warnings: Vec::new(),
         }
     }
 }
@@ -856,6 +866,13 @@ pub fn render_agent_human(receipt: &AgentInstallReceipt) -> String {
         }
         for path in &integration.files_skipped {
             lines.push(format!("  {}  [skipped]", path.display()));
+        }
+        if !integration.warnings.is_empty() {
+            lines.push(String::new());
+            lines.push("Warnings:".to_owned());
+            for warn in &integration.warnings {
+                lines.push(format!("  - {warn}"));
+            }
         }
     }
     lines.join("\n")

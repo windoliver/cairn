@@ -192,8 +192,14 @@ fn remove_legacy_commands(
         if !target.exists() {
             continue;
         }
-        // Safety: only remove if the file carries the legacy marker.
-        // A user-authored file with the same name is preserved.
+        // Safety: refuse to read/delete through a symlinked target OR
+        // a symlinked parent (e.g. `.claude` itself is a link). This
+        // mirrors the write-path's containment guarantee — without
+        // it, legacy migration could remove files outside the project
+        // when an attacker plants a symlink during upgrade.
+        reject_symlink(project_dir, &target)?;
+        // Only remove if the file carries the legacy marker. A
+        // user-authored file with the same name is preserved.
         let body = std::fs::read_to_string(&target).unwrap_or_default();
         if !body.contains(LEGACY_PACK_MARKER) {
             receipt.warnings.push(format!(
@@ -486,6 +492,44 @@ mod tests {
         // Every file in the second run should be in skipped (already
         // matching) — no merges either.
         assert!(second.files_merged.is_empty(), "second run merges nothing");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn legacy_migration_refuses_symlinked_commands_dir() {
+        // .claude/commands is a symlink to an outside dir that holds a
+        // file with the legacy marker. Install must abort instead of
+        // deleting through the symlink.
+        let tmp = tempdir().unwrap();
+        let outside = tmp.path().join("attacker-stash");
+        std::fs::create_dir_all(&outside).unwrap();
+        // Plant a legacy-looking file outside the project.
+        std::fs::write(
+            outside.join("forget.md"),
+            "<!-- BEGIN CAIRN AGENT SKILL -->\nold\n",
+        )
+        .unwrap();
+
+        let project = tmp.path().join("project");
+        std::fs::create_dir_all(project.join(".claude")).unwrap();
+        std::os::unix::fs::symlink(&outside, project.join(".claude/commands"))
+            .expect("symlink test setup");
+
+        let err = install_pack(&PackInstallOpts {
+            harness: Harness::ClaudeCode,
+            project_dir: project.clone(),
+            force: false,
+        })
+        .expect_err("legacy migration must abort on symlinked commands dir");
+        assert!(
+            matches!(err, PackError::MergeConflict { .. }),
+            "got {err:?}"
+        );
+        // The outside legacy file must still exist (not deleted).
+        assert!(
+            outside.join("forget.md").exists(),
+            "outside legacy file must not be removed via symlink"
+        );
     }
 
     #[test]
