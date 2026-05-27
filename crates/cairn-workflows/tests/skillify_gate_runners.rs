@@ -268,6 +268,42 @@ async fn check_resolvable_passes_no_conflicts() {
     assert_eq!(result.status, SkillifyGateStatus::Passed);
 }
 
+#[tokio::test]
+async fn check_resolvable_fails_candidate_missing_graph_dependency() {
+    let temp = TempDir::new().unwrap();
+    let mut a = authored("deploy-hotfix");
+    a.skill_markdown = concat!(
+        "---\n",
+        "name: deploy-hotfix\n",
+        "lane: deploy.hotfix\n",
+        "triggers:\n",
+        "  - deploy hotfix\n",
+        "uses: scripts/deploy-hotfix.sh\n",
+        "files_to: wiki/summaries/\n",
+        "requires: [\"cap.missing\"]\n",
+        "provides: [\"cap.deploy\"]\n",
+        "---\n",
+        "Run the script.\n",
+    )
+    .to_owned();
+    let b = bundle("deploy-hotfix");
+    let ctx = GateRunContext {
+        vault_root: temp.path(),
+        candidate_id: "skc_test",
+        candidate_dir: temp.path().to_path_buf(),
+        bundle: &b,
+        authored: &a,
+        llm: None,
+        snapshot: &empty_snapshot(),
+    };
+    let result = CheckResolvableAndDryRunner.run(&ctx).await;
+    assert_eq!(result.status, SkillifyGateStatus::Failed);
+    assert!(
+        result.message.unwrap_or_default().contains("cap.missing"),
+        "missing dependency should be reported"
+    );
+}
+
 // -- UnitTestRunner --
 
 #[tokio::test]

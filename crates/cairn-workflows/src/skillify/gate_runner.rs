@@ -10,6 +10,7 @@ use cairn_core::pipeline::skillify::{
 };
 
 use super::materialize::AuthoredSkillBundle;
+use super::snapshot::parse_skill_graph_metadata;
 
 /// Context passed to each gate runner.
 pub struct GateRunContext<'a> {
@@ -1109,6 +1110,7 @@ impl GateRunner for CheckResolvableAndDryRunner {
             .and_then(serde_json::Value::as_str)
             .map(str::to_owned);
 
+        let graph = parse_skill_graph_metadata(&ctx.authored.skill_markdown);
         let candidate_skill = SkillLintSkill {
             skill_id: ctx.candidate_id.to_owned(),
             lane: ctx.authored.lane.clone(),
@@ -1119,9 +1121,9 @@ impl GateRunner for CheckResolvableAndDryRunner {
             gate_report_passed: true,
             rollback_version_count: 1,
             existing_paths: vec![format!("bundle/scripts/{}.sh", ctx.authored.slug)],
-            requires: vec![],
-            provides: vec![],
-            conflicts: vec![],
+            requires: graph.requires,
+            provides: graph.provides,
+            conflicts: graph.conflicts,
         };
 
         let mut merged = ctx.snapshot.clone();

@@ -16,6 +16,30 @@ use cairn_core::pipeline::skillify::{
     SkillArtifactKind, SkillLintSkill, SkillLintSnapshot, SkillifyGateReport, SkillifyGateStatus,
 };
 
+/// Top-level skill graph metadata parsed from skill Markdown frontmatter.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct SkillGraphMetadata {
+    /// Capabilities this skill needs.
+    pub requires: Vec<String>,
+    /// Capabilities this skill provides.
+    pub provides: Vec<String>,
+    /// Capabilities this skill conflicts with.
+    pub conflicts: Vec<String>,
+}
+
+/// Parse top-level `requires` / `provides` / `conflicts` frontmatter.
+#[must_use]
+pub(crate) fn parse_skill_graph_metadata(body: &str) -> SkillGraphMetadata {
+    let Some(fm) = frontmatter(body) else {
+        return SkillGraphMetadata::default();
+    };
+    SkillGraphMetadata {
+        requires: inline_or_list(fm, "requires"),
+        provides: inline_or_list(fm, "provides"),
+        conflicts: inline_or_list(fm, "conflicts"),
+    }
+}
+
 /// Build a [`SkillLintSnapshot`] from the vault filesystem.
 ///
 /// If `exclude_candidate_id` is `Some`, that candidate's entry is omitted from

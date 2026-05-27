@@ -475,14 +475,25 @@ async fn load_hot_bodies(
                 if remaining == 0 {
                     String::new()
                 } else {
-                    let mut records =
+                    let records =
                         load_records_for_kinds(store, &[MemoryKind::Playbook], auth, None, 16)
                             .await?
                             .records;
-                    records.sort_by(|a, b| b.updated_at.as_str().cmp(a.updated_at.as_str()));
-                    records.truncate(1);
-                    loaded_records.extend(records.iter().map(LoadedRecordTrace::from));
-                    render_records_section("Active Playbook", &records, remaining)
+                    let auth_vis = effective_explain_visibility(auth);
+                    let segment = select_active_playbook_segment(
+                        &records,
+                        auth.scope.clone(),
+                        &auth_vis,
+                        remaining,
+                    );
+                    loaded_records.extend(records.iter().filter_map(|record| {
+                        segment
+                            .included
+                            .iter()
+                            .any(|trace| trace.record_id == record.id)
+                            .then(|| LoadedRecordTrace::from(record))
+                    }));
+                    segment.body
                 }
             }
             HotMemoryRecipeStep::RecentUserSignal => {
@@ -994,6 +1005,43 @@ fn render_records_section(title: &str, records: &[MemoryRecord], budget: u64) ->
         push_capped(&mut out, "\n", budget);
     }
     out
+}
+
+fn select_active_playbook_segment(
+    records: &[MemoryRecord],
+    scope: ScopeTuple,
+    authorized_visibility: &[MemoryVisibility],
+    budget: u64,
+) -> cairn_core::verbs::assemble_hot::LoadedSegment {
+    let playbook_refs: Vec<&MemoryRecord> = records.iter().collect();
+    let inputs = cairn_core::verbs::assemble_hot::HotMemoryInputs {
+        purpose_md: "",
+        index_md: "",
+        pinned_candidates: &[],
+        project_candidates: &[],
+        playbook_candidates: &playbook_refs,
+        rolling_summary_candidates: &[],
+        user_signal_candidates: &[],
+        now: current_hot_memory_timestamp(),
+        scope,
+        authorized_visibility,
+        include_debug: false,
+    };
+    cairn_core::verbs::assemble_hot::sources::playbook::select_with_budget(&inputs, Some(budget))
+}
+
+fn current_hot_memory_timestamp() -> cairn_core::domain::Rfc3339Timestamp {
+    let now_secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    #[allow(
+        clippy::cast_possible_wrap,
+        reason = "unix seconds fit in i64 for all practical dates"
+    )]
+    let secs_i64 = now_secs as i64;
+    cairn_core::domain::Rfc3339Timestamp::from_unix_secs(secs_i64).unwrap_or_else(|_| {
+        cairn_core::domain::Rfc3339Timestamp::parse("1970-01-01T00:00:00Z").expect("epoch literal")
+    })
 }
 
 async fn load_trace_canvas_section(

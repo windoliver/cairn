@@ -1211,7 +1211,7 @@ async fn load_hot_bodies_for_mcp(
                 render_records_section("Project Memory", &records, remaining)
             }
             cairn_core::config::HotMemoryRecipeStep::ActivePlaybook => {
-                let mut records = load_records_for_kinds(
+                let records = load_records_for_kinds(
                     store,
                     allowed_scopes,
                     &[MemoryKind::Playbook],
@@ -1219,9 +1219,7 @@ async fn load_hot_bodies_for_mcp(
                     16,
                 )
                 .await?;
-                records.sort_by(|a, b| b.updated_at.as_str().cmp(a.updated_at.as_str()));
-                records.truncate(1);
-                render_records_section("Active Playbook", &records, remaining)
+                select_active_playbook_segment(&records, remaining).body
             }
             cairn_core::config::HotMemoryRecipeStep::RecentUserSignal => {
                 let mut records = load_records_for_kinds(
@@ -1467,6 +1465,32 @@ fn render_records_section(title: &str, records: &[MemoryRecord], budget: u64) ->
         push_capped(&mut out, "\n", budget);
     }
     out
+}
+
+fn select_active_playbook_segment(
+    records: &[MemoryRecord],
+    budget: u64,
+) -> cairn_core::verbs::assemble_hot::LoadedSegment {
+    let playbook_refs: Vec<&MemoryRecord> = records.iter().collect();
+    let authorized_visibility = [
+        MemoryVisibility::Private,
+        MemoryVisibility::Session,
+        MemoryVisibility::Project,
+    ];
+    let inputs = cairn_core::verbs::assemble_hot::HotMemoryInputs {
+        purpose_md: "",
+        index_md: "",
+        pinned_candidates: &[],
+        project_candidates: &[],
+        playbook_candidates: &playbook_refs,
+        rolling_summary_candidates: &[],
+        user_signal_candidates: &[],
+        now: now_timestamp(),
+        scope: ScopeTuple::default(),
+        authorized_visibility: &authorized_visibility,
+        include_debug: false,
+    };
+    cairn_core::verbs::assemble_hot::sources::playbook::select_with_budget(&inputs, Some(budget))
 }
 
 fn push_capped(out: &mut String, text: &str, budget: u64) {
