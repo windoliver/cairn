@@ -380,6 +380,37 @@ fn skill_subcommand() -> clap::Command {
                         .required(true),
                 ),
         )
+        .subcommand(
+            clap::Command::new("new")
+                .about("Create a starter cairn-pack/v1 skill-pack scaffold")
+                .arg(
+                    clap::Arg::new("name")
+                        .value_name("NAME")
+                        .required(true)
+                        .help("Safe pack name for the new skill pack"),
+                )
+                .arg(
+                    clap::Arg::new("harness")
+                        .long("harness")
+                        .value_name("HARNESS")
+                        .required(true)
+                        .value_parser(clap::builder::EnumValueParser::<skill::Harness>::new())
+                        .help("Target scaffold harness (claude-code, codex, gemini)"),
+                )
+                .arg(
+                    clap::Arg::new("output")
+                        .long("output")
+                        .value_name("DIR")
+                        .value_parser(clap::value_parser!(std::path::PathBuf))
+                        .help("Directory to write the scaffold (default: ./NAME)"),
+                )
+                .arg(
+                    clap::Arg::new("json")
+                        .long("json")
+                        .action(clap::ArgAction::SetTrue)
+                        .help("Emit JSON receipt instead of human-readable output"),
+                ),
+        )
 }
 
 fn setup_subcommand() -> clap::Command {

@@ -149,6 +149,7 @@ fn subcommand_needs_vault_guard(subcommand: Option<(&str, &ArgMatches)>) -> bool
             | "screen"
             | "sensor"
             | "repair"
+            | "skill"
             | "skillpack"
     )
 }
@@ -1210,6 +1211,7 @@ fn run_bootstrap(matches: &ArgMatches) -> ExitCode {
 fn run_skill(matches: &ArgMatches) -> ExitCode {
     match matches.subcommand() {
         Some(("install", sub)) => run_skill_install(sub),
+        Some(("new", sub)) => run_skill_new(sub),
         _ => unreachable!(
             "clap subcommand_required(true) on skill ensures a subcommand is always present"
         ),
@@ -1660,6 +1662,63 @@ fn run_skill_install(matches: &ArgMatches) -> ExitCode {
             eprintln!("cairn skill install: {e:#}");
             ExitCode::from(74) // EX_IOERR
         }
+    }
+}
+
+fn run_skill_new(matches: &ArgMatches) -> ExitCode {
+    let name = matches
+        .get_one::<String>("name")
+        .expect("invariant: skill new requires NAME")
+        .clone();
+    let skill_harness = matches
+        .get_one::<cairn_cli::skill::Harness>("harness")
+        .expect("invariant: skill new requires --harness");
+    let Some(harness) = cairn_cli::skill::pack_harness_from_skill_harness(skill_harness) else {
+        eprintln!(
+            "cairn skill new: unsupported scaffold harness `{}`",
+            skill_harness_name(skill_harness)
+        );
+        return ExitCode::from(64);
+    };
+    let output_dir = matches
+        .get_one::<PathBuf>("output")
+        .cloned()
+        .unwrap_or_else(|| PathBuf::from(&name));
+    let opts = cairn_cli::packs::template::ScaffoldOpts {
+        name,
+        harness,
+        output_dir,
+    };
+
+    match cairn_cli::skill::scaffold(&opts) {
+        Ok(receipt) => {
+            if matches.get_flag("json") {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&receipt)
+                        .expect("invariant: ScaffoldReceipt is always serializable")
+                );
+            } else {
+                println!("{}", cairn_cli::skill::render_scaffold_human(&receipt));
+            }
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("cairn skill new: {e:#}");
+            ExitCode::from(74)
+        }
+    }
+}
+
+fn skill_harness_name(harness: &cairn_cli::skill::Harness) -> &'static str {
+    match harness {
+        cairn_cli::skill::Harness::ClaudeCode => "claude-code",
+        cairn_cli::skill::Harness::Codex => "codex",
+        cairn_cli::skill::Harness::Gemini => "gemini",
+        cairn_cli::skill::Harness::Opencode => "opencode",
+        cairn_cli::skill::Harness::Cursor => "cursor",
+        cairn_cli::skill::Harness::Custom => "custom",
+        _ => "unknown",
     }
 }
 

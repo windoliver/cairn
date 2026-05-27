@@ -1,9 +1,13 @@
 //! `cairn skill install` — writes the Cairn skill bundle to the harness skill
 //! directory (§8.0.a-bis, §18.d).
 
+use crate::packs::manifest::Harness as PackHarness;
+use crate::packs::template::{ScaffoldError, ScaffoldOpts, ScaffoldReceipt};
 use anyhow::{Context as _, Result};
 use clap::ValueEnum;
 use std::path::PathBuf;
+
+pub use crate::packs::template::ScaffoldReceipt as SkillScaffoldReceipt;
 
 /// Supported harnesses for `cairn skill install`.
 #[non_exhaustive]
@@ -214,6 +218,36 @@ pub struct AgentIntegrationReceipt {
     /// Empty for harnesses that don't use the pack runtime.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<String>,
+}
+
+/// Render a new cairn-pack/v1 skill-pack scaffold.
+///
+/// # Errors
+/// Returns [`ScaffoldError`] when the requested pack name, output path, template,
+/// filesystem write, or rendered pack conformance check fails.
+pub fn scaffold(opts: &ScaffoldOpts) -> Result<ScaffoldReceipt, ScaffoldError> {
+    crate::packs::template::render_scaffold(opts)
+}
+
+/// Render human output for a completed `cairn skill new` scaffold.
+#[must_use]
+pub fn render_scaffold_human(receipt: &ScaffoldReceipt) -> String {
+    format!(
+        "cairn skill new: scaffold written to {}\n  verify: {}",
+        receipt.output_dir.display(),
+        receipt.verify_command
+    )
+}
+
+/// Map the broader skill harness enum to skill-pack scaffold harnesses.
+#[must_use]
+pub fn pack_harness_from_skill_harness(harness: &Harness) -> Option<PackHarness> {
+    match harness {
+        Harness::ClaudeCode => Some(PackHarness::ClaudeCode),
+        Harness::Codex => Some(PackHarness::Codex),
+        Harness::Gemini => Some(PackHarness::Gemini),
+        Harness::Opencode | Harness::Cursor | Harness::Custom => None,
+    }
 }
 
 /// Resolves the default install directory (`~/.cairn/skills/cairn/`).
