@@ -5,8 +5,8 @@ use std::time::Instant;
 
 use cairn_core::contract::llm_provider::LLMProvider;
 use cairn_core::pipeline::skillify::{
-    SkillArtifactBundle, SkillArtifactKind, SkillLintSkill, SkillLintSnapshot, SkillifyGate,
-    SkillifyGateStatus,
+    SkillArtifactBundle, SkillArtifactKind, SkillGraphResolver, SkillLintSkill, SkillLintSnapshot,
+    SkillifyGate, SkillifyGateStatus,
 };
 
 use super::materialize::AuthoredSkillBundle;
@@ -1134,14 +1134,19 @@ impl GateRunner for CheckResolvableAndDryRunner {
             .iter()
             .filter(|issue| issue.skill_id == ctx.candidate_id)
             .collect();
+        let closure = SkillGraphResolver::new(&merged).resolve_prerequisites(ctx.candidate_id);
 
-        if candidate_issues.is_empty() {
+        let mut messages: Vec<String> = candidate_issues
+            .iter()
+            .map(|issue| issue.message.clone())
+            .chain(closure.issues.into_iter().map(|issue| issue.message))
+            .collect();
+        messages.sort();
+        messages.dedup();
+
+        if messages.is_empty() {
             GateRunResult::passed(self.artifact_kind(), timer.elapsed_ms())
         } else {
-            let messages: Vec<String> = candidate_issues
-                .iter()
-                .map(|issue| issue.message.clone())
-                .collect();
             GateRunResult::failed(
                 self.artifact_kind(),
                 format!("lint issues: {}", messages.join("; ")),

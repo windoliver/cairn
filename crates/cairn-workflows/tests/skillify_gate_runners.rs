@@ -304,6 +304,61 @@ async fn check_resolvable_fails_candidate_missing_graph_dependency() {
     );
 }
 
+#[tokio::test]
+async fn check_resolvable_fails_transitive_graph_issue_in_candidate_closure() {
+    let temp = TempDir::new().unwrap();
+    let mut a = authored("deploy-hotfix");
+    a.skill_markdown = concat!(
+        "---\n",
+        "name: deploy-hotfix\n",
+        "lane: deploy.hotfix\n",
+        "triggers:\n",
+        "  - deploy hotfix\n",
+        "uses: scripts/deploy-hotfix.sh\n",
+        "files_to: wiki/summaries/\n",
+        "requires: [\"cap.preflight\"]\n",
+        "provides: [\"cap.deploy\"]\n",
+        "---\n",
+        "Run the script.\n",
+    )
+    .to_owned();
+    let b = bundle("deploy-hotfix");
+    let snapshot = SkillLintSnapshot {
+        skills: vec![SkillLintSkill {
+            skill_id: "preflight".to_owned(),
+            lane: "deploy.preflight".to_owned(),
+            path: "skills/preflight.md".to_owned(),
+            uses: None,
+            resolver_triggers: vec!["run preflight".to_owned()],
+            files_to: Some("wiki/preflight/".to_owned()),
+            gate_report_passed: true,
+            rollback_version_count: 1,
+            existing_paths: vec![],
+            requires: vec!["cap.missing".to_owned()],
+            provides: vec!["cap.preflight".to_owned()],
+            conflicts: vec![],
+        }],
+    };
+    let ctx = GateRunContext {
+        vault_root: temp.path(),
+        candidate_id: "skc_test",
+        candidate_dir: temp.path().to_path_buf(),
+        bundle: &b,
+        authored: &a,
+        llm: None,
+        snapshot: &snapshot,
+    };
+
+    let result = CheckResolvableAndDryRunner.run(&ctx).await;
+
+    assert_eq!(result.status, SkillifyGateStatus::Failed);
+    let message = result.message.unwrap_or_default();
+    assert!(
+        message.contains("cap.missing") && message.contains("preflight"),
+        "transitive prerequisite graph issue should be reported: {message}"
+    );
+}
+
 // -- UnitTestRunner --
 
 #[tokio::test]
