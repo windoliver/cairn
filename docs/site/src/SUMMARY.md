@@ -82,3 +82,4 @@
 - [CI](maintainers/ci.md)
 - [Beta Readiness](maintainers/beta-readiness.md)
 - [MCP Semver Policy](maintainers/mcp-semver-policy.md)
+- [v1.0 Production Readiness](maintainers/v1-production-readiness.md)

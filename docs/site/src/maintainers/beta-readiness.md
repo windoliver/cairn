@@ -14,6 +14,10 @@ scripts/beta-readiness.sh --quick
 scripts/beta-readiness.sh --full
 ```
 
+For v1.0 GA, beta readiness is a prerequisite, not the final sign-off. Use the
+[v1.0 production readiness](v1-production-readiness.md) runbook for the
+three-harness acceptance matrix and release evidence block.
+
 The script honors `CAIRN_BIN`, `CARGO_TARGET_DIR`, and `RUST_LOG`. Gates 9-15
 are manual and listed at the end of the script output.
 
