@@ -183,15 +183,16 @@ fn install_hooks(
         }
         Harness::Codex | Harness::Gemini => {
             let bytes = source.read_file("hooks/hooks.json")?;
+            let pack_hooks: Value = serde_json::from_slice(&bytes)?;
             let target = opts.project_dir.join(harness_hook_file(manifest.harness));
-            write_pack_file(
-                &opts.project_dir,
-                &target,
-                &bytes,
-                opts.force,
-                &manifest.pack_id,
-                receipt,
-            )
+            let existing_hooks = read_optional_json(&target)?;
+            let pack_id_at_version = format!("{}@{}", manifest.pack_id, manifest.version);
+            let merged_hooks = crate::packs::merge::merge_settings_json(
+                existing_hooks,
+                &pack_hooks,
+                &pack_id_at_version,
+            )?;
+            write_json_pretty(&opts.project_dir, &target, &merged_hooks, receipt)
         }
     }
 }
@@ -903,6 +904,66 @@ Other pack command body.\n\
                 .any(|w| w.contains("cairn-context.md")),
             "preservation warning must mention command path; got {:?}",
             receipt.warnings
+        );
+    }
+
+    #[test]
+    fn external_pack_updates_same_pack_hooks_and_preserves_user_hooks() {
+        let tmp = tempdir().unwrap();
+        let pack_dir = tmp.path().join("pack");
+        let project_dir = tmp.path().join("project");
+        std::fs::create_dir_all(&pack_dir).unwrap();
+        std::fs::create_dir_all(&project_dir).unwrap();
+        write_sample_codex_pack(
+            &pack_dir,
+            "# Context Loader\n\n<!-- @pack: sample-pack -->\nFresh subagent body.\n",
+        );
+
+        install_sample_codex_pack(&pack_dir, &project_dir).expect("first install ok");
+        let target = project_dir.join(".codex/hooks.json");
+        let mut installed: Value =
+            serde_json::from_str(&std::fs::read_to_string(&target).unwrap()).unwrap();
+        installed["hooks"]["SessionStart"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({"command": "user hook command"}));
+        std::fs::write(
+            &target,
+            format!("{}\n", serde_json::to_string_pretty(&installed).unwrap()),
+        )
+        .unwrap();
+        std::fs::write(
+            pack_dir.join("hooks/hooks.json"),
+            r#"{"hooks":{"SessionStart":[{"command":"cairn status --updated --json"}]}}"#,
+        )
+        .expect("update pack hooks");
+
+        let receipt = install_sample_codex_pack(&pack_dir, &project_dir).expect("reinstall ok");
+
+        let after = std::fs::read_to_string(&target).unwrap();
+        assert!(
+            after.contains("cairn status --updated --json"),
+            "same-pack hook entry must update; got {after}"
+        );
+        assert!(
+            !after.contains("cairn status --json"),
+            "old same-pack hook entry must be replaced; got {after}"
+        );
+        assert!(
+            after.contains("user hook command"),
+            "user hook entry must be preserved; got {after}"
+        );
+        assert!(
+            after.contains("\"_pack\": \"sample-pack@1.0.0\""),
+            "pack hook entry must be tagged with ownership metadata; got {after}"
+        );
+        assert!(
+            receipt
+                .files_merged
+                .iter()
+                .any(|p| p.ends_with("hooks.json")),
+            "updated hook file must be recorded as merged; got {:?}",
+            receipt
         );
     }
 
