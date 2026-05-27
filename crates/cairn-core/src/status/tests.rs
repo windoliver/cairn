@@ -675,6 +675,41 @@ fn admin_capability_absent_while_dark() {
     );
 }
 
+/// AC#1 extended truth-table: verifies all four runtime-flag combinations
+/// behave correctly relative to the `ADMIN_EXTENSION_WIRED` constant.
+///
+/// When the constant is `false` (phase 1–5): all four combos yield absent.
+/// When the constant is `true` (phase 6.2+): only `(config=true, has_op=true)`
+/// yields present; the other three remain absent. The test is written to be
+/// valid in both worlds so it survives the flip in Task 6.2 without editing.
+#[test]
+fn admin_capability_truth_table() {
+    let cases: &[(bool, bool)] = &[(false, false), (false, true), (true, false), (true, true)];
+
+    for &(config_enabled, has_operator) in cases {
+        let gates = CapabilityGates {
+            admin_runtime_ready: config_enabled && has_operator,
+            ..gates(true, false, None)
+        };
+        let caps = advertise(&gates);
+        let advertised = caps
+            .iter()
+            .any(|c| matches!(c, Capabilities::CairnMcpV1ExtensionAdmin));
+
+        // The capability is present iff all three gates hold simultaneously.
+        let expected = wiring::ADMIN_EXTENSION_WIRED && config_enabled && has_operator;
+        assert_eq!(
+            advertised,
+            expected,
+            "admin capability advertisement mismatch: wired={} config={} has_op={} → \
+             expected={expected} got={advertised}",
+            wiring::ADMIN_EXTENSION_WIRED,
+            config_enabled,
+            has_operator,
+        );
+    }
+}
+
 #[test]
 fn federation_extension_ready_is_true() {
     assert!(crate::status::wiring::federation_extension_ready());
