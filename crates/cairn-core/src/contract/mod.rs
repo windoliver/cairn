@@ -28,6 +28,7 @@
 
 pub mod admin_state;
 pub mod agent_provider;
+pub mod backfill_spawner;
 pub mod conformance;
 pub mod connector_consent;
 pub mod consent_journal;
@@ -63,6 +64,7 @@ pub use registry::{PluginError, PluginName, PluginRegistry};
 pub use version::{ContractVersion, VersionRange};
 
 pub use admin_state::{AdminStateStore, ConnectorStateRow};
+pub use backfill_spawner::{BackfillSpec, BackfillSpawner};
 pub use agent_provider::{
     AgentBudgetConsumed, AgentCostBudget, AgentIdentity, AgentOutput, AgentOutputSchema,
     AgentProvider, AgentProviderCapabilities, AgentProviderError, AgentProviderPlugin, AgentRun,
