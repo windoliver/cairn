@@ -28,7 +28,9 @@ use cairn_connectors_core::event::{
 use cairn_connectors_core::fixture::AcceptAllConsent;
 use cairn_connectors_core::manifest::ConnectorManifest;
 use cairn_connectors_core::webhook::WebhookRequest;
-use cairn_connectors_core::{ConnectorError, ConnectorRegistry, InMemoryCredentialStore, PipelineEmit};
+use cairn_connectors_core::{
+    ConnectorError, ConnectorRegistry, InMemoryCredentialStore, PipelineEmit,
+};
 use cairn_core::contract::admin_state::{AdminStateStore, ConnectorStateRow};
 use cairn_core::contract::memory_store::StoreError;
 use cairn_core::contract::version::{ContractVersion, VersionRange};

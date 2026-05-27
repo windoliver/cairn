@@ -26,7 +26,9 @@ use cairn_connectors_core::event::{
 use cairn_connectors_core::fixture::AcceptAllConsent;
 use cairn_connectors_core::manifest::ConnectorManifest;
 use cairn_connectors_core::webhook::WebhookRequest;
-use cairn_connectors_core::{ConnectorError, ConnectorRegistry, InMemoryCredentialStore, PipelineEmit};
+use cairn_connectors_core::{
+    ConnectorError, ConnectorRegistry, InMemoryCredentialStore, PipelineEmit,
+};
 use cairn_core::contract::admin_state::{AdminStateStore, ConnectorStateRow};
 use cairn_core::contract::memory_store::StoreError;
 use cairn_core::contract::version::{ContractVersion, VersionRange};
@@ -345,7 +347,10 @@ async fn disable_verb_stops_subsequent_poll_now() {
         .get_connector_state("disable-race")
         .expect("get_connector_state must not error")
         .expect("row must exist after disable");
-    assert!(!row.enabled, "connector must be marked disabled in the store");
+    assert!(
+        !row.enabled,
+        "connector must be marked disabled in the store"
+    );
     assert_eq!(
         row.reason.as_deref(),
         Some("AC#3 integration test"),
@@ -391,8 +396,7 @@ async fn enabled_row_still_allows_poll_now() {
         .build()
         .with_admin_state(admin.clone() as Arc<dyn AdminStateStore>);
 
-    reg.register(DisableRaceConnector::new())
-        .expect("register");
+    reg.register(DisableRaceConnector::new()).expect("register");
     reg.enable("disable-race", disable_race_grant())
         .await
         .expect("enable");
