@@ -30,6 +30,8 @@ any harness row below is missing evidence.
 Run the matrix from a clean checkout at the release SHA:
 
 ```bash
+set -euo pipefail
+
 SHA=$(git rev-parse HEAD)
 ACCEPT_ROOT=$(mktemp -d -t cairn-v1-acceptance-XXXXXX)
 export SHA ACCEPT_ROOT
@@ -44,6 +46,10 @@ export CAIRN_BIN="$PWD/target/release/cairn"
 
 Keep the whole `ACCEPT_ROOT` directory until the release issue has the sign-off
 block. It is the local evidence bundle for the release owner.
+
+Keep running the remaining snippets in the same shell so `pipefail` stays
+enabled; the evidence commands intentionally use `tee`, and failed gates must
+not be masked by successful log writes.
 
 ## Automated Gates
 
