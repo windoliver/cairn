@@ -168,8 +168,12 @@ fn install_hook_payloads(
         std::str::from_utf8(pack_settings_bytes).map_err(|e| PackError::ManifestInvalid {
             reason: format!("hooks/settings.json is not UTF-8: {e}"),
         })?;
-    let pack_settings: Value =
-        serde_json::from_str(&pack_settings_text.replace("{{PROJECT_DIR}}", project_dir_token))?;
+    let project_dir_shell = shell_single_quote(project_dir_token);
+    let pack_settings: Value = serde_json::from_str(
+        &pack_settings_text
+            .replace("{{PROJECT_DIR_SHELL}}", &project_dir_shell)
+            .replace("{{PROJECT_DIR}}", project_dir_token),
+    )?;
     let settings_target = project_dir.join(".claude/settings.json");
     let existing_settings = read_optional_json(&settings_target)?;
     let merged_settings = crate::packs::merge::merge_settings_json(
@@ -184,8 +188,14 @@ fn install_hook_payloads(
             std::str::from_utf8(mcp_file.contents()).map_err(|e| PackError::ManifestInvalid {
                 reason: format!("hooks/.mcp.json is not UTF-8: {e}"),
             })?;
-        let pack_mcp: Value =
-            serde_json::from_str(&mcp_text.replace("{{PROJECT_DIR}}", project_dir_token))?;
+        let pack_mcp: Value = serde_json::from_str(
+            &mcp_text
+                .replace(
+                    "{{PROJECT_DIR_SHELL}}",
+                    &shell_single_quote(project_dir_token),
+                )
+                .replace("{{PROJECT_DIR}}", project_dir_token),
+        )?;
         let mcp_target = project_dir.join(".mcp.json");
         let existing_mcp = read_optional_json(&mcp_target)?;
         let merged_mcp = merge_mcp_json(
@@ -198,6 +208,29 @@ fn install_hook_payloads(
         write_json_pretty(project_dir, &mcp_target, &merged_mcp, receipt)?;
     }
     Ok(())
+}
+
+/// Shell-quote a path for safe inclusion in a `sh -c`-executed
+/// command string. POSIX shell treats single quotes as literal
+/// delimiters with no escaping inside; the only way to embed a
+/// single quote is to close the quoted string, escape with `\'`,
+/// and re-open. So `O'Connor` becomes `'O'\''Connor'`. Backslashes
+/// are also escaped for the JSON string layer.
+fn shell_single_quote(path: &str) -> String {
+    let mut out = String::with_capacity(path.len() + 2);
+    out.push('\'');
+    for ch in path.chars() {
+        if ch == '\'' {
+            // Close quote, escape literal single quote, reopen.
+            out.push_str("'\\''");
+        } else {
+            out.push(ch);
+        }
+    }
+    out.push('\'');
+    // Escape backslashes for JSON layer (the result is embedded into
+    // a JSON string literal via str::replace).
+    out.replace('\\', "\\\\")
 }
 
 /// Render `project_dir` for embedding into JSON hook/MCP command
@@ -710,9 +743,43 @@ Confirm the user wants to forget the named Cairn record, then run:
         let session_start_cmd = settings["hooks"]["SessionStart"][0]["hooks"][0]["command"]
             .as_str()
             .unwrap();
+        // Hook subcommand uses --vault-path, NOT top-level --vault. The
+        // path is shell-single-quoted for safe execution under `sh -c`.
         assert!(
-            session_start_cmd.starts_with(&format!("cairn --vault {} hook ", canonical.display())),
-            "hook command must include canonical --vault; got `{session_start_cmd}`"
+            session_start_cmd.starts_with("cairn hook SessionStart --vault-path "),
+            "hook command must invoke `cairn hook <Event> --vault-path …`; got `{session_start_cmd}`"
+        );
+        assert!(
+            session_start_cmd.contains(&format!("'{}'", canonical.display())),
+            "hook --vault-path argument must be shell-single-quoted canonical project dir; got `{session_start_cmd}`"
+        );
+    }
+
+    #[test]
+    fn install_shell_quotes_project_dir_with_spaces() {
+        // Project path containing spaces must round-trip through the
+        // hook command intact, surrounded by single quotes.
+        let tmp = tempdir().unwrap();
+        let project = tmp.path().join("dir with spaces");
+        std::fs::create_dir_all(&project).unwrap();
+        install_pack(&PackInstallOpts {
+            harness: Harness::ClaudeCode,
+            project_dir: project.clone(),
+            force: false,
+        })
+        .expect("install ok");
+
+        let settings: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(project.join(".claude/settings.json")).unwrap(),
+        )
+        .unwrap();
+        let cmd = settings["hooks"]["SessionStart"][0]["hooks"][0]["command"]
+            .as_str()
+            .unwrap();
+        let canonical = std::fs::canonicalize(&project).unwrap();
+        assert!(
+            cmd.contains(&format!("'{}'", canonical.display())),
+            "spaces in project path must be quoted; got `{cmd}`"
         );
     }
 

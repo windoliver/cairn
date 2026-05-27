@@ -23,14 +23,20 @@ const PACK_MARKER_KEY: &str = "_pack";
 /// trade for migration completeness.
 fn is_legacy_pre_pack_hook(entry: &Value) -> bool {
     const LEGACY_SIGNATURE: &str = "cairn ingest --folder . --mode keyword";
-    let Some(hooks) = entry.get("hooks").and_then(Value::as_array) else {
-        return false;
-    };
-    hooks.iter().any(|h| {
-        h.get("command")
-            .and_then(Value::as_str)
-            .is_some_and(|cmd| cmd.contains(LEGACY_SIGNATURE))
-    })
+    let matches_cmd =
+        |v: &Value| -> bool { v.as_str().is_some_and(|s| s.contains(LEGACY_SIGNATURE)) };
+    // Pre-pack inline installer wrote the hook as a direct
+    // `{"command": "cairn ingest ..."}` object.
+    if matches_cmd(entry.get("command").unwrap_or(&Value::Null)) {
+        return true;
+    }
+    // Newer Claude Code shape nests entries under `hooks[]`.
+    if let Some(hooks) = entry.get("hooks").and_then(Value::as_array) {
+        return hooks
+            .iter()
+            .any(|h| matches_cmd(h.get("command").unwrap_or(&Value::Null)));
+    }
+    false
 }
 
 /// Return `true` iff the `_pack` marker on `entry` belongs to the same
@@ -245,6 +251,30 @@ mod tests {
         let twice =
             merge_settings_json(once.clone(), &pack_payload(), "cairn-claude-code@0.1.0").unwrap();
         assert_eq!(once, twice);
+    }
+
+    #[test]
+    fn merge_removes_legacy_pre_pack_session_start_hook_direct_shape() {
+        // Pre-pack inline installer (main HEAD prior to #182) actually
+        // wrote `{"command": "..."}` directly into SessionStart[],
+        // NOT nested under hooks[]. Detector must match both shapes.
+        let legacy = serde_json::json!({
+            "hooks": {
+                "SessionStart": [
+                    {
+                        "command": "cairn ingest --folder . --mode keyword >/tmp/cairn-session-start.log 2>&1 &"
+                    }
+                ]
+            }
+        });
+        let out = merge_settings_json(legacy, &pack_payload(), "cairn-claude-code@0.1.0")
+            .expect("merge ok");
+        let arr = out["hooks"]["SessionStart"].as_array().unwrap();
+        assert_eq!(
+            arr.len(),
+            1,
+            "legacy direct-command hook must be removed; only pack entry remains"
+        );
     }
 
     #[test]
