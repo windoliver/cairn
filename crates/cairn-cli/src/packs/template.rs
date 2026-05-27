@@ -159,18 +159,24 @@ pub fn render_scaffold(opts: &ScaffoldOpts) -> Result<ScaffoldReceipt, ScaffoldE
         subagent_id: "context-loader".to_string(),
     };
 
-    std::fs::create_dir_all(&opts.output_dir)?;
+    let output_parent = output_parent(&opts.output_dir);
+    std::fs::create_dir_all(&output_parent)?;
+    let staged = tempfile::Builder::new()
+        .prefix(".cairn-scaffold-")
+        .tempdir_in(&output_parent)?;
+    let staged_path = staged.path().to_path_buf();
+
     let mut files_created = Vec::new();
     render_template_dir(
         template_dir,
         Path::new(""),
-        &opts.output_dir,
+        &staged_path,
         &vars,
         &mut files_created,
     )?;
     files_created.sort();
 
-    let source = FsPackSource::new(opts.output_dir.clone());
+    let source = FsPackSource::new(staged_path.clone());
     let outcomes = crate::packs::verify::run_pack_source_conformance(&source);
     let failures = outcomes
         .iter()
@@ -191,6 +197,11 @@ pub fn render_scaffold(opts: &ScaffoldOpts) -> Result<ScaffoldReceipt, ScaffoldE
         }));
     }
 
+    if opts.output_dir.exists() {
+        std::fs::remove_dir(&opts.output_dir)?;
+    }
+    std::fs::rename(&staged_path, &opts.output_dir)?;
+
     Ok(ScaffoldReceipt {
         pack_id: opts.name.clone(),
         harness: harness.to_string(),
@@ -198,7 +209,7 @@ pub fn render_scaffold(opts: &ScaffoldOpts) -> Result<ScaffoldReceipt, ScaffoldE
         files_created,
         verify_command: format!(
             "cairn plugins verify --pack-path {} --strict",
-            opts.output_dir.display()
+            shell_single_quote_path(&opts.output_dir)
         ),
     })
 }
@@ -250,6 +261,19 @@ pub fn is_safe_pack_name(name: &str) -> bool {
 /// Returns an I/O error if the directory cannot be read.
 pub fn is_dir_empty(path: &Path) -> Result<bool, std::io::Error> {
     Ok(std::fs::read_dir(path)?.next().is_none())
+}
+
+fn output_parent(output_dir: &Path) -> PathBuf {
+    output_dir
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."))
+        .to_path_buf()
+}
+
+fn shell_single_quote_path(path: &Path) -> String {
+    let value = path.display().to_string();
+    format!("'{}'", value.replace('\'', "'\\''"))
 }
 
 fn render_template_dir(
@@ -387,9 +411,66 @@ mod tests {
     }
 
     #[test]
-    fn render_scaffold_codex_writes_verifying_pack() {
+    fn render_scaffold_writes_verifying_pack_for_all_harnesses() {
         let tmp = tempfile::tempdir().expect("tempdir");
-        let output_dir = tmp.path().join("sample-pack");
+        for harness in [Harness::ClaudeCode, Harness::Codex, Harness::Gemini] {
+            let output_dir = tmp.path().join(harness_id(harness));
+            let opts = ScaffoldOpts {
+                name: format!("sample-{}", harness_id(harness)),
+                harness,
+                output_dir: output_dir.clone(),
+            };
+
+            let receipt = render_scaffold(&opts).expect("render scaffold");
+
+            assert_eq!(receipt.pack_id, opts.name);
+            assert!(output_dir.join("pack.json").is_file());
+            assert!(output_dir.join(manual_fragment(harness)).is_file());
+            assert!(output_dir.join(".github/workflows/verify.yml").is_file());
+            assert!(output_dir.join("tests/smoke.sh").is_file());
+
+            let source = FsPackSource::new(output_dir.clone());
+            let outcomes = run_pack_source_conformance(&source);
+            assert!(
+                outcomes.iter().all(|outcome| outcome.status.is_ok()),
+                "expected rendered pack to verify for {harness:?}: {outcomes:#?}"
+            );
+
+            let smoke = std::process::Command::new("bash")
+                .arg("tests/smoke.sh")
+                .current_dir(&output_dir)
+                .output()
+                .expect("run smoke");
+            assert!(
+                smoke.status.success(),
+                "smoke failed for {harness:?}: status={:?} stdout={} stderr={}",
+                smoke.status,
+                String::from_utf8_lossy(&smoke.stdout),
+                String::from_utf8_lossy(&smoke.stderr)
+            );
+        }
+    }
+
+    #[test]
+    fn render_scaffold_rejects_invalid_name_without_creating_output() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let output_dir = tmp.path().join("bad output");
+        let opts = ScaffoldOpts {
+            name: "bad name".to_string(),
+            harness: Harness::Codex,
+            output_dir: output_dir.clone(),
+        };
+
+        let err = render_scaffold(&opts).expect_err("invalid name rejected");
+
+        assert!(matches!(err, ScaffoldError::InvalidPackName { .. }));
+        assert!(!output_dir.exists());
+    }
+
+    #[test]
+    fn render_scaffold_quotes_verify_command_path() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let output_dir = tmp.path().join("path with spaces").join("sample-pack");
         let opts = ScaffoldOpts {
             name: "sample-pack".to_string(),
             harness: Harness::Codex,
@@ -398,17 +479,12 @@ mod tests {
 
         let receipt = render_scaffold(&opts).expect("render scaffold");
 
-        assert_eq!(receipt.pack_id, "sample-pack");
-        assert!(output_dir.join("pack.json").is_file());
-        assert!(output_dir.join("AGENTS.md").is_file());
-        assert!(output_dir.join(".github/workflows/verify.yml").is_file());
-        assert!(output_dir.join("tests/smoke.sh").is_file());
-
-        let source = FsPackSource::new(output_dir);
-        let outcomes = run_pack_source_conformance(&source);
-        assert!(
-            outcomes.iter().all(|outcome| outcome.status.is_ok()),
-            "expected rendered pack to verify: {outcomes:#?}"
+        assert_eq!(
+            receipt.verify_command,
+            format!(
+                "cairn plugins verify --pack-path '{}' --strict",
+                output_dir.display()
+            )
         );
     }
 
