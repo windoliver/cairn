@@ -3,7 +3,8 @@
 use std::path::{Path, PathBuf};
 
 use crate::packs::manifest::{Harness, PackError};
-use include_dir::{Dir, include_dir};
+use crate::packs::source::FsPackSource;
+use include_dir::{Dir, DirEntry, include_dir};
 
 /// Embedded `cairn skill new` reference templates.
 pub static PACK_TEMPLATES: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/../../packs/templates");
@@ -120,6 +121,88 @@ pub fn render_tokens(input: &str, vars: &TemplateVars) -> Result<String, Scaffol
     Ok(rendered)
 }
 
+/// Render a complete skill-pack scaffold into `opts.output_dir`.
+///
+/// # Errors
+///
+/// Returns [`ScaffoldError`] if the pack name is unsafe, the output directory
+/// is non-empty, a template is missing or invalid, writing fails, or the
+/// rendered pack fails conformance.
+pub fn render_scaffold(opts: &ScaffoldOpts) -> Result<ScaffoldReceipt, ScaffoldError> {
+    if !is_safe_pack_name(&opts.name) {
+        return Err(ScaffoldError::InvalidPackName {
+            name: opts.name.clone(),
+        });
+    }
+
+    if opts.output_dir.exists() && !is_dir_empty(&opts.output_dir)? {
+        return Err(ScaffoldError::OutputDirNotEmpty {
+            path: opts.output_dir.clone(),
+        });
+    }
+
+    let harness = harness_id(opts.harness);
+    let template_dir =
+        PACK_TEMPLATES
+            .get_dir(harness)
+            .ok_or_else(|| ScaffoldError::TemplateMissing {
+                harness: harness.to_string(),
+                path: harness.to_string(),
+            })?;
+    let vars = TemplateVars {
+        pack_id: opts.name.clone(),
+        display_name: display_name(&opts.name),
+        harness: harness.to_string(),
+        version: "0.1.0".to_string(),
+        manual_fragment: manual_fragment(opts.harness).to_string(),
+        command_id: "cairn-context".to_string(),
+        subagent_id: "context-loader".to_string(),
+    };
+
+    std::fs::create_dir_all(&opts.output_dir)?;
+    let mut files_created = Vec::new();
+    render_template_dir(
+        template_dir,
+        Path::new(""),
+        &opts.output_dir,
+        &vars,
+        &mut files_created,
+    )?;
+    files_created.sort();
+
+    let source = FsPackSource::new(opts.output_dir.clone());
+    let outcomes = crate::packs::verify::run_pack_source_conformance(&source);
+    let failures = outcomes
+        .iter()
+        .filter_map(|outcome| {
+            outcome
+                .status
+                .as_ref()
+                .err()
+                .map(|reason| format!("{}: {reason}", outcome.id))
+        })
+        .collect::<Vec<_>>();
+    if !failures.is_empty() {
+        return Err(ScaffoldError::Pack(PackError::ManifestInvalid {
+            reason: format!(
+                "rendered scaffold failed conformance: {}",
+                failures.join("; ")
+            ),
+        }));
+    }
+
+    Ok(ScaffoldReceipt {
+        pack_id: opts.name.clone(),
+        harness: harness.to_string(),
+        output_dir: opts.output_dir.clone(),
+        files_created,
+        verify_command: format!(
+            "cairn plugins verify --pack-path {} --strict",
+            opts.output_dir.display()
+        ),
+    })
+}
+
 /// Convert a safe pack id into a title-cased display name.
 #[must_use]
 pub fn display_name(pack_id: &str) -> String {
@@ -169,6 +252,75 @@ pub fn is_dir_empty(path: &Path) -> Result<bool, std::io::Error> {
     Ok(std::fs::read_dir(path)?.next().is_none())
 }
 
+fn render_template_dir(
+    template_dir: &Dir<'_>,
+    relative_dir: &Path,
+    output_dir: &Path,
+    vars: &TemplateVars,
+    files_created: &mut Vec<PathBuf>,
+) -> Result<(), ScaffoldError> {
+    for entry in template_dir.entries() {
+        match entry {
+            DirEntry::Dir(dir) => {
+                let next_relative_dir =
+                    relative_dir.join(dir.path().file_name().ok_or_else(|| {
+                        ScaffoldError::TemplateMissing {
+                            harness: vars.harness.clone(),
+                            path: dir.path().display().to_string(),
+                        }
+                    })?);
+                render_template_dir(dir, &next_relative_dir, output_dir, vars, files_created)?;
+            }
+            DirEntry::File(file) => {
+                let template_name =
+                    file.path()
+                        .file_name()
+                        .ok_or_else(|| ScaffoldError::TemplateMissing {
+                            harness: vars.harness.clone(),
+                            path: file.path().display().to_string(),
+                        })?;
+                let Some(output_name) = template_name
+                    .to_string_lossy()
+                    .strip_suffix(".template")
+                    .map(str::to_owned)
+                else {
+                    continue;
+                };
+                let relative_output = relative_dir.join(output_name);
+                let rendered = render_template_file(
+                    file.contents_utf8()
+                        .ok_or_else(|| ScaffoldError::TemplateMissing {
+                            harness: vars.harness.clone(),
+                            path: file.path().display().to_string(),
+                        })?,
+                    file.path(),
+                    vars,
+                )?;
+                let target = output_dir.join(&relative_output);
+                if let Some(parent) = target.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
+                std::fs::write(&target, rendered)?;
+                files_created.push(relative_output);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn render_template_file(
+    input: &str,
+    template_path: &Path,
+    vars: &TemplateVars,
+) -> Result<String, ScaffoldError> {
+    render_tokens(input, vars).map_err(|err| match err {
+        ScaffoldError::UnresolvedToken { token } => ScaffoldError::UnresolvedToken {
+            token: format!("{} in {}", token, template_path.display()),
+        },
+        other => other,
+    })
+}
+
 fn title_case_ascii(part: &str) -> String {
     let lower = part.to_ascii_lowercase();
     let mut chars = lower.chars();
@@ -197,6 +349,8 @@ fn first_unresolved_token(rendered: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::packs::source::FsPackSource;
+    use crate::packs::verify::run_pack_source_conformance;
 
     fn sample_vars() -> TemplateVars {
         TemplateVars {
@@ -230,5 +384,46 @@ mod tests {
     fn display_name_title_cases_safe_pack_id() {
         assert_eq!(display_name("my-pack"), "My Pack");
         assert_eq!(display_name("ops_pack"), "Ops Pack");
+    }
+
+    #[test]
+    fn render_scaffold_codex_writes_verifying_pack() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let output_dir = tmp.path().join("sample-pack");
+        let opts = ScaffoldOpts {
+            name: "sample-pack".to_string(),
+            harness: Harness::Codex,
+            output_dir: output_dir.clone(),
+        };
+
+        let receipt = render_scaffold(&opts).expect("render scaffold");
+
+        assert_eq!(receipt.pack_id, "sample-pack");
+        assert!(output_dir.join("pack.json").is_file());
+        assert!(output_dir.join("AGENTS.md").is_file());
+        assert!(output_dir.join(".github/workflows/verify.yml").is_file());
+        assert!(output_dir.join("tests/smoke.sh").is_file());
+
+        let source = FsPackSource::new(output_dir);
+        let outcomes = run_pack_source_conformance(&source);
+        assert!(
+            outcomes.iter().all(|outcome| outcome.status.is_ok()),
+            "expected rendered pack to verify: {outcomes:#?}"
+        );
+    }
+
+    #[test]
+    fn render_scaffold_rejects_non_empty_output() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(tmp.path().join("existing.txt"), "content").expect("write");
+        let opts = ScaffoldOpts {
+            name: "sample-pack".to_string(),
+            harness: Harness::Codex,
+            output_dir: tmp.path().to_path_buf(),
+        };
+
+        let err = render_scaffold(&opts).expect_err("non-empty output rejected");
+
+        assert!(matches!(err, ScaffoldError::OutputDirNotEmpty { .. }));
     }
 }

@@ -1,5 +1,5 @@
 <!-- BEGIN CAIRN PACK MANUAL -->
-## Cairn Pack: {{display_name}}
+## Cairn Pack: {{display_name}} (`{{pack_id}}`)
 
 Use the `{{command_id}}` command or `{{subagent_id}}` subagent when durable
 Cairn memory context is useful. Prefer typed Cairn MCP calls over shelling out
