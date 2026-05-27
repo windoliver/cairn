@@ -67,10 +67,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn returns_capability_unavailable_when_dark() {
-        // ADMIN_EXTENSION_WIRED is false in phase 1; both runtime flags
-        // can be true and the gate still fails closed.
-        let err = ensure_admin_capability(CAP_SNAPSHOT, true, true).unwrap_err();
+    fn returns_capability_unavailable_when_runtime_gate_fails() {
+        // ADMIN_EXTENSION_WIRED is true (phase 6); runtime gates still
+        // enforce: with `has_operator = false`, the gate refuses.
+        let err = ensure_admin_capability(CAP_SNAPSHOT, true, false).unwrap_err();
         match err {
             AdminError::CapabilityUnavailable {
                 capability,
@@ -98,7 +98,9 @@ mod tests {
 
     #[test]
     fn remediation_text_matches_table_when_present() {
-        let err = ensure_admin_capability(CAP_CONNECTOR_BACKFILL, true, true).unwrap_err();
+        // Force the unnegotiated path via `has_operator = false` (the
+        // helper only emits a remediation string when it's denying).
+        let err = ensure_admin_capability(CAP_CONNECTOR_BACKFILL, true, false).unwrap_err();
         if let AdminError::CapabilityUnavailable { remediation, .. } = err {
             let table = remediation_for(CAP_CONNECTOR_BACKFILL).expect("present in REMEDIATION");
             assert_eq!(remediation, table);
@@ -126,29 +128,49 @@ mod tests {
         assert_eq!(ADMIN_CAPABILITIES[5], CAP_CONNECTOR_BACKFILL);
     }
 
-    // AC#4 — every admin capability returns CapabilityUnavailable when
-    // ADMIN_EXTENSION_WIRED is false (current phase), regardless of
-    // runtime flags being satisfied.
+    // AC#4 — when either runtime gate is unsatisfied, every admin
+    // capability returns CapabilityUnavailable with a remediation hint.
     #[test]
     fn unnegotiated_returns_capability_unavailable_for_all_caps() {
+        // Two unnegotiated scenarios: config off, and no operator. Either
+        // alone is enough to deny the capability.
+        let unnegotiated: &[(bool, bool, &str)] = &[
+            (false, true, "config_enabled=false"),
+            (true, false, "has_operator=false"),
+            (false, false, "both off"),
+        ];
+        for &(config_enabled, has_operator, label) in unnegotiated {
+            for &cap in ADMIN_CAPABILITIES {
+                let err = ensure_admin_capability(cap, config_enabled, has_operator)
+                    .expect_err("unnegotiated case must refuse");
+                match err {
+                    AdminError::CapabilityUnavailable {
+                        capability,
+                        remediation,
+                    } => {
+                        assert_eq!(capability, cap, "{label}: capability string round-trip");
+                        assert!(
+                            !remediation.is_empty(),
+                            "{label}: remediation must be non-empty for {cap}"
+                        );
+                    }
+                    other => {
+                        panic!("{label}: expected CapabilityUnavailable for {cap}, got {other:?}")
+                    }
+                }
+            }
+        }
+    }
+
+    // Positive case: with all gates satisfied, the helper returns Ok(()).
+    // Phase 6 flip (`ADMIN_EXTENSION_WIRED = true`) makes this reachable.
+    #[test]
+    fn negotiated_when_wired_config_and_operator_all_true() {
         for &cap in ADMIN_CAPABILITIES {
-            let err = ensure_admin_capability(
+            ensure_admin_capability(
                 cap, /*config_enabled=*/ true, /*has_operator=*/ true,
             )
-            .expect_err("must be unavailable while ADMIN_EXTENSION_WIRED = false");
-            match err {
-                AdminError::CapabilityUnavailable {
-                    capability,
-                    remediation,
-                } => {
-                    assert_eq!(capability, cap, "capability string must round-trip");
-                    assert!(
-                        !remediation.is_empty(),
-                        "every admin capability must have a non-empty remediation hint"
-                    );
-                }
-                other => panic!("expected CapabilityUnavailable for {cap}, got {other:?}"),
-            }
+            .expect("all gates true → Ok");
         }
     }
 

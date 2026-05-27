@@ -659,11 +659,12 @@ fn openai_provider_without_key_drops_semantic_and_hybrid() {
 }
 
 #[test]
-fn admin_capability_absent_while_dark() {
-    // Even with both runtime preconditions satisfied, ADMIN_EXTENSION_WIRED
-    // is still false in this phase — capability must be absent.
+fn admin_capability_absent_when_runtime_not_ready() {
+    // ADMIN_EXTENSION_WIRED is now true (phase 6); advertisement still
+    // requires `admin_runtime_ready` (config opt-in + at-least-one-operator).
+    // Without it, capability stays absent.
     let gates = CapabilityGates {
-        admin_runtime_ready: true,
+        admin_runtime_ready: false,
         ..gates(true, false, None)
     };
     let caps = advertise(&gates);
@@ -671,7 +672,23 @@ fn admin_capability_absent_while_dark() {
         !caps
             .iter()
             .any(|c| matches!(c, Capabilities::CairnMcpV1ExtensionAdmin)),
-        "admin capability must be absent when ADMIN_EXTENSION_WIRED = false; got {caps:?}"
+        "admin capability must be absent when admin_runtime_ready = false; got {caps:?}"
+    );
+}
+
+#[test]
+fn admin_capability_present_when_runtime_ready() {
+    // Mirror of the above: with admin_runtime_ready = true AND
+    // ADMIN_EXTENSION_WIRED = true (current state), capability IS advertised.
+    let gates = CapabilityGates {
+        admin_runtime_ready: true,
+        ..gates(true, false, None)
+    };
+    let caps = advertise(&gates);
+    assert!(
+        caps.iter()
+            .any(|c| matches!(c, Capabilities::CairnMcpV1ExtensionAdmin)),
+        "admin capability must be present when wired + runtime_ready; got {caps:?}"
     );
 }
 

@@ -183,9 +183,11 @@ pub const fn federation_extension_ready() -> bool {
 
 /// `cairn.admin.v1` extension capability registration (issue #161).
 ///
-/// Set to `true` when phase 6 of issue #161 lands the MCP/SDK wiring for
-/// `cairn.admin.v1`. Until then admin verbs ship dark.
-pub const ADMIN_EXTENSION_WIRED: bool = false;
+/// Live as of issue #161 phase 6. Capability advertisement is gated by
+/// runtime `admin.enabled` config + `has_any_operator()` (see
+/// [`admin_extension_ready`]); the build-time constant simply allows the
+/// gate to even consider advertising.
+pub const ADMIN_EXTENSION_WIRED: bool = true;
 
 /// Truth-table gate for advertising the `cairn.admin.v1` extension.
 /// All three preconditions must hold: build-time wiring, runtime config
@@ -204,14 +206,14 @@ mod admin_extension_ready_tests {
 
     #[test]
     fn truth_table() {
-        // Exercise the four runtime combos. The `wired = true` rows are
-        // verified by construction (short-circuit means flipping the const
-        // can only ADD `true` rows).
+        // Exercise the four runtime combos. With ADMIN_EXTENSION_WIRED = true
+        // (live as of #161 phase 6), the helper is true iff BOTH config and
+        // has_operator are true; otherwise false.
         let cases = [
             (false, false, false),
             (false, true, false),
             (true, false, false),
-            (true, true, false),
+            (true, true, ADMIN_EXTENSION_WIRED),
         ];
         for (config, has_op, expected) in cases {
             assert_eq!(
