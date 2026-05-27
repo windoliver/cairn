@@ -4,6 +4,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
+use super::graph::{SkillGraphIssue, SkillGraphIssueKind, SkillGraphResolver};
+
 /// Snapshot of live skill metadata needed by the pure lint pass.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -89,6 +91,7 @@ pub fn lint_skill_snapshot(snapshot: &SkillLintSnapshot) -> Vec<SkillLintIssue> 
 
     append_duplicate_lane_issues(lanes, &mut out);
     append_duplicate_trigger_issues(triggers, &mut out);
+    append_skill_graph_issues(snapshot, &mut out);
     sort_issues(&mut out);
 
     out
@@ -219,6 +222,37 @@ fn append_duplicate_trigger_issues(
                 ));
             }
         }
+    }
+}
+
+fn append_skill_graph_issues(snapshot: &SkillLintSnapshot, out: &mut Vec<SkillLintIssue>) {
+    let resolver = SkillGraphResolver::new(snapshot);
+    for graph_issue in resolver.lint_all() {
+        out.push(graph_issue_to_lint_issue(snapshot, &graph_issue));
+    }
+}
+
+fn graph_issue_to_lint_issue(
+    snapshot: &SkillLintSnapshot,
+    issue: &SkillGraphIssue,
+) -> SkillLintIssue {
+    let path = snapshot
+        .skills
+        .iter()
+        .find(|skill| skill.skill_id == issue.skill_id)
+        .map_or_else(String::new, |skill| skill.path.clone());
+    SkillLintIssue {
+        kind: match issue.kind {
+            SkillGraphIssueKind::MissingDependency | SkillGraphIssueKind::AmbiguousDependency => {
+                SkillLintIssueKind::MissingArtifact
+            }
+            SkillGraphIssueKind::Cycle | SkillGraphIssueKind::Conflict => {
+                SkillLintIssueKind::DuplicateLane
+            }
+        },
+        skill_id: issue.skill_id.clone(),
+        path,
+        message: issue.message.clone(),
     }
 }
 

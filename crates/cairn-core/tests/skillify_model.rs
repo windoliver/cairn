@@ -389,6 +389,144 @@ fn skill_graph_resolver_reports_prerequisite_declared_conflict_with_root() {
 }
 
 #[test]
+fn skill_lint_reports_missing_graph_reference() {
+    let snapshot = SkillLintSnapshot {
+        skills: vec![
+            graph_skill(
+                "deploy-hotfix",
+                "deploy.hotfix",
+                &["cap.shell"],
+                &["cap.deploy"],
+                &[],
+            ),
+            graph_skill(
+                "ambiguous-root",
+                "deploy.ambiguous",
+                &["cap.shared"],
+                &[],
+                &[],
+            ),
+            graph_skill(
+                "shared-provider-a",
+                "deploy.shared.a",
+                &[],
+                &["cap.shared"],
+                &[],
+            ),
+            graph_skill(
+                "shared-provider-b",
+                "deploy.shared.b",
+                &[],
+                &["cap.shared"],
+                &[],
+            ),
+        ],
+    };
+
+    let findings = lint_skill_snapshot(&snapshot);
+    let missing_findings: Vec<_> = findings
+        .iter()
+        .filter(|finding| finding.message.contains("requires `cap.shell`"))
+        .collect();
+    assert_eq!(missing_findings.len(), 1);
+    let finding = missing_findings[0];
+    assert_eq!(finding.skill_id, "deploy-hotfix");
+    assert_eq!(finding.path, "skills/skill_deploy-hotfix.md");
+    assert_eq!(finding.kind, SkillLintIssueKind::MissingArtifact);
+    assert_eq!(
+        finding.message,
+        "skill `deploy-hotfix` requires `cap.shell` but no skill, lane, or capability provides it"
+    );
+
+    let ambiguous_findings: Vec<_> = findings
+        .iter()
+        .filter(|finding| finding.message.contains("requires `cap.shared`"))
+        .collect();
+    assert_eq!(ambiguous_findings.len(), 1);
+    let finding = ambiguous_findings[0];
+    assert_eq!(finding.skill_id, "ambiguous-root");
+    assert_eq!(finding.path, "skills/skill_ambiguous-root.md");
+    assert_eq!(finding.kind, SkillLintIssueKind::MissingArtifact);
+    assert_eq!(
+        finding.message,
+        "skill `ambiguous-root` requires `cap.shared` but multiple skills provide it: shared-provider-a, shared-provider-b"
+    );
+}
+
+#[test]
+fn skill_lint_reports_graph_cycle_and_conflict() {
+    let snapshot = SkillLintSnapshot {
+        skills: vec![
+            graph_skill("cycle-a", "lane.cycle.a", &["cycle-b"], &["cap.a"], &[]),
+            graph_skill("cycle-b", "lane.cycle.b", &["cycle-a"], &["cap.b"], &[]),
+            graph_skill(
+                "conflict-a",
+                "lane.conflict.a",
+                &["conflict-b"],
+                &["cap.conflict.a"],
+                &["conflict-b"],
+            ),
+            graph_skill(
+                "conflict-b",
+                "lane.conflict.b",
+                &[],
+                &["cap.conflict.b"],
+                &[],
+            ),
+        ],
+    };
+
+    let findings = lint_skill_snapshot(&snapshot);
+    let cycle_findings: Vec<_> = findings
+        .iter()
+        .filter(|finding| finding.message.contains("cycles through"))
+        .map(|finding| {
+            (
+                finding.skill_id.as_str(),
+                finding.path.as_str(),
+                finding.kind,
+                finding.message.as_str(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        cycle_findings,
+        [
+            (
+                "cycle-a",
+                "skills/skill_cycle-a.md",
+                SkillLintIssueKind::DuplicateLane,
+                "skill `cycle-a` dependency graph cycles through `cycle-a`",
+            ),
+            (
+                "cycle-b",
+                "skills/skill_cycle-b.md",
+                SkillLintIssueKind::DuplicateLane,
+                "skill `cycle-b` dependency graph cycles through `cycle-b`",
+            ),
+        ]
+    );
+
+    let conflict_findings: Vec<_> = findings
+        .iter()
+        .filter(|finding| {
+            finding
+                .message
+                .contains("conflicts with selected dependency")
+        })
+        .collect();
+    assert_eq!(conflict_findings.len(), 1);
+    let finding = conflict_findings[0];
+    assert_eq!(finding.skill_id, "conflict-a");
+    assert_eq!(finding.path, "skills/skill_conflict-a.md");
+    assert_eq!(finding.kind, SkillLintIssueKind::DuplicateLane);
+    assert_eq!(
+        finding.message,
+        "skill `conflict-a` conflicts with selected dependency `conflict-b`"
+    );
+}
+
+#[test]
 fn lint_reports_missing_script_and_duplicate_lane() {
     let snapshot = SkillLintSnapshot {
         skills: vec![
