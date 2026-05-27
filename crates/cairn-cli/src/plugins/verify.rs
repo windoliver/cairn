@@ -7,6 +7,8 @@ use cairn_core::contract::conformance::{
 use cairn_core::contract::registry::PluginRegistry;
 use std::path::Path;
 
+use crate::packs::source::{FsPackSource, PackSource};
+
 /// Aggregated outcome of a verify run.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VerifyReport {
@@ -148,8 +150,9 @@ pub fn run_pack_path(path: &Path) -> VerifyReport {
 /// Best-effort pack name extraction for user-facing reports.
 #[must_use]
 pub fn pack_name_from_path(path: &Path) -> String {
-    let manifest_path = path.join("pack.json");
-    std::fs::read(&manifest_path)
+    let source = FsPackSource::new(path.to_path_buf());
+    source
+        .read_file("pack.json")
         .ok()
         .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
         .and_then(|json| {

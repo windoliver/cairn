@@ -341,24 +341,27 @@ impl PackManifest {
         Ok(())
     }
 
-    /// Verify every path referenced by the manifest exists in the
-    /// supplied pack source.
+    /// Verify every path referenced by the manifest can be read from
+    /// the supplied pack source.
     ///
     /// # Errors
-    /// Returns [`PackError::ManifestInvalid`] naming the first missing
-    /// file.
+    /// Returns [`PackError::ManifestInvalid`] naming the first invalid
+    /// reference while preserving the source-layer diagnostic.
     pub fn assert_all_paths_present<S: crate::packs::source::PackSource + ?Sized>(
         &self,
         source: &S,
     ) -> Result<(), PackError> {
         let check = |path: &str, label: &str, id: &str| -> Result<(), PackError> {
-            if !source.has_file(path) {
-                Err(PackError::ManifestInvalid {
-                    reason: format!("{label} `{id}` references missing file `{path}`"),
-                })
-            } else {
-                Ok(())
-            }
+            source.read_file(path).map(|_| ()).map_err(|e| {
+                let reference = if id.is_empty() {
+                    label.to_owned()
+                } else {
+                    format!("{label} `{id}`")
+                };
+                PackError::ManifestInvalid {
+                    reason: format!("{reference} references invalid file `{path}`: {e:#}"),
+                }
+            })
         };
         check(&self.manual_fragment, "manual_fragment", "")?;
         for s in &self.subagents {

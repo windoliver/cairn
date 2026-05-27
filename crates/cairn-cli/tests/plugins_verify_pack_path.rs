@@ -7,10 +7,7 @@ fn cairn_binary() -> std::path::PathBuf {
     std::path::PathBuf::from(raw)
 }
 
-#[test]
-fn plugins_verify_pack_path_json_reports_pack_contract() {
-    let tmp = tempfile::tempdir().expect("tempdir");
-    let root = tmp.path();
+fn write_sample_pack(root: &std::path::Path) {
     std::fs::create_dir(root.join("agents")).expect("create agents dir");
     std::fs::create_dir(root.join("commands")).expect("create commands dir");
     std::fs::create_dir(root.join("hooks")).expect("create hooks dir");
@@ -71,6 +68,13 @@ fn plugins_verify_pack_path_json_reports_pack_contract() {
         r#"{"hooks":{"SessionStart":[{"command":"cairn status --json"}]}}"#,
     )
     .expect("write hooks.json");
+}
+
+#[test]
+fn plugins_verify_pack_path_json_reports_pack_contract() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let root = tmp.path();
+    write_sample_pack(root);
 
     let output = Command::new(cairn_binary())
         .args(["plugins", "verify", "--pack-path"])
@@ -92,4 +96,46 @@ fn plugins_verify_pack_path_json_reports_pack_contract() {
     let first = &v["plugins"].as_array().expect("plugins array")[0];
     assert_eq!(first["name"], "sample-pack");
     assert_eq!(first["contract"], "pack");
+}
+
+#[cfg(unix)]
+#[test]
+fn plugins_verify_pack_path_json_preserves_symlink_diagnostic() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let root = tmp.path();
+    write_sample_pack(root);
+    let outside = tempfile::tempdir().expect("outside tempdir");
+    std::fs::write(outside.path().join("context-loader.md"), "# Outside\n")
+        .expect("write outside subagent");
+    std::fs::remove_file(root.join("agents/context-loader.md")).expect("remove subagent");
+    std::os::unix::fs::symlink(
+        outside.path().join("context-loader.md"),
+        root.join("agents/context-loader.md"),
+    )
+    .expect("create symlinked subagent");
+
+    let output = Command::new(cairn_binary())
+        .args(["plugins", "verify", "--pack-path"])
+        .arg(root)
+        .arg("--json")
+        .output()
+        .expect("spawn cairn binary");
+
+    assert!(
+        !output.status.success(),
+        "symlinked referenced path must fail verification"
+    );
+
+    let stdout = String::from_utf8(output.stdout).expect("utf-8 stdout");
+    let v: serde_json::Value = serde_json::from_str(&stdout).expect("valid json");
+    let cases = v["plugins"][0]["cases"].as_array().expect("cases array");
+    let paths_present = cases
+        .iter()
+        .find(|case| case["id"] == "pack_paths_present")
+        .expect("pack_paths_present case");
+    let message = paths_present["message"].as_str().expect("failure message");
+    assert!(
+        message.contains("symlink"),
+        "expected symlink diagnostic, got: {message}"
+    );
 }
