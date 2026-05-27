@@ -439,10 +439,14 @@ fn remove_legacy_commands(
 /// Returns true when an existing install target carries this pack's
 /// ownership marker and can be upgraded without `--force`.
 ///
-/// `BEGIN CAIRN PACK` covers guarded command/manual bodies. `@pack:
-/// <pack_id>` covers subagent files that declare ownership in comments.
+/// Scoped `BEGIN CAIRN PACK <pack_id>` covers guarded command/manual
+/// bodies. `@pack: <pack_id>` covers subagent files that declare
+/// ownership in comments. The bundled Claude pack also accepts legacy
+/// unscoped guarded markers from pre-scoped installs.
 fn is_pack_owned(content: &str, pack_id: &str) -> bool {
-    content.contains("BEGIN CAIRN PACK") || content.contains(&format!("@pack: {pack_id}"))
+    content.contains(&format!("BEGIN CAIRN PACK {pack_id}"))
+        || content.contains(&format!("@pack: {pack_id}"))
+        || (pack_id == "cairn-claude-code" && content.contains("BEGIN CAIRN PACK -->"))
 }
 
 fn write_pack_file(
@@ -855,6 +859,49 @@ mod tests {
                 .iter()
                 .any(|w| w.contains("context-loader.md")),
             "pack-owned subagent must not be treated as user-modified; got {:?}",
+            receipt.warnings
+        );
+    }
+
+    #[test]
+    fn external_pack_preserves_command_owned_by_different_pack() {
+        let tmp = tempdir().unwrap();
+        let pack_dir = tmp.path().join("pack");
+        let project_dir = tmp.path().join("project");
+        std::fs::create_dir_all(&pack_dir).unwrap();
+        std::fs::create_dir_all(project_dir.join(".codex/commands")).unwrap();
+        write_sample_codex_pack(
+            &pack_dir,
+            "# Context Loader\n\n<!-- @pack: sample-pack -->\nFresh subagent body.\n",
+        );
+        let target = project_dir.join(".codex/commands/cairn-context.md");
+        let other_pack_command = "\
+<!-- BEGIN CAIRN PACK other-pack -->\n\
+Other pack command body.\n\
+<!-- END CAIRN PACK other-pack -->\n";
+        std::fs::write(&target, other_pack_command).unwrap();
+
+        let receipt = install_sample_codex_pack(&pack_dir, &project_dir).expect("install ok");
+
+        let after = std::fs::read_to_string(&target).unwrap();
+        assert_eq!(
+            after, other_pack_command,
+            "command owned by another pack must be preserved"
+        );
+        assert!(
+            receipt
+                .files_skipped
+                .iter()
+                .any(|p| p.ends_with("cairn-context.md")),
+            "other-pack command must be recorded as skipped; got {:?}",
+            receipt
+        );
+        assert!(
+            receipt
+                .warnings
+                .iter()
+                .any(|w| w.contains("cairn-context.md")),
+            "preservation warning must mention command path; got {:?}",
             receipt.warnings
         );
     }
