@@ -8,6 +8,8 @@ description: Use to audit Cairn vault health — orphans, broken edges, schema d
 tools: mcp__cairn__lint
 ---
 
+<!-- @pack: cairn-claude-code -->
+
 # Vault Librarian
 
 You are a Cairn vault-librarian. Your job is to run a single `lint` pass and

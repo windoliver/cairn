@@ -163,6 +163,23 @@ pub fn install_pack(opts: &PackInstallOpts) -> Result<PackInstallReceipt, PackEr
     Ok(receipt)
 }
 
+/// Substrings the installer treats as pack-owned markers on re-install.
+/// Any `.md` file containing one of these is treated as a previous
+/// version's emission and upgraded in place (no `--force` needed).
+///
+/// - `"BEGIN CAIRN PACK"` matches slash-command bodies and the
+///   CLAUDE.md manual fragment (both wrap content with
+///   `<!-- BEGIN CAIRN PACK ... -->`).
+/// - `"@pack: cairn-claude-code"` matches subagent files, which use
+///   a comment-based marker directly after the frontmatter.
+const PACK_OWNED_MARKERS: &[&str] = &["BEGIN CAIRN PACK", "@pack: cairn-claude-code"];
+
+fn is_pack_owned(content: &str) -> bool {
+    PACK_OWNED_MARKERS
+        .iter()
+        .any(|marker| content.contains(marker))
+}
+
 fn write_pack_file(
     project_dir: &Path,
     target: &Path,
@@ -178,7 +195,20 @@ fn write_pack_file(
             receipt.files_skipped.push(target.to_path_buf());
             return Ok(());
         }
-        if !force {
+        // Detect pack-owned files by their guarded marker (subagents
+        // and slash commands both wrap their bodies in
+        // `<!-- BEGIN CAIRN PACK ... -->`). A stale pack-owned file
+        // from a previous version must be upgraded without --force —
+        // otherwise safety fixes in later releases never reach
+        // existing installs.
+        let existing_str = std::str::from_utf8(&existing).unwrap_or("");
+        let pack_owned = is_pack_owned(existing_str);
+        if !force && !pack_owned {
+            // User-modified file with no pack marker. Preserve, warn.
+            receipt.warnings.push(format!(
+                "preserved user-modified `{}`; pass --force to overwrite",
+                target.display()
+            ));
             receipt.files_skipped.push(target.to_path_buf());
             return Ok(());
         }
@@ -408,6 +438,57 @@ mod tests {
         // Every file in the second run should be in skipped (already
         // matching) — no merges either.
         assert!(second.files_merged.is_empty(), "second run merges nothing");
+    }
+
+    #[test]
+    fn install_upgrades_stale_pack_owned_slash_command() {
+        // Simulate a previous-version pack file: same name + path, but
+        // stale content carrying the pack-owned marker. A fresh install
+        // (no --force) MUST upgrade it so safety fixes propagate.
+        let tmp = tempdir().unwrap();
+        let stale = "---\ndescription: stale\n---\n\n<!-- BEGIN CAIRN PACK -->\nold body\n<!-- END CAIRN PACK -->\n";
+        let cmd = tmp.path().join(".claude/commands/cairn-ingest.md");
+        std::fs::create_dir_all(cmd.parent().unwrap()).unwrap();
+        std::fs::write(&cmd, stale).unwrap();
+
+        let receipt = install_pack(&opts(tmp.path())).expect("install ok");
+        let after = std::fs::read_to_string(&cmd).unwrap();
+        assert_ne!(after, stale, "pack-owned file must upgrade on reinstall");
+        assert!(
+            after.contains("cairn ingest"),
+            "upgraded file must contain pack's body; got {after}"
+        );
+        assert!(
+            receipt
+                .files_merged
+                .iter()
+                .any(|p| p.ends_with("cairn-ingest.md")),
+            "files_merged must include the upgraded command; got {:?}",
+            receipt.files_merged
+        );
+    }
+
+    #[test]
+    fn install_preserves_user_modified_slash_command() {
+        // User overwrote a slash command and removed the pack marker.
+        // Without --force, the user content must be preserved + warned.
+        let tmp = tempdir().unwrap();
+        let user = "# my custom ingest helper\n\nNot the pack version.\n";
+        let cmd = tmp.path().join(".claude/commands/cairn-ingest.md");
+        std::fs::create_dir_all(cmd.parent().unwrap()).unwrap();
+        std::fs::write(&cmd, user).unwrap();
+
+        let receipt = install_pack(&opts(tmp.path())).expect("install ok");
+        let after = std::fs::read_to_string(&cmd).unwrap();
+        assert_eq!(after, user, "user-modified file must be preserved");
+        assert!(
+            receipt
+                .warnings
+                .iter()
+                .any(|w| w.contains("cairn-ingest.md")),
+            "warning must mention the preserved file; got {:?}",
+            receipt.warnings
+        );
     }
 
     #[test]

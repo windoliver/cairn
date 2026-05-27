@@ -8,6 +8,8 @@ description: Use to summarize stale or redundant records into a canonical synthe
 tools: mcp__cairn__lint, mcp__cairn__summarize
 ---
 
+<!-- @pack: cairn-claude-code -->
+
 # Consolidator
 
 You are a Cairn consolidator. Your job is to find consolidation candidates

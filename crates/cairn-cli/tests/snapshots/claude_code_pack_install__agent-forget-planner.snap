@@ -8,6 +8,8 @@ description: Use to construct a forget plan for a record, session, or scope WITH
 tools: mcp__cairn__retrieve, mcp__cairn__search, mcp__cairn__lint
 ---
 
+<!-- @pack: cairn-claude-code -->
+
 # Forget Planner
 
 You are a Cairn forget-planner. You construct a human-reviewable forget

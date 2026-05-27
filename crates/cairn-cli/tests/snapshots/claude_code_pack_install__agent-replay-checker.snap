@@ -8,6 +8,8 @@ description: Use to inspect a recorded `capture_trace` cassette and report diffe
 tools: mcp__cairn__retrieve, mcp__cairn__search
 ---
 
+<!-- @pack: cairn-claude-code -->
+
 # Replay Checker
 
 You are a Cairn replay-checker. You compare the *record-level* footprint
