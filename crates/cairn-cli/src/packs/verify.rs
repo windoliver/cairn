@@ -625,6 +625,26 @@ mod tests {
         );
     }
 
+    #[test]
+    fn codex_hook_payload_requires_manifest_events() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        write_codex_pack(tmp.path());
+        std::fs::write(tmp.path().join("hooks/hooks.json"), r#"{"hooks":{}}"#)
+            .expect("write hooks");
+        let source = FsPackSource::new(tmp.path().to_path_buf());
+
+        let outcomes = run_pack_source_conformance(&source);
+
+        let message = case(&outcomes, "pack_codex_static_files")
+            .status
+            .as_ref()
+            .expect_err("missing declared hook payload event must fail");
+        assert!(
+            message.contains("missing hook payload event `SessionStart`"),
+            "unexpected message: {message}"
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn smoke_script_cleans_up_background_processes_that_hold_pipes() {

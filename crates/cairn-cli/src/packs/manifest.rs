@@ -371,6 +371,15 @@ impl PackManifest {
                 });
             }
         }
+        for hook_name in self.hooks.keys() {
+            if !hooks.contains_key(hook_name) {
+                return Err(PackError::ManifestInvalid {
+                    reason: format!(
+                        "{payload_path} missing hook payload event `{hook_name}` declared in pack.json"
+                    ),
+                });
+            }
+        }
         Ok(())
     }
 

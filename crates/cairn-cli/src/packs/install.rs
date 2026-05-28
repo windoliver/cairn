@@ -1205,6 +1205,28 @@ Prefix pack command body.\n\
         );
     }
 
+    #[test]
+    fn install_rejects_missing_declared_hook_payload_event() {
+        let tmp = tempdir().unwrap();
+        let pack_dir = tmp.path().join("pack");
+        let project_dir = tmp.path().join("project");
+        std::fs::create_dir_all(&pack_dir).unwrap();
+        std::fs::create_dir_all(&project_dir).unwrap();
+        write_sample_codex_pack(
+            &pack_dir,
+            "# Context Loader\n\n<!-- @pack: sample-pack -->\nFresh subagent body.\n",
+        );
+        std::fs::write(pack_dir.join("hooks/hooks.json"), r#"{"hooks":{}}"#).expect("write hooks");
+
+        let err =
+            install_sample_codex_pack(&pack_dir, &project_dir).expect_err("install must fail");
+
+        assert!(
+            matches!(err, PackError::ManifestInvalid { ref reason } if reason.contains("missing hook payload event `SessionStart`")),
+            "unexpected error: {err:?}"
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn legacy_migration_refuses_symlinked_commands_dir() {
