@@ -16,9 +16,12 @@ Commands:
   archive-session      Archive a session into the local cold bundle substrate
   zero-capture-report  Render a zero-capture dogfood report from vault metrics
   reindex              Re-embed records into the ANN index
-  snapshot             Prepare a vault backup snapshot
-  restore              Prepare a restore operation from a backup
+  snapshot             Produce a vault snapshot tarball (cairn.admin.v1)
+  restore              Restore a vault from a backup directory or .cairn-snap.tar artifact
   sre                  Operator SRE dashboards and scrubbed local reports
+  grant                Grant operator role to an identity (cairn.admin.v1 bootstrap)
+  replay-wal           Walk a WAL step graph from a given ordinal (cairn.admin.v1)
+  connector            cairn.admin.v1 connector lifecycle verbs
   help                 Print this message or the help of the given subcommand(s)
 
 Options:
@@ -33,6 +36,9 @@ Options:
 - [`cairn admin archive-session`](admin-archive-session.md) - Archive a session into the local cold bundle substrate
 - [`cairn admin zero-capture-report`](admin-zero-capture-report.md) - Render a zero-capture dogfood report from vault metrics
 - [`cairn admin reindex`](admin-reindex.md) - Re-embed records into the ANN index
-- [`cairn admin snapshot`](admin-snapshot.md) - Prepare a vault backup snapshot
-- [`cairn admin restore`](admin-restore.md) - Prepare a restore operation from a backup
+- [`cairn admin snapshot`](admin-snapshot.md) - Produce a vault snapshot tarball (cairn.admin.v1)
+- [`cairn admin restore`](admin-restore.md) - Restore a vault from a backup directory or .cairn-snap.tar artifact
 - [`cairn admin sre`](admin-sre.md) - Operator SRE dashboards and scrubbed local reports
+- [`cairn admin grant`](admin-grant.md) - Grant operator role to an identity (cairn.admin.v1 bootstrap)
+- [`cairn admin replay-wal`](admin-replay-wal.md) - Walk a WAL step graph from a given ordinal (cairn.admin.v1)
+- [`cairn admin connector`](admin-connector.md) - cairn.admin.v1 connector lifecycle verbs

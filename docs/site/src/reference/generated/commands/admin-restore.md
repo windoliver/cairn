@@ -2,20 +2,23 @@
 
 # cairn admin restore
 
-Prepare a restore operation from a backup
+Restore a vault from a backup directory or .cairn-snap.tar artifact
 
 ## Help
 
 ```text
-Prepare a restore operation from a backup
+Restore a vault from a backup directory or .cairn-snap.tar artifact
 
 Usage: cairn admin restore [OPTIONS] --from <PATH> --into <PATH>
 
 Options:
-      --from <PATH>           Source backup path to restore from
+      --from <PATH>           Path to the backup directory (v0.1) or .cairn-snap.tar artifact (v0.2)
       --vault <NAME_OR_PATH>  Active vault: name from registry or filesystem path (overrides
                               CAIRN_VAULT)
-      --into <PATH>           Destination vault path to restore into
+      --into <PATH>           Target directory to restore into (v0.1 dispatch path)
+      --actor <IDENTITY>      Operator identity wire form (e.g. hmn:alice); cairn.admin.v1 only
+      --dry-run               Validate preconditions without applying the restore; cairn.admin.v1
+                              only
       --json                  Emit JSON output
   -h, --help                  Print help
 ```
