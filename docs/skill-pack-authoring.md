@@ -95,10 +95,25 @@ A minimal Codex pack manifest looks like:
   ],
   "hooks": {
     "SessionStart": {
-      "command": "cairn hook SessionStart --payload-file - --json"
+      "command": "cairn hook SessionStart"
     }
   },
   "manual_fragment": "AGENTS.md"
+}
+```
+
+The manifest hook command stays at `cairn hook SessionStart`; the concrete Codex/Gemini installed hook payload lives in `hooks/hooks.json`, for example:
+
+```json
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "type": "command",
+        "command": "cairn hook SessionStart --payload-file - --json"
+      }
+    ]
+  }
 }
 ```
 
@@ -139,8 +154,11 @@ Use the concrete event name in generated bindings, for example
 `cairn hook SessionStart --payload-file - --json`. The maintained Claude Code
 reference pack uses Claude settings entries shaped like
 `cairn hook <event> --vault-path {{PROJECT_DIR_SHELL}}` in
-`hooks/settings.json`. Hook bindings should be deterministic wrappers around
-Cairn, not scripts that parse or mutate the vault independently.
+`hooks/settings.json`. The Claude starter scaffold may use
+`--payload-file - --json` in `hooks/settings.json.template`; the maintained
+`packs/cairn-claude-code/` reference pack currently uses `--vault-path`. Hook
+bindings should be deterministic wrappers around Cairn, not scripts that parse
+or mutate the vault independently.
 
 ## Subagent Prompt Contract
 

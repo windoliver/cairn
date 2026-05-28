@@ -212,6 +212,7 @@ fn skill_pack_authoring_guide_has_required_anchors() {
         "BEGIN CAIRN PACK my-pack",
         "--vault-path",
         "--payload-file - --json",
+        "manifest hook command stays at `cairn hook SessionStart`; the concrete Codex/Gemini installed hook payload lives in `hooks/hooks.json`",
         "manifest hooks validate event names; concrete installed hook payloads live in harness hook files",
         "cairn plugins verify --pack-path . --strict",
         "bash tests/smoke.sh",
