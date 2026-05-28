@@ -550,16 +550,19 @@ impl CairnMcpHandler {
             evaluation_runtime_ready: self.evaluation_runtime_ready
                 && self.config.evaluation.enabled,
             federation_runtime_ready: self.federation_runtime_ready && self.federation.is_some(),
-            // admin_runtime_ready: true iff at least one operator row
-            // exists in the admin_state store. When no vault root is
-            // bound (e.g. `CairnMcpHandler::new()`) the store cannot
-            // be probed so we hold dark — fail-closed per brief §15.
-            admin_runtime_ready: self.vault_root.as_ref().is_some_and(|root| {
-                let db = root.join(".cairn").join("cairn.db");
-                cairn_store_sqlite::SqliteAdminStateStore::open(&db)
-                    .and_then(|s| s.has_any_operator())
-                    .unwrap_or(false)
-            }),
+            // admin_runtime_ready: true iff config.admin.enabled=true AND
+            // at least one operator row exists. Both conditions must hold:
+            // the operator opts in via config (fail-closed rollout control)
+            // and has run `cairn admin grant` (at-least-one-operator check).
+            // When no vault root is bound the store cannot be probed — hold
+            // dark (fail-closed per brief §15).
+            admin_runtime_ready: self.config.admin.enabled
+                && self.vault_root.as_ref().is_some_and(|root| {
+                    let db = root.join(".cairn").join("cairn.db");
+                    cairn_store_sqlite::SqliteAdminStateStore::open(&db)
+                        .and_then(|s| s.has_any_operator())
+                        .unwrap_or(false)
+                }),
             contract_phase: cairn_core::status::Phase::V0_1,
         };
 

@@ -556,8 +556,11 @@ impl ConnectorRegistry {
                         // Cancellation arm: per-entry token or registry shutdown.
                         () = task_token.cancelled() => break,
                         () = tokio::time::sleep(interval) => {
-                            // #161: honor connector_state.enabled. None (no row) defaults to
-                            // enabled — preserves pre-admin behavior.
+                            // #161: honor connector_state.enabled. When admin_state is Some,
+                            // consult the store; when None with the admin extension wired,
+                            // fail closed (no poll) so enable/disable commands are always
+                            // observable. When None without the extension, preserve
+                            // pre-#161 unconditional-tick behavior.
                             if let Some(admin) = admin_state_for_task.as_ref() {
                                 let row = admin.get_connector_state(&name_owned).ok().flatten();
                                 let enabled = row.is_none_or(|r| r.enabled);
@@ -568,6 +571,14 @@ impl ConnectorRegistry {
                                     );
                                     continue;
                                 }
+                            } else if cairn_core::status::wiring::ADMIN_EXTENSION_WIRED {
+                                // Admin extension live but state store not wired — fail closed.
+                                tracing::warn!(
+                                    connector = %name_owned,
+                                    "poll tick skipped: cairn.admin.v1 wired but ConnectorRegistry \
+                                     has no admin_state; call with_admin_state() at construction",
+                                );
+                                continue;
                             }
 
                             // Read the current cursor before calling poll so

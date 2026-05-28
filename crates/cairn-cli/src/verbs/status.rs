@@ -455,11 +455,12 @@ fn compute_capabilities(
             expiration_runtime_ready,
             evaluation_runtime_ready,
             federation_runtime_ready: false,
-            // admin_runtime_ready: true iff the bound vault has at least
-            // one operator row in admin_roles. CLI status stays read-only;
-            // a probe of the sync SqliteAdminStateStore is cheap (open +
-            // single SELECT) and avoids the full async store boot.
-            admin_runtime_ready: vault_root.is_some_and(probe_has_any_operator),
+            // admin_runtime_ready: true iff config.admin.enabled AND the
+            // bound vault has at least one operator row. Both gates must
+            // pass — the operator opts in via config first, then runs
+            // `cairn admin grant` to create the operator row.
+            admin_runtime_ready: config.admin.enabled
+                && vault_root.is_some_and(probe_has_any_operator),
             contract_phase: CLI_CONTRACT_PHASE,
         })
     } else {
@@ -611,8 +612,10 @@ fn capabilities_for_config(config: &CairnConfig, model_present: bool) -> Vec<Cap
         expiration_runtime_ready,
         evaluation_runtime_ready,
         federation_runtime_ready: false,
-        // admin_runtime_ready not yet plumbed through CLI (phase 6, issue #161).
-        admin_runtime_ready: false,
+        // capabilities_for_config has no vault_root so cannot probe
+        // has_any_operator(); use config opt-in alone as a conservative
+        // approximation (the main status path adds the operator check).
+        admin_runtime_ready: config.admin.enabled,
         contract_phase: CLI_CONTRACT_PHASE,
     })
 }

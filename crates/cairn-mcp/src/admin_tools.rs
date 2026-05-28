@@ -125,17 +125,41 @@ fn open_admin_store(
         .map_err(|e| aborted_internal_admin(verb, &format!("open admin state store: {e}")))
 }
 
-/// Internal helper — build a synthetic MCP operator identity.
+/// Internal helper — derive the local-vault identity and vault id from `.cairn/vault.id`.
 ///
-/// Real MCP operator identity resolution is a Phase 2 concern once
-/// signed-intent auth is wired end-to-end (brief §7.4). For now the
-/// MCP surface uses a fixed sentinel that survives the role check only
-/// because the caller passed `dispatch_ready() = true` (which requires
-/// `has_any_operator()` to be satisfied in the store).
-fn mcp_operator_identity() -> Identity {
-    // Invariant: this is a parse of a hard-coded well-formed string.
+/// Returns `(actor_identity, vault_id_string)`. Using the vault id as the
+/// actor makes the MCP actor machine-specific: the operator must explicitly
+/// grant `hmn:local-vault:<vault_id>` as Operator (not a universal sentinel).
+/// Phase 2 will replace this with a proper signed-intent actor once
+/// MCP-level auth is wired end-to-end (brief §7.4).
+///
+/// # Errors
+/// Returns a `CallToolResult::error` when `.cairn/vault.id` is absent,
+/// unreadable, or produces an identity that fails to parse.
+fn local_vault_identity(
+    vault_root: &Path,
+    verb: ResponseVerb,
+) -> Result<(Identity, String), CallToolResult> {
+    let id_path = vault_root.join(".cairn").join("vault.id");
+    let vault_id = std::fs::read_to_string(&id_path)
+        .map(|s| s.trim().to_owned())
+        .map_err(|e| {
+            aborted_internal_admin(
+                verb,
+                &format!(
+                    "read .cairn/vault.id (run `cairn bootstrap` to initialise): {e}"
+                ),
+            )
+        })?;
+    if vault_id.is_empty() {
+        return Err(aborted_internal_admin(verb, ".cairn/vault.id is empty"));
+    }
+    // Construct a machine-specific identity tied to this vault.
+    let raw = format!("hmn:local-vault:{vault_id}");
     #[allow(clippy::expect_used)]
-    Identity::parse("hmn:mcp-operator").expect("invariant: mcp-operator is a valid identity")
+    let identity = Identity::parse(&raw)
+        .map_err(|e| aborted_internal_admin(verb, &format!("parse vault identity: {e}")))?;
+    Ok((identity, vault_id))
 }
 
 fn dispatch_snapshot(args_value: serde_json::Value, vault_root: &Path) -> CallToolResult {
@@ -156,9 +180,13 @@ fn dispatch_snapshot(args_value: serde_json::Value, vault_root: &Path) -> CallTo
         Ok(a) => a,
         Err(r) => return r,
     };
+    let (actor, vault_id) = match local_vault_identity(vault_root, ResponseVerb::AdminSnapshot) {
+        Ok(pair) => pair,
+        Err(r) => return r,
+    };
     let meta = cairn_store_sqlite::SqliteSnapshotMetadata::new(
         vault_root.join(".cairn").join("cairn.db"),
-        "mcp-vault".to_owned(),
+        vault_id.clone(),
     );
     let producer = cairn_store_sqlite::SqliteSnapshotProducer::new(
         vault_root.to_path_buf(),
@@ -168,11 +196,11 @@ fn dispatch_snapshot(args_value: serde_json::Value, vault_root: &Path) -> CallTo
         vault_root.join(".cairn").join("backups.jsonl"),
     );
 
-    let ctx = AdminContext::new(mcp_operator_identity(), AdminRole::Operator);
+    let ctx = AdminContext::new(actor, AdminRole::Operator);
     let req = cairn_core::verbs::admin::snapshot::SnapshotRequest {
         out_dir: std::path::PathBuf::from(&args.out_dir),
         label: args.label,
-        local_machine_id: args.local_machine_id,
+        local_machine_id: vault_id,
         backup_kind: args.backup_kind,
     };
 
@@ -213,18 +241,25 @@ fn dispatch_restore(args_value: serde_json::Value, vault_root: &Path) -> CallToo
         Ok(a) => a,
         Err(r) => return r,
     };
+    // Derive machine id and actor from the vault — never trust caller-supplied identity.
+    let (actor, vault_id) = match local_vault_identity(vault_root, ResponseVerb::AdminRestore) {
+        Ok(pair) => pair,
+        Err(r) => return r,
+    };
     let db_path = vault_root.join(".cairn").join("cairn.db");
     let meta =
-        cairn_store_sqlite::SqliteSnapshotMetadata::new(db_path.clone(), "mcp-vault".to_owned());
+        cairn_store_sqlite::SqliteSnapshotMetadata::new(db_path.clone(), vault_id.clone());
     let reader = cairn_store_sqlite::SqliteSnapshotReader;
     let applier = cairn_store_sqlite::SqliteSnapshotApplier::new(vault_root.to_path_buf());
     let consent = cairn_store_sqlite::SqliteConsentLog::new(db_path.clone(), db_path);
 
-    let ctx = AdminContext::new(mcp_operator_identity(), AdminRole::Operator);
+    let ctx = AdminContext::new(actor, AdminRole::Operator);
     let req = cairn_core::verbs::admin::restore::RestoreRequest {
         artifact_path: std::path::PathBuf::from(&args.artifact_path),
         dry_run: args.dry_run,
-        local_machine_id: args.local_machine_id,
+        // Derive local_machine_id from the vault; ignore caller-supplied value
+        // so a remote caller cannot bypass the cross-machine guard.
+        local_machine_id: vault_id,
     };
 
     match cairn_core::verbs::admin::restore::run(

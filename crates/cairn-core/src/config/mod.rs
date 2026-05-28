@@ -630,6 +630,28 @@ pub struct CairnConfig {
     /// Minimum-path `EvaluationWorkflow` configuration (issue #91, brief §15).
     #[serde(default)]
     pub evaluation: EvaluationConfig,
+    /// `cairn.admin.v1` extension opt-in (issue #161, brief §8).
+    ///
+    /// Default `false` — the extension stays dark until the operator
+    /// explicitly enables it in `.cairn/config.yaml`. Advertising
+    /// admin capabilities also requires at least one operator row in
+    /// the admin_state store (`has_any_operator() = true`).
+    #[serde(default)]
+    pub admin: AdminConfig,
+}
+
+// ── Admin ─────────────────────────────────────────────────────────────────
+
+/// `cairn.admin.v1` extension opt-in configuration (issue #161, brief §8).
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct AdminConfig {
+    /// Enables the `cairn.admin.v1` extension.
+    ///
+    /// When `false` (default), admin capabilities are never advertised
+    /// and every admin verb returns `CapabilityUnavailable`, regardless
+    /// of whether an operator row exists in the store.
+    pub enabled: bool,
 }
 
 // ── Source ────────────────────────────────────────────────────────────────
