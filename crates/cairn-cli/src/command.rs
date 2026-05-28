@@ -394,7 +394,9 @@ fn skill_subcommand() -> clap::Command {
                         .long("harness")
                         .value_name("HARNESS")
                         .required(true)
-                        .value_parser(clap::builder::EnumValueParser::<skill::Harness>::new())
+                        .value_parser(clap::builder::EnumValueParser::<
+                            skill::ScaffoldHarness,
+                        >::new())
                         .help("Target scaffold harness (claude-code, codex, gemini)"),
                 )
                 .arg(

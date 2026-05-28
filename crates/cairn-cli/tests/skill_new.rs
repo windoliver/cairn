@@ -1,6 +1,7 @@
 #![allow(missing_docs)]
 
 use assert_cmd::Command;
+use serde_json::Value;
 use std::path::Path;
 
 fn cli() -> Command {
@@ -69,6 +70,7 @@ fn skill_new_rejects_unsafe_name() {
         .expect("cairn skill new");
 
     assert_ne!(output.status.code(), Some(0));
+    assert_eq!(output.status.code(), Some(74));
     assert!(
         String::from_utf8_lossy(&output.stderr).contains("invalid pack name"),
         "stderr:\n{}",
@@ -99,6 +101,7 @@ fn skill_new_fails_on_non_empty_output() {
         .expect("cairn skill new");
 
     assert_ne!(output.status.code(), Some(0));
+    assert_eq!(output.status.code(), Some(74));
     assert!(
         String::from_utf8_lossy(&output.stderr).contains("output directory is not empty"),
         "stderr:\n{}",
@@ -108,6 +111,69 @@ fn skill_new_fails_on_non_empty_output() {
         std::fs::read_to_string(&keep).expect("read keep"),
         "preserve me\n"
     );
+}
+
+#[test]
+fn skill_new_help_lists_only_supported_harnesses() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let output = isolated_cli(tmp.path())
+        .args(["skill", "new", "--help"])
+        .output()
+        .expect("cairn skill new --help");
+
+    assert_success(&output, "cairn skill new --help");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    for supported in ["claude-code", "codex", "gemini"] {
+        assert!(stdout.contains(supported), "stdout:\n{stdout}");
+    }
+    for unsupported in ["opencode", "cursor", "custom"] {
+        assert!(!stdout.contains(unsupported), "stdout:\n{stdout}");
+    }
+}
+
+#[test]
+fn skill_new_rejects_unsupported_harness_at_clap_boundary() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let output = isolated_cli(tmp.path())
+        .args(["skill", "new", "sample-pack", "--harness", "opencode"])
+        .output()
+        .expect("cairn skill new");
+
+    assert_ne!(output.status.code(), Some(0));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("invalid value") && stderr.contains("possible values"),
+        "stderr:\n{stderr}"
+    );
+}
+
+#[test]
+fn skill_new_json_emits_receipt_only() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let output_dir = tmp.path().join("sample-pack");
+    let output = isolated_cli(tmp.path())
+        .args([
+            "skill",
+            "new",
+            "sample-pack",
+            "--harness",
+            "codex",
+            "--output",
+        ])
+        .arg(&output_dir)
+        .arg("--json")
+        .output()
+        .expect("cairn skill new --json");
+
+    assert_success(&output, "cairn skill new --json");
+    assert!(
+        output.stderr.is_empty(),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).expect("utf-8 stdout");
+    let receipt: Value = serde_json::from_str(stdout.trim()).expect("stdout JSON receipt");
+    assert_eq!(receipt["pack_id"], "sample-pack");
 }
 
 #[test]

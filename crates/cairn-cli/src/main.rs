@@ -1670,16 +1670,10 @@ fn run_skill_new(matches: &ArgMatches) -> ExitCode {
         .get_one::<String>("name")
         .expect("invariant: skill new requires NAME")
         .clone();
-    let skill_harness = matches
-        .get_one::<cairn_cli::skill::Harness>("harness")
+    let scaffold_harness = matches
+        .get_one::<cairn_cli::skill::ScaffoldHarness>("harness")
         .expect("invariant: skill new requires --harness");
-    let Some(harness) = cairn_cli::skill::pack_harness_from_skill_harness(skill_harness) else {
-        eprintln!(
-            "cairn skill new: unsupported scaffold harness `{}`",
-            skill_harness_name(skill_harness)
-        );
-        return ExitCode::from(64);
-    };
+    let harness = scaffold_harness.into_pack_harness();
     let output_dir = matches
         .get_one::<PathBuf>("output")
         .cloned()
@@ -1707,18 +1701,6 @@ fn run_skill_new(matches: &ArgMatches) -> ExitCode {
             eprintln!("cairn skill new: {e:#}");
             ExitCode::from(74)
         }
-    }
-}
-
-fn skill_harness_name(harness: &cairn_cli::skill::Harness) -> &'static str {
-    match harness {
-        cairn_cli::skill::Harness::ClaudeCode => "claude-code",
-        cairn_cli::skill::Harness::Codex => "codex",
-        cairn_cli::skill::Harness::Gemini => "gemini",
-        cairn_cli::skill::Harness::Opencode => "opencode",
-        cairn_cli::skill::Harness::Cursor => "cursor",
-        cairn_cli::skill::Harness::Custom => "custom",
-        _ => "unknown",
     }
 }
 

@@ -28,6 +28,40 @@ pub enum Harness {
     Custom,
 }
 
+/// Harnesses supported by `cairn skill new` scaffold templates.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum ScaffoldHarness {
+    /// Claude Code scaffold.
+    #[value(name = "claude-code")]
+    ClaudeCode,
+    /// Codex scaffold.
+    Codex,
+    /// Gemini CLI scaffold.
+    Gemini,
+}
+
+impl ScaffoldHarness {
+    /// Convert the CLI scaffold harness to the pack manifest harness.
+    #[must_use]
+    pub const fn into_pack_harness(self) -> PackHarness {
+        match self {
+            Self::ClaudeCode => PackHarness::ClaudeCode,
+            Self::Codex => PackHarness::Codex,
+            Self::Gemini => PackHarness::Gemini,
+        }
+    }
+
+    /// Stable CLI value for diagnostics.
+    #[must_use]
+    pub const fn value_name(self) -> &'static str {
+        match self {
+            Self::ClaudeCode => "claude-code",
+            Self::Codex => "codex",
+            Self::Gemini => "gemini",
+        }
+    }
+}
+
 /// Agents with first-slice generated skill-pack integrations.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, ValueEnum)]
 #[serde(rename_all = "kebab-case")]
