@@ -177,6 +177,29 @@ fn skill_new_json_emits_receipt_only() {
 }
 
 #[test]
+fn skill_pack_authoring_guide_has_required_anchors() {
+    let guide_path =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/skill-pack-authoring.md");
+    let guide = std::fs::read_to_string(&guide_path)
+        .expect("docs/skill-pack-authoring.md");
+    for heading in [
+        "## Pack Layout",
+        "## Manifest Schema",
+        "## Capability Declarations",
+        "## Hook Binding Contract",
+        "## Subagent Prompt Contract",
+        "## Slash Command Contract",
+        "## Operating Manual Fragments",
+        "## Versioning And Compatibility",
+        "## Publishing And CI",
+        "## Not In Scope For Packs",
+        "## Verification",
+    ] {
+        assert!(guide.contains(heading), "missing heading {heading}");
+    }
+}
+
+#[test]
 fn skill_new_codex_scaffold_verifies() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let output_dir = tmp.path().join("sample-pack");
