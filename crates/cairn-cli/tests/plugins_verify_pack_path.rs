@@ -68,6 +68,12 @@ fn write_sample_pack(root: &std::path::Path) {
         r#"{"hooks":{"SessionStart":[{"command":"cairn status --json"}]}}"#,
     )
     .expect("write hooks.json");
+    std::fs::create_dir_all(root.join("tests")).expect("create tests dir");
+    std::fs::write(
+        root.join("tests/smoke.sh"),
+        "#!/usr/bin/env bash\nset -euo pipefail\ntest -f AGENTS.md\ntest -f .codex/hooks.json\n",
+    )
+    .expect("write smoke");
 }
 
 #[test]
@@ -102,6 +108,12 @@ fn plugins_verify_pack_path_json_reports_pack_contract() {
             .iter()
             .any(|case| { case["id"] == "pack_install_round_trip" && case["status"] == "ok" }),
         "expected successful pack_install_round_trip case in {cases:#?}"
+    );
+    assert!(
+        cases
+            .iter()
+            .any(|case| { case["id"] == "pack_smoke_script" && case["status"] == "ok" }),
+        "expected successful pack_smoke_script case in {cases:#?}"
     );
 }
 

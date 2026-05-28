@@ -6,6 +6,7 @@
 
 use serde::Serialize;
 use std::path::Path;
+use std::process::Command;
 use tempfile::tempdir;
 
 use crate::packs::install::{PackInstallOpts, install_pack_from_source};
@@ -148,7 +149,49 @@ pub fn run_pack_source_conformance(source: &dyn PackSource) -> Vec<CaseOutcome> 
         tier: Tier::Two,
         status: run_install_round_trip(source).map_err(|e| format!("{e:#}")),
     });
+    out.push(CaseOutcome {
+        id: "pack_smoke_script",
+        name: "optional scaffold smoke script".to_owned(),
+        tier: Tier::Two,
+        status: run_smoke_script(source).map_err(|e| format!("{e:#}")),
+    });
     out
+}
+
+fn run_smoke_script(source: &dyn PackSource) -> Result<(), PackError> {
+    if !source.has_file("tests/smoke.sh") {
+        return Ok(());
+    }
+
+    let manifest_bytes = source.read_file("pack.json")?;
+    let manifest: PackManifest = serde_json::from_slice(&manifest_bytes)?;
+    let tmp = tempdir().map_err(PackError::Io)?;
+    let opts = PackInstallOpts {
+        harness: manifest.harness,
+        project_dir: tmp.path().to_path_buf(),
+        force: false,
+    };
+    install_pack_from_source(source, &opts)?;
+
+    let smoke_bytes = source.read_file("tests/smoke.sh")?;
+    let smoke_path = tmp.path().join("smoke.sh");
+    std::fs::write(&smoke_path, smoke_bytes).map_err(PackError::Io)?;
+    let output = Command::new("bash")
+        .arg("smoke.sh")
+        .current_dir(tmp.path())
+        .output()
+        .map_err(PackError::Io)?;
+    if !output.status.success() {
+        return Err(PackError::ManifestInvalid {
+            reason: format!(
+                "tests/smoke.sh exited with {}; stdout:\n{}stderr:\n{}",
+                output.status,
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            ),
+        });
+    }
+    Ok(())
 }
 
 fn run_install_round_trip(source: &dyn PackSource) -> Result<(), PackError> {

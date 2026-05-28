@@ -180,8 +180,7 @@ fn skill_new_json_emits_receipt_only() {
 fn skill_pack_authoring_guide_has_required_anchors() {
     let guide_path =
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/skill-pack-authoring.md");
-    let guide = std::fs::read_to_string(&guide_path)
-        .expect("docs/skill-pack-authoring.md");
+    let guide = std::fs::read_to_string(&guide_path).expect("docs/skill-pack-authoring.md");
     for heading in [
         "## Pack Layout",
         "## Manifest Schema",
@@ -221,6 +220,29 @@ fn skill_pack_authoring_guide_has_required_anchors() {
         assert!(
             guide.contains(required_text),
             "missing guide text {required_text}"
+        );
+    }
+}
+
+#[test]
+fn generated_templates_include_ci_and_smoke() {
+    let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let repo_root = manifest_dir
+        .parent()
+        .and_then(|p| p.parent())
+        .expect("repo root");
+    for harness in ["claude-code", "codex", "gemini"] {
+        let root = repo_root.join("packs/templates").join(harness);
+        assert!(
+            root.join(".github/workflows/verify.yml.template").is_file(),
+            "{harness} workflow template missing"
+        );
+        let smoke = root.join("tests/smoke.sh.template");
+        assert!(smoke.is_file(), "{harness} smoke template missing");
+        let smoke_text = std::fs::read_to_string(smoke).expect("smoke");
+        assert!(
+            !smoke_text.contains("plugins verify"),
+            "{harness} smoke script must be nonrecursive"
         );
     }
 }
