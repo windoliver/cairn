@@ -389,6 +389,11 @@ expression: json
           "id": "pack_install_round_trip",
           "status": "ok",
           "tier": 2
+        },
+        {
+          "id": "pack_smoke_script",
+          "status": "ok",
+          "tier": 2
         }
       ],
       "contract": "pack",
@@ -397,7 +402,7 @@ expression: json
   ],
   "summary": {
     "failed": 0,
-    "ok": 60,
+    "ok": 61,
     "pending": 6
   }
 }

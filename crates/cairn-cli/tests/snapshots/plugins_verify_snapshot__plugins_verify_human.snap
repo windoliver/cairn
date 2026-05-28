@@ -85,5 +85,6 @@ cairn-claude-code (pack)
   tier-1 pack_paths_present                       ok
   tier-1 pack_subagent_frontmatter                ok
   tier-2 pack_install_round_trip                  ok
+  tier-2 pack_smoke_script                        ok
 
-Summary: 9 plugins, 60 ok, 6 pending, 0 failed
+Summary: 9 plugins, 61 ok, 6 pending, 0 failed

@@ -5,6 +5,7 @@
 //! Tier 3 — snapshot test (delegated to `tests/claude_code_pack_install.rs`).
 
 use serde::Serialize;
+use std::fmt::Write as _;
 use std::io::Read;
 use std::path::Path;
 use std::process::{Command, Stdio};
@@ -16,7 +17,7 @@ use crate::packs::install::{PackInstallOpts, install_pack_from_source};
 use crate::packs::manifest::{Harness, PackError, PackManifest};
 use crate::packs::source::{EmbeddedPackSource, FsPackSource, PackSource};
 
-const SMOKE_SCRIPT_TIMEOUT: Duration = Duration::from_secs(60);
+const SMOKE_SCRIPT_TIMEOUT: Duration = Duration::from_mins(1);
 const MAX_SMOKE_OUTPUT_BYTES: usize = 1024 * 1024;
 
 /// Tier of a conformance case.
@@ -63,20 +64,17 @@ pub fn run_pack_conformance(pack_id: &str) -> Vec<CaseOutcome> {
         return out;
     }
 
-    let dir = match crate::packs::bundled_pack_for(Harness::ClaudeCode) {
-        Some(dir) => dir,
-        None => {
-            out.push(CaseOutcome {
-                id: "pack_bundled",
-                name: "pack has bundled source".to_owned(),
-                tier: Tier::One,
-                status: Err(PackError::ManifestInvalid {
-                    reason: "no bundled pack available for harness `ClaudeCode`".to_owned(),
-                }
-                .to_string()),
-            });
-            return out;
-        }
+    let Some(dir) = crate::packs::bundled_pack_for(Harness::ClaudeCode) else {
+        out.push(CaseOutcome {
+            id: "pack_bundled",
+            name: "pack has bundled source".to_owned(),
+            tier: Tier::One,
+            status: Err(PackError::ManifestInvalid {
+                reason: "no bundled pack available for harness `ClaudeCode`".to_owned(),
+            }
+            .to_string()),
+        });
+        return out;
     };
     let source = EmbeddedPackSource::new("cairn-claude-code", dir);
     out.extend(run_pack_source_conformance(&source));
@@ -277,12 +275,10 @@ fn run_bash_smoke_script(project_dir: &Path) -> Result<SmokeOutput, PackError> {
 #[cfg(unix)]
 fn kill_child_process_group(child_pgid: Option<i32>) {
     if let Some(pgid) = child_pgid {
-        let _ = Command::new("kill")
-            .args(["-KILL", &format!("-{pgid}")])
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
+        use nix::sys::signal::{Signal, killpg};
+        use nix::unistd::Pid;
+
+        let _ = killpg(Pid::from_raw(pgid), Signal::SIGKILL);
     }
 }
 
@@ -345,7 +341,7 @@ fn render_capped_output(output: &CappedOutput) -> String {
         if !text.ends_with('\n') {
             text.push('\n');
         }
-        text.push_str(&format!("[truncated after {MAX_SMOKE_OUTPUT_BYTES} bytes]"));
+        let _ = write!(text, "[truncated after {MAX_SMOKE_OUTPUT_BYTES} bytes]");
     }
     text
 }

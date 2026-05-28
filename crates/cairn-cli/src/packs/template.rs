@@ -359,10 +359,10 @@ fn title_case_ascii(part: &str) -> String {
 }
 
 fn first_unresolved_token(rendered: &str) -> String {
-    if let Some(start) = rendered.find("{{") {
-        if let Some(end) = rendered[start + 2..].find("}}") {
-            return rendered[start..start + 2 + end + 2].to_string();
-        }
+    if let Some(start) = rendered.find("{{")
+        && let Some(end) = rendered[start + 2..].find("}}")
+    {
+        return rendered[start..start + 2 + end + 2].to_string();
     }
     if rendered.contains("{{") {
         return "{{".to_string();

@@ -99,6 +99,7 @@ whoami = "1.5"
 schemars = "1.0"
 memchr = "2"
 smallvec = "1"
+nix = { version = "0.30", default-features = false, features = ["signal"] }
 cpal = "0.17.3"
 sherpa-onnx = { version = "1.13.1", default-features = false, features = ["static"] }
 xcap = "0.9.4"

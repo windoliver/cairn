@@ -932,8 +932,7 @@ mod tests {
                 .files_merged
                 .iter()
                 .any(|p| p.ends_with("AGENTS.md")),
-            "AGENTS.md must be recorded as merged; got {:?}",
-            receipt
+            "AGENTS.md must be recorded as merged; got {receipt:?}"
         );
     }
 
@@ -1021,8 +1020,7 @@ mod tests {
                 .files_merged
                 .iter()
                 .any(|p| p.ends_with("context-loader.md")),
-            "updated subagent must be recorded as merged; got {:?}",
-            receipt
+            "updated subagent must be recorded as merged; got {receipt:?}"
         );
         assert!(
             !receipt
@@ -1064,8 +1062,7 @@ Other pack command body.\n\
                 .files_skipped
                 .iter()
                 .any(|p| p.ends_with("cairn-context.md")),
-            "other-pack command must be recorded as skipped; got {:?}",
-            receipt
+            "other-pack command must be recorded as skipped; got {receipt:?}"
         );
         assert!(
             receipt
@@ -1107,8 +1104,7 @@ Prefix pack command body.\n\
                 .files_skipped
                 .iter()
                 .any(|p| p.ends_with("cairn-context.md")),
-            "prefix-pack command must be recorded as skipped; got {:?}",
-            receipt
+            "prefix-pack command must be recorded as skipped; got {receipt:?}"
         );
     }
 
@@ -1140,8 +1136,7 @@ Prefix pack command body.\n\
                 .files_skipped
                 .iter()
                 .any(|p| p.ends_with("context-loader.md")),
-            "prefix-pack subagent must be recorded as skipped; got {:?}",
-            receipt
+            "prefix-pack subagent must be recorded as skipped; got {receipt:?}"
         );
     }
 
@@ -1200,8 +1195,7 @@ Prefix pack command body.\n\
                 .files_merged
                 .iter()
                 .any(|p| p.ends_with("hooks.json")),
-            "updated hook file must be recorded as merged; got {:?}",
-            receipt
+            "updated hook file must be recorded as merged; got {receipt:?}"
         );
     }
 
@@ -1467,7 +1461,7 @@ Confirm the user wants to forget the named Cairn record, then run:
             .unwrap();
 
         assert!(
-            cmd.contains(&format!("'{}'", canonical_display)),
+            cmd.contains(&format!("'{canonical_display}'")),
             "hook command must preserve quoted path inside shell quotes; got `{cmd}`"
         );
         assert_eq!(
