@@ -13,6 +13,7 @@ Usage: cairn skill [OPTIONS] <COMMAND>
 
 Commands:
   install  Install the Cairn skill bundle into the harness skill directory (§18.d)
+  new      Create a starter cairn-pack/v1 skill-pack scaffold
   help     Print this message or the help of the given subcommand(s)
 
 Options:
@@ -24,3 +25,4 @@ Options:
 ## Subcommands
 
 - [`cairn skill install`](skill-install.md) - Install the Cairn skill bundle into the harness skill directory (§18.d)
+- [`cairn skill new`](skill-new.md) - Create a starter cairn-pack/v1 skill-pack scaffold

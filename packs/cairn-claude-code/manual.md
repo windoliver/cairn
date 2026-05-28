@@ -1,4 +1,4 @@
-<!-- BEGIN CAIRN PACK MANUAL -->
+<!-- BEGIN CAIRN PACK cairn-claude-code -->
 ## Cairn (Claude Code reference pack)
 
 This project uses the Cairn memory layer. Six subagents and 13 slash
@@ -34,4 +34,4 @@ commands are available.
 - Verb-direct slash commands shell out to the local `cairn` binary.
 - `capture_trace` commands MUST run inside the user's consent envelope
   (see brief §14).
-<!-- END CAIRN PACK MANUAL -->
+<!-- END CAIRN PACK cairn-claude-code -->

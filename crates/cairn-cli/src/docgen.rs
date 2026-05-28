@@ -318,6 +318,11 @@ fn emit_packs(files: &mut Vec<GeneratedFile>) -> Result<(), DocgenError> {
         let dir = match pack_id {
             "cairn-claude-code" => {
                 crate::packs::bundled_pack_for(crate::packs::manifest::Harness::ClaudeCode)
+                    .ok_or_else(|| {
+                        DocgenError::Plugins(
+                            "no bundled pack available for harness `ClaudeCode`".to_owned(),
+                        )
+                    })?
             }
             // No future packs registered yet. Add new arms here when other
             // harness packs land.
@@ -335,6 +340,8 @@ fn emit_packs(files: &mut Vec<GeneratedFile>) -> Result<(), DocgenError> {
 
         let harness_label = match manifest.harness {
             crate::packs::manifest::Harness::ClaudeCode => "claude-code",
+            crate::packs::manifest::Harness::Codex => "codex",
+            crate::packs::manifest::Harness::Gemini => "gemini",
         };
 
         let mut out = generated_doc(&format!("Pack: `{}`", manifest.pack_id));

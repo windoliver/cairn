@@ -14,6 +14,10 @@ use std::collections::BTreeMap;
 pub enum Harness {
     /// Claude Code (the canonical reference harness).
     ClaudeCode,
+    /// Codex harness.
+    Codex,
+    /// Gemini CLI harness.
+    Gemini,
 }
 
 /// Subagent declaration.
@@ -337,21 +341,69 @@ impl PackManifest {
         Ok(())
     }
 
-    /// Verify every path referenced by the manifest exists in the
-    /// supplied embedded pack directory.
+    /// Validate a harness hook payload file against this manifest's hook map.
     ///
     /// # Errors
-    /// Returns [`PackError::ManifestInvalid`] naming the first missing
-    /// file.
-    pub fn assert_all_paths_present(&self, dir: &include_dir::Dir<'_>) -> Result<(), PackError> {
-        let check = |path: &str, label: &str, id: &str| -> Result<(), PackError> {
-            if dir.get_file(path).is_none() {
-                Err(PackError::ManifestInvalid {
-                    reason: format!("{label} `{id}` references missing file `{path}`"),
-                })
-            } else {
-                Ok(())
+    /// Returns [`PackError`] if the payload lacks a `hooks` object, declares an
+    /// unknown lifecycle event, or binds an event not declared by the manifest.
+    pub fn validate_hook_payload_events(
+        &self,
+        payload: &serde_json::Value,
+        payload_path: &str,
+    ) -> Result<(), PackError> {
+        let hooks = payload
+            .get("hooks")
+            .and_then(serde_json::Value::as_object)
+            .ok_or_else(|| PackError::ManifestInvalid {
+                reason: format!("{payload_path} missing `hooks` object"),
+            })?;
+        for hook_name in hooks.keys() {
+            if !HOOK_EVENTS.contains(&hook_name.as_str()) {
+                return Err(PackError::HookUnknown {
+                    hook: hook_name.clone(),
+                });
             }
+            if !self.hooks.contains_key(hook_name) {
+                return Err(PackError::ManifestInvalid {
+                    reason: format!(
+                        "{payload_path} declares hook event `{hook_name}` not present in pack.json"
+                    ),
+                });
+            }
+        }
+        for hook_name in self.hooks.keys() {
+            if !hooks.contains_key(hook_name) {
+                return Err(PackError::ManifestInvalid {
+                    reason: format!(
+                        "{payload_path} missing hook payload event `{hook_name}` declared in pack.json"
+                    ),
+                });
+            }
+        }
+        Ok(())
+    }
+
+    /// Verify every path referenced by the manifest can be read from
+    /// the supplied pack source.
+    ///
+    /// # Errors
+    /// Returns [`PackError::ManifestInvalid`] naming the first invalid
+    /// reference while preserving the source-layer diagnostic.
+    pub fn assert_all_paths_present<S: crate::packs::source::PackSource + ?Sized>(
+        &self,
+        source: &S,
+    ) -> Result<(), PackError> {
+        let check = |path: &str, label: &str, id: &str| -> Result<(), PackError> {
+            source.read_file(path).map(|_| ()).map_err(|e| {
+                let reference = if id.is_empty() {
+                    label.to_owned()
+                } else {
+                    format!("{label} `{id}`")
+                };
+                PackError::ManifestInvalid {
+                    reason: format!("{reference} references invalid file `{path}`: {e:#}"),
+                }
+            })
         };
         check(&self.manual_fragment, "manual_fragment", "")?;
         for s in &self.subagents {
@@ -423,18 +475,15 @@ impl PackManifest {
     /// Returns [`PackError::ManifestInvalid`] when a subagent's
     /// frontmatter and manifest disagree, with the offending diff
     /// in the reason field.
-    pub fn assert_subagent_frontmatter_matches_manifest(
+    pub fn assert_subagent_frontmatter_matches_manifest<
+        S: crate::packs::source::PackSource + ?Sized,
+    >(
         &self,
-        dir: &include_dir::Dir<'_>,
+        source: &S,
     ) -> Result<(), PackError> {
         for s in &self.subagents {
-            let bytes = dir
-                .get_file(&s.path)
-                .ok_or_else(|| PackError::ManifestInvalid {
-                    reason: format!("subagent `{}` references missing file `{}`", s.id, s.path),
-                })?
-                .contents();
-            let text = std::str::from_utf8(bytes).map_err(|e| PackError::ManifestInvalid {
+            let bytes = source.read_file(&s.path)?;
+            let text = std::str::from_utf8(&bytes).map_err(|e| PackError::ManifestInvalid {
                 reason: format!("subagent `{}` file is not UTF-8: {e}", s.id),
             })?;
 
@@ -797,15 +846,18 @@ mod presence_tests {
     #[test]
     fn every_referenced_path_exists_in_embed() {
         let dir = &crate::packs::embed::CAIRN_CLAUDE_CODE_PACK;
+        let source = crate::packs::source::EmbeddedPackSource::new("cairn-claude-code", dir);
         let bytes = dir.get_file("pack.json").unwrap().contents();
         let m: PackManifest = serde_json::from_slice(bytes).unwrap();
 
-        m.assert_all_paths_present(dir).expect("all paths present");
+        m.assert_all_paths_present(&source)
+            .expect("all paths present");
     }
 
     #[test]
     fn missing_path_is_detected() {
         let dir = &crate::packs::embed::CAIRN_CLAUDE_CODE_PACK;
+        let source = crate::packs::source::EmbeddedPackSource::new("cairn-claude-code", dir);
         let mut m: PackManifest =
             serde_json::from_slice(dir.get_file("pack.json").unwrap().contents()).unwrap();
         m.subagents.push(SubagentDecl {
@@ -813,7 +865,7 @@ mod presence_tests {
             path: "agents/ghost.md".to_owned(),
             uses_mcp_tools: vec!["search".to_owned()],
         });
-        let err = m.assert_all_paths_present(dir).unwrap_err();
+        let err = m.assert_all_paths_present(&source).unwrap_err();
         assert!(matches!(err, PackError::ManifestInvalid { .. }));
     }
 }
@@ -825,9 +877,10 @@ mod frontmatter_tests {
     #[test]
     fn bundled_pack_frontmatter_matches_manifest() {
         let dir = &crate::packs::embed::CAIRN_CLAUDE_CODE_PACK;
+        let source = crate::packs::source::EmbeddedPackSource::new("cairn-claude-code", dir);
         let m: PackManifest =
             serde_json::from_slice(dir.get_file("pack.json").unwrap().contents()).unwrap();
-        m.assert_subagent_frontmatter_matches_manifest(dir)
+        m.assert_subagent_frontmatter_matches_manifest(&source)
             .expect("bundled pack subagent frontmatter must match manifest");
     }
 
