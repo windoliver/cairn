@@ -1,6 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+if [ -f "pack.json" ] && [ -f "agents/{{subagent_id}}.md" ]; then
+  test -f "{{manual_fragment}}"
+  test -f "commands/{{command_id}}.md"
+  test -f "hooks/settings.json"
+  grep -q "{{pack_id}}" "{{manual_fragment}}"
+  exit 0
+fi
+
 test -f ".claude/agents/{{subagent_id}}.md"
 test -f ".claude/commands/{{command_id}}.md"
 test -f ".claude/settings.json"

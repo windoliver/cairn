@@ -437,6 +437,19 @@ mod tests {
                 "expected rendered pack to verify for {harness:?}: {outcomes:#?}"
             );
 
+            let source_smoke = std::process::Command::new("bash")
+                .arg("tests/smoke.sh")
+                .current_dir(&output_dir)
+                .output()
+                .expect("run source smoke");
+            assert!(
+                source_smoke.status.success(),
+                "source smoke failed for {harness:?}: status={:?} stdout={} stderr={}",
+                source_smoke.status,
+                String::from_utf8_lossy(&source_smoke.stdout),
+                String::from_utf8_lossy(&source_smoke.stderr)
+            );
+
             let installed_dir = tmp
                 .path()
                 .join(format!("{}-installed", harness_id(harness)));
