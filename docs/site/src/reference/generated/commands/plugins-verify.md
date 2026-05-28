@@ -12,9 +12,10 @@ Run the conformance suite against every loaded plugin
 Usage: cairn plugins verify [OPTIONS]
 
 Options:
-      --strict                Treat tier-2 `pending` cases as failures
+      --pack-path <DIR>       Verify an external cairn-pack/v1 directory instead of bundled plugins
       --vault <NAME_OR_PATH>  Active vault: name from registry or filesystem path (overrides
                               CAIRN_VAULT)
+      --strict                Treat tier-2 `pending` cases as failures
       --json                  Emit JSON instead of a human-readable report
   -h, --help                  Print help
 ```

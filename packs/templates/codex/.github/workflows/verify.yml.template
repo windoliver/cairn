@@ -11,7 +11,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install Cairn
-        run: cargo install cairn-cli --locked
+        run: cargo install --git https://github.com/windoliver/cairn --locked --bin cairn cairn-cli
       - name: Verify pack
         run: cairn plugins verify --pack-path . --strict
       - name: Smoke test
