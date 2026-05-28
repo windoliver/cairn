@@ -5,13 +5,19 @@
 //! Tier 3 — snapshot test (delegated to `tests/claude_code_pack_install.rs`).
 
 use serde::Serialize;
+use std::io::Read;
 use std::path::Path;
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::thread;
+use std::time::{Duration, Instant};
 use tempfile::tempdir;
 
 use crate::packs::install::{PackInstallOpts, install_pack_from_source};
 use crate::packs::manifest::{Harness, PackError, PackManifest};
 use crate::packs::source::{EmbeddedPackSource, FsPackSource, PackSource};
+
+const SMOKE_SCRIPT_TIMEOUT: Duration = Duration::from_secs(60);
+const MAX_SMOKE_OUTPUT_BYTES: usize = 1024 * 1024;
 
 /// Tier of a conformance case.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -176,22 +182,150 @@ fn run_smoke_script(source: &dyn PackSource) -> Result<(), PackError> {
     let smoke_bytes = source.read_file("tests/smoke.sh")?;
     let smoke_path = tmp.path().join("smoke.sh");
     std::fs::write(&smoke_path, smoke_bytes).map_err(PackError::Io)?;
-    let output = Command::new("bash")
-        .arg("smoke.sh")
-        .current_dir(tmp.path())
-        .output()
-        .map_err(PackError::Io)?;
+    let output = run_bash_smoke_script(tmp.path())?;
     if !output.status.success() {
         return Err(PackError::ManifestInvalid {
-            reason: format!(
-                "tests/smoke.sh exited with {}; stdout:\n{}stderr:\n{}",
-                output.status,
-                String::from_utf8_lossy(&output.stdout),
-                String::from_utf8_lossy(&output.stderr)
+            reason: format_smoke_diagnostic(
+                &format!("tests/smoke.sh exited with {}", output.status),
+                render_capped_output(&output.stdout),
+                render_capped_output(&output.stderr),
             ),
         });
     }
     Ok(())
+}
+
+struct SmokeOutput {
+    status: std::process::ExitStatus,
+    stdout: CappedOutput,
+    stderr: CappedOutput,
+}
+
+struct CappedOutput {
+    bytes: Vec<u8>,
+    truncated: bool,
+}
+
+fn run_bash_smoke_script(project_dir: &Path) -> Result<SmokeOutput, PackError> {
+    let mut cmd = Command::new("bash");
+    cmd.arg("smoke.sh")
+        .current_dir(project_dir)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt as _;
+        cmd.process_group(0);
+    }
+
+    let mut child = cmd.spawn().map_err(PackError::Io)?;
+    #[cfg(unix)]
+    let child_pgid = i32::try_from(child.id()).ok();
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| PackError::ManifestInvalid {
+            reason: "tests/smoke.sh missing stdout pipe".to_owned(),
+        })?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| PackError::ManifestInvalid {
+            reason: "tests/smoke.sh missing stderr pipe".to_owned(),
+        })?;
+
+    let stdout_reader = thread::spawn(move || read_capped(stdout));
+    let stderr_reader = thread::spawn(move || read_capped(stderr));
+    let started = Instant::now();
+    let status = loop {
+        if let Some(status) = child.try_wait().map_err(PackError::Io)? {
+            break status;
+        }
+        if started.elapsed() >= SMOKE_SCRIPT_TIMEOUT {
+            #[cfg(unix)]
+            if let Some(pgid) = child_pgid {
+                let _ = Command::new("kill")
+                    .args(["-KILL", &format!("-{pgid}")])
+                    .status();
+            }
+            let _ = child.kill();
+            let _ = child.wait();
+            let stdout = join_capped_reader(stdout_reader)?;
+            let stderr = join_capped_reader(stderr_reader)?;
+            return Err(PackError::ManifestInvalid {
+                reason: format_smoke_diagnostic(
+                    &format!(
+                        "tests/smoke.sh timed out after {}s",
+                        SMOKE_SCRIPT_TIMEOUT.as_secs()
+                    ),
+                    render_capped_output(&stdout),
+                    render_capped_output(&stderr),
+                ),
+            });
+        }
+        thread::sleep(Duration::from_millis(10));
+    };
+
+    Ok(SmokeOutput {
+        status,
+        stdout: join_capped_reader(stdout_reader)?,
+        stderr: join_capped_reader(stderr_reader)?,
+    })
+}
+
+fn read_capped(mut reader: impl Read) -> std::io::Result<CappedOutput> {
+    let mut bytes = Vec::new();
+    let mut truncated = false;
+    let mut buf = [0; 8192];
+    loop {
+        let n = reader.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        let remaining = MAX_SMOKE_OUTPUT_BYTES.saturating_sub(bytes.len());
+        if remaining == 0 {
+            truncated = true;
+            continue;
+        }
+        let copied = remaining.min(n);
+        bytes.extend_from_slice(&buf[..copied]);
+        if copied < n {
+            truncated = true;
+        }
+    }
+    Ok(CappedOutput { bytes, truncated })
+}
+
+fn join_capped_reader(
+    handle: thread::JoinHandle<std::io::Result<CappedOutput>>,
+) -> Result<CappedOutput, PackError> {
+    handle
+        .join()
+        .map_err(|_| PackError::ManifestInvalid {
+            reason: "tests/smoke.sh output reader panicked".to_owned(),
+        })?
+        .map_err(PackError::Io)
+}
+
+fn render_capped_output(output: &CappedOutput) -> String {
+    let mut text = String::from_utf8_lossy(&output.bytes).to_string();
+    if output.truncated {
+        if !text.ends_with('\n') {
+            text.push('\n');
+        }
+        text.push_str(&format!("[truncated after {MAX_SMOKE_OUTPUT_BYTES} bytes]"));
+    }
+    text
+}
+
+fn format_smoke_diagnostic(
+    header: &str,
+    stdout: impl std::fmt::Display,
+    stderr: impl std::fmt::Display,
+) -> String {
+    format!("{header}\nstdout:\n{stdout}\nstderr:\n{stderr}")
 }
 
 fn run_install_round_trip(source: &dyn PackSource) -> Result<(), PackError> {
@@ -309,6 +443,77 @@ pub fn render_outcomes(outcomes: &[CaseOutcome]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::packs::source::FsPackSource;
+
+    fn write_codex_pack(root: &Path) {
+        std::fs::create_dir(root.join("agents")).expect("create agents dir");
+        std::fs::create_dir(root.join("commands")).expect("create commands dir");
+        std::fs::create_dir(root.join("hooks")).expect("create hooks dir");
+
+        std::fs::write(
+            root.join("pack.json"),
+            r#"{
+  "schema": "cairn-pack/v1",
+  "pack_id": "sample-pack",
+  "name": "sample-pack",
+  "version": "1.0.0",
+  "harness": "codex",
+  "cairn_mcp_compat": ">=1.0.0",
+  "description": "Sample Codex harness pack for verification.",
+  "requires_capabilities": [],
+  "subagents": [
+    {
+      "id": "context-loader",
+      "path": "agents/context-loader.md",
+      "uses_mcp_tools": ["status"]
+    }
+  ],
+  "commands": [
+    {
+      "id": "cairn-context",
+      "path": "commands/cairn-context.md",
+      "kind": "verb-direct",
+      "verb": "status"
+    }
+  ],
+  "hooks": {
+    "SessionStart": {
+      "command": "cairn status --json"
+    }
+  },
+  "manual_fragment": "AGENTS.md"
+}
+"#,
+        )
+        .expect("write pack.json");
+        std::fs::write(
+            root.join("agents/context-loader.md"),
+            "# Context Loader\n\nLoads Cairn context.\n",
+        )
+        .expect("write subagent");
+        std::fs::write(
+            root.join("commands/cairn-context.md"),
+            "# Cairn Context\n\nRun Cairn context retrieval.\n",
+        )
+        .expect("write command");
+        std::fs::write(
+            root.join("AGENTS.md"),
+            "<!-- BEGIN CAIRN PACK sample-pack -->\nSample pack instructions.\n<!-- END CAIRN PACK sample-pack -->\n",
+        )
+        .expect("write AGENTS.md");
+        std::fs::write(
+            root.join("hooks/hooks.json"),
+            r#"{"hooks":{"SessionStart":[{"command":"cairn status --json"}]}}"#,
+        )
+        .expect("write hooks.json");
+    }
+
+    fn case<'a>(outcomes: &'a [CaseOutcome], id: &str) -> &'a CaseOutcome {
+        outcomes
+            .iter()
+            .find(|outcome| outcome.id == id)
+            .unwrap_or_else(|| panic!("missing case {id}: {outcomes:#?}"))
+    }
 
     #[test]
     fn bundled_pack_passes_full_conformance() {
@@ -329,5 +534,40 @@ mod tests {
         let outcomes = run_pack_conformance("does-not-exist");
         assert_eq!(outcomes.len(), 1);
         assert!(outcomes[0].status.is_err());
+    }
+
+    #[test]
+    fn missing_smoke_script_is_optional_success() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        write_codex_pack(tmp.path());
+        let source = FsPackSource::new(tmp.path().to_path_buf());
+
+        let outcomes = run_pack_source_conformance(&source);
+
+        assert!(case(&outcomes, "pack_smoke_script").status.is_ok());
+    }
+
+    #[test]
+    fn failing_smoke_script_reports_stdout_and_stderr() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        write_codex_pack(tmp.path());
+        std::fs::create_dir(tmp.path().join("tests")).expect("create tests dir");
+        std::fs::write(
+            tmp.path().join("tests/smoke.sh"),
+            "#!/usr/bin/env bash\nprintf smoke-stdout\nprintf smoke-stderr >&2\nexit 7\n",
+        )
+        .expect("write smoke");
+        let source = FsPackSource::new(tmp.path().to_path_buf());
+
+        let outcomes = run_pack_source_conformance(&source);
+
+        let message = case(&outcomes, "pack_smoke_script")
+            .status
+            .as_ref()
+            .expect_err("smoke must fail");
+        assert!(
+            message.contains("stdout:\nsmoke-stdout\nstderr:\nsmoke-stderr"),
+            "unexpected message: {message}"
+        );
     }
 }

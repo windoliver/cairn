@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-test -f pack.json
-test -f "{{manual_fragment}}"
-test -f "agents/{{subagent_id}}.md"
-test -f "commands/{{command_id}}.md"
-grep -q "{{pack_id}}" "{{manual_fragment}}"
+test -f ".claude/agents/{{subagent_id}}.md"
+test -f ".claude/commands/{{command_id}}.md"
+test -f ".claude/settings.json"
+test -f "CLAUDE.md"
+grep -q "{{pack_id}}" "CLAUDE.md"

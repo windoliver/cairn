@@ -373,6 +373,7 @@ fn first_unresolved_token(rendered: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::packs::install::{PackInstallOpts, install_pack_from_source};
     use crate::packs::source::FsPackSource;
     use crate::packs::verify::run_pack_source_conformance;
 
@@ -436,9 +437,21 @@ mod tests {
                 "expected rendered pack to verify for {harness:?}: {outcomes:#?}"
             );
 
+            let installed_dir = tmp
+                .path()
+                .join(format!("{}-installed", harness_id(harness)));
+            let opts = PackInstallOpts {
+                harness,
+                project_dir: installed_dir.clone(),
+                force: false,
+            };
+            install_pack_from_source(&source, &opts).expect("install scaffold");
+            let smoke_path = installed_dir.join("smoke.sh");
+            std::fs::copy(output_dir.join("tests/smoke.sh"), &smoke_path)
+                .expect("copy smoke script");
             let smoke = std::process::Command::new("bash")
-                .arg("tests/smoke.sh")
-                .current_dir(&output_dir)
+                .arg("smoke.sh")
+                .current_dir(&installed_dir)
                 .output()
                 .expect("run smoke");
             assert!(
