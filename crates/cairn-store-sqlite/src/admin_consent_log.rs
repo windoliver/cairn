@@ -23,9 +23,22 @@ use crate::error::StoreError as SqliteStoreError;
 /// `ConsentLog` implementation backed by two rusqlite databases: the live
 /// vault's DB (source of currently-forgotten target hashes) and the
 /// restored DB (whose targets should be purged to match the forget set).
+///
+/// ## Swap-safe design
+///
+/// `restore::run` calls `forgotten_record_target_hashes()` BEFORE
+/// `swap_in()` (to pre-populate the cache) and `apply_post_restore_purge()`
+/// AFTER `swap_in()`. When `live_db == restored_db` (the MCP path, where
+/// the same `cairn.db` path is used for both), the cache ensures that the
+/// forget-hash set captured from the live DB is still available after the
+/// swap has overwritten that path with the restored DB.
 pub struct SqliteConsentLog {
     live_db: PathBuf,
     restored_db: PathBuf,
+    /// Pre-swap forget-hash cache. Populated by `forgotten_record_target_hashes()`
+    /// so that `apply_post_restore_purge()` can use the pre-swap set even
+    /// when `live_db == restored_db` and the swap has already happened.
+    cached_hashes: std::sync::Mutex<Option<HashSet<String>>>,
 }
 
 impl SqliteConsentLog {
@@ -33,11 +46,17 @@ impl SqliteConsentLog {
     /// (the source of currently-forgotten target hashes). `restored_db`
     /// is the path to the swapped-in DB whose targets should be purged
     /// to match the forget set.
+    ///
+    /// When `live_db == restored_db` (MCP path), call
+    /// `forgotten_record_target_hashes()` BEFORE `swap_in()` so the cache
+    /// is warm. `apply_post_restore_purge()` will use the cached set and
+    /// apply purges to the post-swap `restored_db`.
     #[must_use]
     pub fn new(live_db: PathBuf, restored_db: PathBuf) -> Self {
         Self {
             live_db,
             restored_db,
+            cached_hashes: std::sync::Mutex::new(None),
         }
     }
 }
@@ -46,12 +65,28 @@ impl ConsentLog for SqliteConsentLog {
     fn forgotten_record_target_hashes(&self) -> Result<HashSet<String>, StoreError> {
         let hashes =
             current_record_forget_hashes(&self.live_db).map_err(|e| Box::new(e) as StoreError)?;
-        Ok(hashes.into_iter().collect())
+        let set: HashSet<String> = hashes.into_iter().collect();
+        // Cache for use by apply_post_restore_purge() after swap_in() may
+        // have overwritten live_db with the restored DB.
+        if let Ok(mut guard) = self.cached_hashes.lock() {
+            *guard = Some(set.clone());
+        }
+        Ok(set)
     }
 
     fn apply_post_restore_purge(&self) -> Result<u64, StoreError> {
-        let forget_hashes =
-            current_record_forget_hashes(&self.live_db).map_err(|e| Box::new(e) as StoreError)?;
+        // Use cached pre-swap hashes if available (set by forgotten_record_target_hashes()
+        // before swap_in). Fall back to reading live_db only when no cache exists,
+        // which is correct when live_db != restored_db (CLI path).
+        let forget_hashes: HashSet<String> = {
+            let cache = self.cached_hashes.lock().ok().and_then(|g| g.clone());
+            match cache {
+                Some(cached) => cached,
+                None => current_record_forget_hashes(&self.live_db)
+                    .map(|s| s.into_iter().collect())
+                    .map_err(|e| Box::new(e) as StoreError)?,
+            }
+        };
         if forget_hashes.is_empty() {
             return Ok(0);
         }

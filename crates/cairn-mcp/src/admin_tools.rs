@@ -318,10 +318,14 @@ fn dispatch_replay_wal(args_value: serde_json::Value, vault_root: &Path) -> Call
         Ok(a) => a,
         Err(r) => return r,
     };
+    let (actor, _) = match local_vault_identity(vault_root, ResponseVerb::AdminReplayWal) {
+        Ok(pair) => pair,
+        Err(r) => return r,
+    };
 
     // from_ord is u64 in the IDL; the core verb uses u32.
     let from_ord = u32::try_from(args.from_ord).unwrap_or(u32::MAX);
-    let ctx = AdminContext::new(mcp_operator_identity(), AdminRole::Operator);
+    let ctx = AdminContext::new(actor, AdminRole::Operator);
     let req = cairn_core::verbs::admin::replay_wal::ReplayWalRequest {
         kind,
         from_ord,
@@ -381,8 +385,12 @@ fn dispatch_connector_enable(args_value: serde_json::Value, vault_root: &Path) -
         Ok(a) => a,
         Err(r) => return r,
     };
+    let (actor, _) = match local_vault_identity(vault_root, ResponseVerb::AdminConnectorEnable) {
+        Ok(pair) => pair,
+        Err(r) => return r,
+    };
 
-    let ctx = AdminContext::new(mcp_operator_identity(), AdminRole::Operator);
+    let ctx = AdminContext::new(actor, AdminRole::Operator);
     let req = ConnectorEnableRequest { name: args.name };
 
     match connector::enable(&ctx, &req, &admin) {
@@ -427,8 +435,12 @@ fn dispatch_connector_disable(args_value: serde_json::Value, vault_root: &Path) 
         Ok(a) => a,
         Err(r) => return r,
     };
+    let (actor, _) = match local_vault_identity(vault_root, ResponseVerb::AdminConnectorDisable) {
+        Ok(pair) => pair,
+        Err(r) => return r,
+    };
 
-    let ctx = AdminContext::new(mcp_operator_identity(), AdminRole::Operator);
+    let ctx = AdminContext::new(actor, AdminRole::Operator);
     let req = ConnectorDisableRequest {
         name: args.name,
         reason: args.reason,
@@ -486,6 +498,11 @@ fn dispatch_connector_backfill(args_value: serde_json::Value, vault_root: &Path)
         Ok(a) => a,
         Err(r) => return r,
     };
+    let (actor, _) =
+        match local_vault_identity(vault_root, ResponseVerb::AdminConnectorBackfill) {
+            Ok(pair) => pair,
+            Err(r) => return r,
+        };
 
     let from = match args.from.parse::<chrono::DateTime<chrono::Utc>>() {
         Ok(dt) => dt,
@@ -506,7 +523,7 @@ fn dispatch_connector_backfill(args_value: serde_json::Value, vault_root: &Path)
         }
     };
 
-    let ctx = AdminContext::new(mcp_operator_identity(), AdminRole::Operator);
+    let ctx = AdminContext::new(actor, AdminRole::Operator);
     let spawner = NoopSpawner;
     let req = BackfillRequest {
         name: args.name,

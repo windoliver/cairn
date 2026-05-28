@@ -76,6 +76,14 @@ pub fn run(
         });
     }
 
+    // Pre-capture forget hashes from the LIVE DB before swap_in() overwrites
+    // the live DB path with the restored DB (finding #161-R2-4 fix). The
+    // ConsentLog adapter caches these hashes so apply_post_restore_purge()
+    // can use them even when live_db == restored_db (MCP path).
+    consent
+        .forgotten_record_target_hashes()
+        .map_err(AdminError::Store)?;
+
     let staging = applier
         .stage(&req.artifact_path, &manifest.backup_id)
         .map_err(AdminError::Store)?;
