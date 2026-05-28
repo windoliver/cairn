@@ -223,6 +223,8 @@ fn run_bash_smoke_script(project_dir: &Path) -> Result<SmokeOutput, PackError> {
     let mut child = cmd.spawn().map_err(PackError::Io)?;
     #[cfg(unix)]
     let child_pgid = i32::try_from(child.id()).ok();
+    #[cfg(not(unix))]
+    let child_pgid = None;
     let stdout = child
         .stdout
         .take()
@@ -239,21 +241,17 @@ fn run_bash_smoke_script(project_dir: &Path) -> Result<SmokeOutput, PackError> {
     let stdout_reader = thread::spawn(move || read_capped(stdout));
     let stderr_reader = thread::spawn(move || read_capped(stderr));
     let started = Instant::now();
+    let deadline = started + SMOKE_SCRIPT_TIMEOUT;
     let status = loop {
         if let Some(status) = child.try_wait().map_err(PackError::Io)? {
             break status;
         }
-        if started.elapsed() >= SMOKE_SCRIPT_TIMEOUT {
-            #[cfg(unix)]
-            if let Some(pgid) = child_pgid {
-                let _ = Command::new("kill")
-                    .args(["-KILL", &format!("-{pgid}")])
-                    .status();
-            }
+        if Instant::now() >= deadline {
+            kill_child_process_group(child_pgid);
             let _ = child.kill();
             let _ = child.wait();
-            let stdout = join_capped_reader(stdout_reader)?;
-            let stderr = join_capped_reader(stderr_reader)?;
+            let stdout = join_capped_reader_until(stdout_reader, deadline)?;
+            let stderr = join_capped_reader_until(stderr_reader, deadline)?;
             return Err(PackError::ManifestInvalid {
                 reason: format_smoke_diagnostic(
                     &format!(
@@ -267,13 +265,29 @@ fn run_bash_smoke_script(project_dir: &Path) -> Result<SmokeOutput, PackError> {
         }
         thread::sleep(Duration::from_millis(10));
     };
+    kill_child_process_group(child_pgid);
 
     Ok(SmokeOutput {
         status,
-        stdout: join_capped_reader(stdout_reader)?,
-        stderr: join_capped_reader(stderr_reader)?,
+        stdout: join_capped_reader_until(stdout_reader, deadline)?,
+        stderr: join_capped_reader_until(stderr_reader, deadline)?,
     })
 }
+
+#[cfg(unix)]
+fn kill_child_process_group(child_pgid: Option<i32>) {
+    if let Some(pgid) = child_pgid {
+        let _ = Command::new("kill")
+            .args(["-KILL", &format!("-{pgid}")])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    }
+}
+
+#[cfg(not(unix))]
+fn kill_child_process_group(_child_pgid: Option<i32>) {}
 
 fn read_capped(mut reader: impl Read) -> std::io::Result<CappedOutput> {
     let mut bytes = Vec::new();
@@ -298,9 +312,25 @@ fn read_capped(mut reader: impl Read) -> std::io::Result<CappedOutput> {
     Ok(CappedOutput { bytes, truncated })
 }
 
-fn join_capped_reader(
+fn join_capped_reader_until(
     handle: thread::JoinHandle<std::io::Result<CappedOutput>>,
+    deadline: Instant,
 ) -> Result<CappedOutput, PackError> {
+    while !handle.is_finished() {
+        if Instant::now() >= deadline {
+            return Err(PackError::ManifestInvalid {
+                reason: format_smoke_diagnostic(
+                    &format!(
+                        "tests/smoke.sh timed out after {}s",
+                        SMOKE_SCRIPT_TIMEOUT.as_secs()
+                    ),
+                    "",
+                    "",
+                ),
+            });
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
     handle
         .join()
         .map_err(|_| PackError::ManifestInvalid {
@@ -568,6 +598,26 @@ mod tests {
         assert!(
             message.contains("stdout:\nsmoke-stdout\nstderr:\nsmoke-stderr"),
             "unexpected message: {message}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn smoke_script_cleans_up_background_processes_that_hold_pipes() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            tmp.path().join("smoke.sh"),
+            "#!/usr/bin/env bash\nsleep 5 &\nexit 0\n",
+        )
+        .expect("write smoke");
+
+        let started = Instant::now();
+        let output = run_bash_smoke_script(tmp.path()).expect("run smoke");
+
+        assert!(output.status.success());
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "smoke runner waited for a background descendant holding stdout/stderr pipes"
         );
     }
 }
