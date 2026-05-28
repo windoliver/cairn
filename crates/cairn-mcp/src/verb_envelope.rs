@@ -329,6 +329,24 @@ fn response_data_matches_verb(verb: ResponseVerb, data: &ResponseData) -> bool {
             | (ResponseVerb::CaptureTrace, ResponseData::CaptureTrace(_))
             | (ResponseVerb::Lint, ResponseData::Lint(_))
             | (ResponseVerb::Forget, ResponseData::Forget(_))
+            | (ResponseVerb::AdminSnapshot, ResponseData::AdminSnapshot(_))
+            | (ResponseVerb::AdminRestore, ResponseData::AdminRestore(_))
+            | (
+                ResponseVerb::AdminReplayWal,
+                ResponseData::AdminReplayWal(_)
+            )
+            | (
+                ResponseVerb::AdminConnectorEnable,
+                ResponseData::AdminConnectorEnable(_)
+            )
+            | (
+                ResponseVerb::AdminConnectorDisable,
+                ResponseData::AdminConnectorDisable(_)
+            )
+            | (
+                ResponseVerb::AdminConnectorBackfill,
+                ResponseData::AdminConnectorBackfill(_)
+            )
     )
 }
 

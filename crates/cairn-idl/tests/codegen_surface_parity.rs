@@ -18,6 +18,12 @@ const EXPECTED_VERBS: &[&str] = &[
     "propose_share",
     "accept_share",
     "revoke_share",
+    "admin_snapshot",
+    "admin_restore",
+    "admin_replay_wal",
+    "admin_connector_enable",
+    "admin_connector_disable",
+    "admin_connector_backfill",
 ];
 
 fn doc() -> ir::Document {

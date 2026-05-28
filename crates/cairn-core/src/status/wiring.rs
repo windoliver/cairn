@@ -183,22 +183,24 @@ pub const fn federation_extension_ready() -> bool {
 
 /// `cairn.admin.v1` extension capability registration (issue #161).
 ///
-/// Set to `true` only when every surface that should serve the verbs
-/// (CLI, MCP, SDK) is wired AND each per-surface dispatch constant below
-/// is also `true`. Setting this alone advertises the capability without
-/// a backing dispatch — which is a brief-§15 fail-closed violation.
-pub const ADMIN_EXTENSION_WIRED: bool = false;
+/// Live as of issue #161 Gap 8. Capability advertisement still gates on
+/// runtime preconditions (`admin.enabled` config + at-least-one-operator)
+/// through [`admin_extension_ready`].
+pub const ADMIN_EXTENSION_WIRED: bool = true;
 
-/// `true` only when `cairn admin {snapshot, restore, replay-wal, connector …}`
-/// subcommands route through the new `cairn-core::verbs::admin::*` fns.
-/// Until then the old `cairn-cli` code paths run and the new verb fns are
-/// not reachable from the binary.
-pub const ADMIN_CLI_DISPATCH_WIRED: bool = false;
+/// `true` — `cairn admin {grant, replay-wal, connector {enable,disable,
+/// backfill}}` route through `cairn-core::verbs::admin::*` (issue #161
+/// Gap 2). Note: `cairn admin snapshot` and `cairn admin restore` still
+/// take the v0.1 directory-tree dispatch path for backward compatibility;
+/// the v0.2 IDL verbs `admin_snapshot` / `admin_restore` ship via MCP and
+/// SDK only.
+pub const ADMIN_CLI_DISPATCH_WIRED: bool = true;
 
-/// `true` only when `cairn-mcp` registers tool decls + handler dispatch
-/// for the six admin verbs. Until then MCP `list_tools` MUST NOT include
-/// `admin.*` and `tools/call` for them MUST return error.
-pub const ADMIN_MCP_DISPATCH_WIRED: bool = false;
+/// `true` — `cairn-mcp` registers tool decls + handler dispatch for all
+/// six admin verbs (issue #161 Gap 5). `tools/list` advertises them
+/// when the negotiated capability set includes
+/// `cairn.mcp.v1.extension.admin`.
+pub const ADMIN_MCP_DISPATCH_WIRED: bool = true;
 
 /// Truth-table gate for advertising the `cairn.admin.v1` extension.
 ///

@@ -26,6 +26,12 @@ pub const SUBCOMMANDS: &[&str] = &[
     "propose_share",
     "accept_share",
     "revoke_share",
+    "admin_snapshot",
+    "admin_restore",
+    "admin_replay_wal",
+    "admin_connector_enable",
+    "admin_connector_disable",
+    "admin_connector_backfill",
     "handshake",
     "status",
 ];
@@ -48,6 +54,12 @@ pub fn command() -> clap::Command {
         .subcommand(verbs::propose_share_subcommand())
         .subcommand(verbs::accept_share_subcommand())
         .subcommand(verbs::revoke_share_subcommand())
+        .subcommand(verbs::admin_snapshot_subcommand())
+        .subcommand(verbs::admin_restore_subcommand())
+        .subcommand(verbs::admin_replay_wal_subcommand())
+        .subcommand(verbs::admin_connector_enable_subcommand())
+        .subcommand(verbs::admin_connector_disable_subcommand())
+        .subcommand(verbs::admin_connector_backfill_subcommand())
         .subcommand(prelude::handshake_subcommand())
         .subcommand(prelude::status_subcommand())
 }

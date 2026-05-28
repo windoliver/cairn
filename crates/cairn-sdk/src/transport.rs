@@ -600,7 +600,7 @@ impl<T: Transport> Sdk<T> {
         Err(unimplemented("admin_replay_wal"))
     }
 
-    /// `admin_connector_enable` — flip the connector_state row to enabled.
+    /// `admin_connector_enable` — flip the `connector_state` row to enabled.
     ///
     /// # Errors
     /// See [`Self::admin_snapshot`].
@@ -617,7 +617,7 @@ impl<T: Transport> Sdk<T> {
         Err(unimplemented("admin_connector_enable"))
     }
 
-    /// `admin_connector_disable` — flip the connector_state row to disabled.
+    /// `admin_connector_disable` — flip the `connector_state` row to disabled.
     ///
     /// # Errors
     /// See [`Self::admin_snapshot`].

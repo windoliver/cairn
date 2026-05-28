@@ -455,8 +455,11 @@ fn compute_capabilities(
             expiration_runtime_ready,
             evaluation_runtime_ready,
             federation_runtime_ready: false,
-            // admin_runtime_ready not yet plumbed through CLI (phase 6, issue #161).
-            admin_runtime_ready: false,
+            // admin_runtime_ready: true iff the bound vault has at least
+            // one operator row in admin_roles. CLI status stays read-only;
+            // a probe of the sync SqliteAdminStateStore is cheap (open +
+            // single SELECT) and avoids the full async store boot.
+            admin_runtime_ready: vault_root.is_some_and(probe_has_any_operator),
             contract_phase: CLI_CONTRACT_PHASE,
         })
     } else {
@@ -562,6 +565,22 @@ fn probe_mcp_graph_tools(
     let mgt = McpGraphToolsStatus::from_resolved(&avail, probe_basis);
     let wire = mgt.to_wire();
     (Some((avail, wire)), probe_basis)
+}
+
+/// Probe the bound vault for at least one operator-role identity in
+/// `admin_roles`. Cheap (sync open + single SELECT). Returns `false`
+/// on any IO/store error so admin advertisement stays fail-closed —
+/// brief §15.
+fn probe_has_any_operator(vault_root: &Path) -> bool {
+    use cairn_core::contract::admin_state::AdminStateStore as _;
+    let db_path = vault_root.join(".cairn").join("cairn.db");
+    if !db_path.exists() {
+        return false;
+    }
+    let Ok(admin) = cairn_store_sqlite::SqliteAdminStateStore::open(&db_path) else {
+        return false;
+    };
+    admin.has_any_operator().unwrap_or(false)
 }
 
 /// Project a [`CairnConfig`] + model-on-disk state into the wire-format

@@ -92,6 +92,7 @@ fn dispatch(matches: &ArgMatches, vault_root: &Path) -> Result<ExitCode> {
     };
 
     let db_path = vault_root.join(".cairn").join("cairn.db");
+    crate::admin::ensure_main_store_schema(&db_path)?;
     let admin = SqliteAdminStateStore::open(&db_path)
         .map_err(|e| anyhow::anyhow!("{e}"))
         .context("open admin state store")?;

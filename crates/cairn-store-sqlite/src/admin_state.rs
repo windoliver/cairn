@@ -76,8 +76,34 @@ impl SqliteAdminStateStore {
         Ok(())
     }
 
-    /// Apply admin migrations (0003 + 0004) if the tables are absent.
+    /// Apply admin migrations (0003 + 0004) iff the main store's
+    /// migration ledger does not yet exist (in-memory tests + isolated
+    /// integration tests that never open the main store).
+    ///
+    /// When the main store has run, migrations 0070 + 0071 already
+    /// provisioned `admin_roles` + `connector_state` and stamped
+    /// `schema_migrations`. Running the embedded SQL here would CREATE
+    /// TABLE on existing schema and trip the `schema_migrations_immutable`
+    /// trigger.
     fn run_migrations(conn: &Connection) -> Result<(), StoreError> {
+        let main_ledger_present: bool = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_schema \
+                 WHERE type = 'table' AND name = 'schema_migrations'",
+                [],
+                |r| r.get::<_, i64>(0),
+            )
+            .map_err(|e| Box::new(e) as StoreError)?
+            > 0;
+
+        if main_ledger_present {
+            // Main store will own the schema (migrations 0070 / 0071).
+            // Caller is expected to have opened the main store first so
+            // those migrations ran.
+            return Ok(());
+        }
+
+        // Cold-start path (in-memory / isolated test): embed the schema.
         let has_admin_roles: bool = conn
             .query_row(
                 "SELECT COUNT(*) FROM sqlite_schema \
@@ -87,7 +113,6 @@ impl SqliteAdminStateStore {
             )
             .map_err(|e| Box::new(e) as StoreError)?
             > 0;
-
         if !has_admin_roles {
             conn.execute_batch(MIGRATION_0003)
                 .map_err(|e| Box::new(e) as StoreError)?;
@@ -102,7 +127,6 @@ impl SqliteAdminStateStore {
             )
             .map_err(|e| Box::new(e) as StoreError)?
             > 0;
-
         if !has_connector_state {
             conn.execute_batch(MIGRATION_0004)
                 .map_err(|e| Box::new(e) as StoreError)?;

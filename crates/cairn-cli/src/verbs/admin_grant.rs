@@ -57,6 +57,14 @@ pub fn run(matches: &ArgMatches, vault_root: &Path) -> ExitCode {
 fn grant(raw: &str, vault_root: &Path) -> Result<()> {
     let identity = Identity::parse(raw).with_context(|| format!("parse identity {raw}"))?;
     let db_path = vault_root.join(".cairn").join("cairn.db");
+
+    // Provision the main store schema first (migrations 0070 / 0071
+    // create admin_roles + connector_state). Otherwise the sync
+    // SqliteAdminStateStore would create the tables itself but leave
+    // schema_migrations un-stamped, tripping the main store's drift
+    // check the next time it opens.
+    crate::admin::ensure_main_store_schema(&db_path)?;
+
     let admin = SqliteAdminStateStore::open(&db_path)
         .map_err(|e| anyhow::anyhow!("{e}"))
         .context("open admin state store")?;

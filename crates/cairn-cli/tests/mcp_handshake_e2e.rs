@@ -240,7 +240,10 @@ fn run_tools_list_protocol(child: &mut Child) -> Result<(), String> {
         .collect();
     let missing: Vec<&str> = TOOLS
         .iter()
-        .filter(|tool| !cairn_mcp::federation_tools::is_federation_tool(tool.name))
+        .filter(|tool| {
+            !cairn_mcp::federation_tools::is_federation_tool(tool.name)
+                && !cairn_mcp::admin_tools::is_admin_tool(tool.name)
+        })
         .map(|tool| tool.name)
         .filter(|name| !names.contains(name))
         .collect();
@@ -423,7 +426,10 @@ fn run_graph_tools_protocol(child: &mut Child) -> Result<(), String> {
 
     for core in TOOLS
         .iter()
-        .filter(|tool| !cairn_mcp::federation_tools::is_federation_tool(tool.name))
+        .filter(|tool| {
+            !cairn_mcp::federation_tools::is_federation_tool(tool.name)
+                && !cairn_mcp::admin_tools::is_admin_tool(tool.name)
+        })
         .map(|tool| tool.name)
     {
         let count = names.iter().filter(|name| **name == core).count();
@@ -469,10 +475,10 @@ fn run_tool_description_protocol(child: &mut Child) -> Result<(), String> {
             )
         })?;
 
-    for decl in TOOLS
-        .iter()
-        .filter(|d| !cairn_mcp::federation_tools::is_federation_tool(d.name))
-    {
+    for decl in TOOLS.iter().filter(|d| {
+        !cairn_mcp::federation_tools::is_federation_tool(d.name)
+            && !cairn_mcp::admin_tools::is_admin_tool(d.name)
+    }) {
         let advertised = tools
             .iter()
             .find(|tool| tool.get("name").and_then(Value::as_str) == Some(decl.name))

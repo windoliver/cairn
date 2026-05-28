@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 
-const EXPECTED_VERB_IDS: [&str; 11] = [
+const EXPECTED_VERB_IDS: [&str; 17] = [
     "ingest",
     "search",
     "retrieve",
@@ -19,6 +19,12 @@ const EXPECTED_VERB_IDS: [&str; 11] = [
     "propose_share",
     "accept_share",
     "revoke_share",
+    "admin_snapshot",
+    "admin_restore",
+    "admin_replay_wal",
+    "admin_connector_enable",
+    "admin_connector_disable",
+    "admin_connector_backfill",
 ];
 
 const EXPECTED_CONTRACT: &str = "cairn.mcp.v1";

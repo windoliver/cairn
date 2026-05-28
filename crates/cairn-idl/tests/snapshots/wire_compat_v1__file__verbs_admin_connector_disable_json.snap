@@ -1,0 +1,55 @@
+---
+source: crates/cairn-idl/tests/wire_compat_v1.rs
+expression: body
+---
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cairn.dev/schema/cairn.mcp.v1/verbs/admin_connector_disable.json",
+  "title": "Cairn verb: admin_connector_disable",
+  "x-cairn-contract": "cairn.mcp.v1",
+  "x-cairn-verb-id": "admin_connector_disable",
+  "x-cairn-capability": "cairn.mcp.v1.extension.admin",
+  "x-cairn-auth": "signed_chain",
+  "x-cairn-extension": "cairn.admin.v1",
+  "x-cairn-cli": {
+    "command": "connector-disable",
+    "flags": [
+      { "name": "name",   "long": "name",   "value_source": "string", "cli_exemplar": "github" },
+      { "name": "reason", "long": "reason", "value_source": "string" }
+    ]
+  },
+  "x-cairn-skill-triggers": {
+    "positive_triggers": [
+      "use when the operator wants to stop a data connector from polling",
+      "use when the user says 'disable the github connector', 'pause the linear connector', or 'stop connector polling'"
+    ],
+    "negative_triggers": [
+      "do NOT use to enable a connector — that belongs to admin_connector_enable",
+      "do NOT use to trigger a one-off backfill — that belongs to admin_connector_backfill"
+    ],
+    "exclusivity_hints": "this is the sole connector-disable surface for the cairn.admin.v1 extension"
+  },
+  "type": "object",
+  "$defs": {
+    "Args": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name"],
+      "properties": {
+        "name":   { "type": "string", "minLength": 1 },
+        "reason": { "type": "string", "minLength": 1 }
+      }
+    },
+    "Data": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "enabled", "last_changed_at"],
+      "properties": {
+        "name":            { "type": "string",  "minLength": 1 },
+        "enabled":         { "type": "boolean" },
+        "last_changed_at": { "type": "string",  "format": "date-time", "minLength": 20 },
+        "reason":          { "type": "string",  "minLength": 1 }
+      }
+    }
+  }
+}

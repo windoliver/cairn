@@ -65,6 +65,12 @@ const CONTRACT_FILES: &[&str] = &[
     "verbs/propose_share.json",
     "verbs/accept_share.json",
     "verbs/revoke_share.json",
+    "verbs/admin_snapshot.json",
+    "verbs/admin_restore.json",
+    "verbs/admin_replay_wal.json",
+    "verbs/admin_connector_enable.json",
+    "verbs/admin_connector_disable.json",
+    "verbs/admin_connector_backfill.json",
     "plugin/manifest.json",
 ];
 
