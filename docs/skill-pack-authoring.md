@@ -123,18 +123,24 @@ Harness packs bind only the canonical lifecycle events:
 - `PostToolUse`
 - `Stop`
 
-Hook commands should forward the harness payload on stdin and ask Cairn for JSON
-output:
+The manifest `hooks` map names the lifecycle events a pack binds: manifest hooks validate event names; concrete installed hook payloads live in harness hook files. Claude Code source packs provide those payloads in
+`hooks/settings.json`, which the installer merges into `.claude/settings.json`.
+Codex and Gemini source packs provide them in `hooks/hooks.json`, which the
+installer merges into `.codex/hooks.json` or `.gemini/hooks.json`.
+
+Codex and Gemini starter hooks forward the harness payload on stdin and ask
+Cairn for JSON output:
 
 ```bash
 cairn hook <event> --payload-file - --json
 ```
 
 Use the concrete event name in generated bindings, for example
-`cairn hook SessionStart --payload-file - --json`. Include extra flags such as
-`--vault-path` only when the target environment requires them. Hook bindings
-should be deterministic wrappers around Cairn, not scripts that parse or mutate
-the vault independently.
+`cairn hook SessionStart --payload-file - --json`. The maintained Claude Code
+reference pack uses Claude settings entries shaped like
+`cairn hook <event> --vault-path {{PROJECT_DIR_SHELL}}` in
+`hooks/settings.json`. Hook bindings should be deterministic wrappers around
+Cairn, not scripts that parse or mutate the vault independently.
 
 ## Subagent Prompt Contract
 
@@ -166,7 +172,19 @@ flags without changing semantics.
 ## Operating Manual Fragments
 
 The manual fragment teaches the target harness how the pack should be used after
-installation. Wrap the complete fragment in ownership markers:
+installation. Marker rules are harness-specific because Claude Code uses a
+Claude-specific injector while Codex and Gemini use pack-id guarded blocks.
+
+Claude Code source fragments in `manual.md` must use the fixed manual markers:
+
+```markdown
+<!-- BEGIN CAIRN PACK MANUAL -->
+Pack instructions go here.
+<!-- END CAIRN PACK MANUAL -->
+```
+
+Codex and Gemini source fragments must wrap the complete fragment in markers
+that include the pack id:
 
 ```markdown
 <!-- BEGIN CAIRN PACK my-pack -->
@@ -174,13 +192,14 @@ Pack instructions go here.
 <!-- END CAIRN PACK my-pack -->
 ```
 
-The marker id must match `pack_id`. Cairn uses these markers to update pack-owned
-content without overwriting unrelated local instructions. Use the harness manual
-source and install target shown in the layout matrix. For Claude Code, the pack
-source fragment is `manual.md` and the installer injects that guarded block into
-the project's `CLAUDE.md`. For Codex, the source and target are both
-`AGENTS.md`; for Gemini, the source and target are both `GEMINI.md`. The starter
-scaffold chooses the correct fragment path for its selected harness.
+For Codex and Gemini, the marker id must match `pack_id`. Cairn uses these
+markers to update pack-owned content without overwriting unrelated local
+instructions. Use the harness manual source and install target shown in the
+layout matrix. For Claude Code, the pack source fragment is `manual.md` and the
+installer injects that guarded manual block into the project's `CLAUDE.md`. For
+Codex, the source and target are both `AGENTS.md`; for Gemini, the source and
+target are both `GEMINI.md`. The starter scaffold chooses the correct fragment
+path for its selected harness.
 
 ## Versioning And Compatibility
 
