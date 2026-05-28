@@ -197,6 +197,26 @@ fn skill_pack_authoring_guide_has_required_anchors() {
     ] {
         assert!(guide.contains(heading), "missing heading {heading}");
     }
+
+    for required_text in [
+        "cairn-pack/v1",
+        ".cairnpack",
+        "cairn skillpack",
+        "manual.md",
+        "CLAUDE.md",
+        "AGENTS.md",
+        "GEMINI.md",
+        "hooks/settings.json",
+        "hooks/hooks.json",
+        "cairn plugins verify --pack-path . --strict",
+        "bash tests/smoke.sh",
+        "temporary install round-trip and does not install into the current project",
+    ] {
+        assert!(
+            guide.contains(required_text),
+            "missing guide text {required_text}"
+        );
+    }
 }
 
 #[test]
