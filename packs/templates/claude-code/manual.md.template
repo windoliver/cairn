@@ -1,7 +1,7 @@
-<!-- BEGIN CAIRN PACK MANUAL -->
+<!-- BEGIN CAIRN PACK {{pack_id}} -->
 ## Cairn Pack: {{display_name}} (`{{pack_id}}`)
 
 Use the `{{command_id}}` command or `{{subagent_id}}` subagent when durable
 Cairn memory context is useful. Prefer typed Cairn MCP calls over shelling out
 for core verb behavior.
-<!-- END CAIRN PACK MANUAL -->
+<!-- END CAIRN PACK {{pack_id}} -->

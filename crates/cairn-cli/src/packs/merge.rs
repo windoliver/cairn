@@ -132,13 +132,13 @@ pub fn merge_settings_json(
         // across version bumps).
         existing_array.retain(|entry| !marker_matches_pack(entry, pack_id));
 
-        // Drop legacy pre-pack entries. The pre-pack inline installer
-        // wrote unmarked SessionStart hooks running
-        // `cairn ingest --folder . --mode keyword ... &` into
-        // `.claude/settings.json`. Without this sweep an upgrade
-        // preserves the legacy background-ingest hook as if it were
-        // user-owned, running BOTH paths on every session.
-        existing_array.retain(|entry| !is_legacy_pre_pack_hook(entry));
+        if pack_id == "cairn-claude-code" {
+            // Drop legacy pre-pack entries only for the bundled Cairn
+            // pack. External packs must not remove unrelated project
+            // hook entries, even if those entries look like old Cairn
+            // hooks.
+            existing_array.retain(|entry| !is_legacy_pre_pack_hook(entry));
+        }
 
         // Append the pack entries, each tagged with the marker.
         for entry in pack_array {
@@ -307,6 +307,34 @@ mod tests {
         assert_eq!(
             arr[0][PACK_MARKER_KEY].as_str(),
             Some("cairn-claude-code@0.1.0")
+        );
+    }
+
+    #[test]
+    fn merge_preserves_legacy_signature_for_external_packs() {
+        let existing = serde_json::json!({
+            "hooks": {
+                "SessionStart": [
+                    {
+                        "command": "cairn ingest --folder . --mode keyword >/tmp/cairn-session-start.log 2>&1 &"
+                    }
+                ]
+            }
+        });
+
+        let out = merge_settings_json(existing, &pack_payload(), "external-pack@0.1.0")
+            .expect("merge ok");
+
+        let arr = out["hooks"]["SessionStart"].as_array().unwrap();
+        assert_eq!(
+            arr.len(),
+            2,
+            "external packs must preserve unrelated user/project hook entries"
+        );
+        assert!(arr[0]["command"].as_str().unwrap().contains("cairn ingest"));
+        assert_eq!(
+            arr[1][PACK_MARKER_KEY].as_str(),
+            Some("external-pack@0.1.0")
         );
     }
 

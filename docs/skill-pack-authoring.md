@@ -190,19 +190,8 @@ flags without changing semantics.
 ## Operating Manual Fragments
 
 The manual fragment teaches the target harness how the pack should be used after
-installation. Marker rules are harness-specific because Claude Code uses a
-Claude-specific injector while Codex and Gemini use pack-id guarded blocks.
-
-Claude Code source fragments in `manual.md` must use the fixed manual markers:
-
-```markdown
-<!-- BEGIN CAIRN PACK MANUAL -->
-Pack instructions go here.
-<!-- END CAIRN PACK MANUAL -->
-```
-
-Codex and Gemini source fragments must wrap the complete fragment in markers
-that include the pack id:
+installation. All harness source fragments must wrap the complete fragment in
+markers that include the pack id:
 
 ```markdown
 <!-- BEGIN CAIRN PACK my-pack -->
@@ -210,14 +199,14 @@ Pack instructions go here.
 <!-- END CAIRN PACK my-pack -->
 ```
 
-For Codex and Gemini, the marker id must match `pack_id`. Cairn uses these
-markers to update pack-owned content without overwriting unrelated local
-instructions. Use the harness manual source and install target shown in the
-layout matrix. For Claude Code, the pack source fragment is `manual.md` and the
-installer injects that guarded manual block into the project's `CLAUDE.md`. For
-Codex, the source and target are both `AGENTS.md`; for Gemini, the source and
-target are both `GEMINI.md`. The starter scaffold chooses the correct fragment
-path for its selected harness.
+The marker id must match `pack_id`. Cairn uses these markers to update
+pack-owned content without overwriting unrelated local instructions or other
+packs' manual blocks. Use the harness manual source and install target shown in
+the layout matrix. For Claude Code, the pack source fragment is `manual.md` and
+the installer injects that guarded manual block into the project's `CLAUDE.md`.
+For Codex, the source and target are both `AGENTS.md`; for Gemini, the source
+and target are both `GEMINI.md`. The starter scaffold chooses the correct
+fragment path for its selected harness.
 
 ## Versioning And Compatibility
 

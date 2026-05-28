@@ -341,6 +341,39 @@ impl PackManifest {
         Ok(())
     }
 
+    /// Validate a harness hook payload file against this manifest's hook map.
+    ///
+    /// # Errors
+    /// Returns [`PackError`] if the payload lacks a `hooks` object, declares an
+    /// unknown lifecycle event, or binds an event not declared by the manifest.
+    pub fn validate_hook_payload_events(
+        &self,
+        payload: &serde_json::Value,
+        payload_path: &str,
+    ) -> Result<(), PackError> {
+        let hooks = payload
+            .get("hooks")
+            .and_then(serde_json::Value::as_object)
+            .ok_or_else(|| PackError::ManifestInvalid {
+                reason: format!("{payload_path} missing `hooks` object"),
+            })?;
+        for hook_name in hooks.keys() {
+            if !HOOK_EVENTS.contains(&hook_name.as_str()) {
+                return Err(PackError::HookUnknown {
+                    hook: hook_name.clone(),
+                });
+            }
+            if !self.hooks.contains_key(hook_name) {
+                return Err(PackError::ManifestInvalid {
+                    reason: format!(
+                        "{payload_path} declares hook event `{hook_name}` not present in pack.json"
+                    ),
+                });
+            }
+        }
+        Ok(())
+    }
+
     /// Verify every path referenced by the manifest can be read from
     /// the supplied pack source.
     ///

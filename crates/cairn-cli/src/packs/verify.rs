@@ -445,7 +445,8 @@ fn assert_manual_and_hook_json(
     }
 
     let hooks_bytes = source.read_file("hooks/hooks.json")?;
-    serde_json::from_slice::<serde_json::Value>(&hooks_bytes)?;
+    let hook_payload: serde_json::Value = serde_json::from_slice(&hooks_bytes)?;
+    manifest.validate_hook_payload_events(&hook_payload, "hooks/hooks.json")?;
     Ok(())
 }
 
@@ -597,6 +598,29 @@ mod tests {
             .expect_err("smoke must fail");
         assert!(
             message.contains("stdout:\nsmoke-stdout\nstderr:\nsmoke-stderr"),
+            "unexpected message: {message}"
+        );
+    }
+
+    #[test]
+    fn codex_hook_payload_rejects_unknown_event() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        write_codex_pack(tmp.path());
+        std::fs::write(
+            tmp.path().join("hooks/hooks.json"),
+            r#"{"hooks":{"DefinitelyNotAHook":[{"command":"cairn status --json"}]}}"#,
+        )
+        .expect("write hooks");
+        let source = FsPackSource::new(tmp.path().to_path_buf());
+
+        let outcomes = run_pack_source_conformance(&source);
+
+        let message = case(&outcomes, "pack_codex_static_files")
+            .status
+            .as_ref()
+            .expect_err("unknown hook payload event must fail");
+        assert!(
+            message.contains("unknown hook event `DefinitelyNotAHook`"),
             "unexpected message: {message}"
         );
     }

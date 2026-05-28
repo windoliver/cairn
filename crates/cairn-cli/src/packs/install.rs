@@ -174,6 +174,7 @@ fn install_hooks(
             let project_dir_token = render_project_dir(&opts.project_dir);
             install_hook_payloads(
                 source,
+                manifest,
                 &opts.project_dir,
                 opts.force,
                 &project_dir_token,
@@ -184,6 +185,7 @@ fn install_hooks(
         Harness::Codex | Harness::Gemini => {
             let bytes = source.read_file("hooks/hooks.json")?;
             let pack_hooks: Value = serde_json::from_slice(&bytes)?;
+            manifest.validate_hook_payload_events(&pack_hooks, "hooks/hooks.json")?;
             let target = opts.project_dir.join(harness_hook_file(manifest.harness));
             let existing_hooks = read_optional_json(&target)?;
             let pack_id_at_version = format!("{}@{}", manifest.pack_id, manifest.version);
@@ -205,21 +207,12 @@ fn install_manual(
 ) -> Result<(), PackError> {
     let bytes = source.read_file(&manifest.manual_fragment)?;
     let target = opts.project_dir.join(harness_manual_file(manifest.harness));
-    if manifest.harness == Harness::ClaudeCode {
-        let manual_text = std::str::from_utf8(&bytes).map_err(|e| PackError::ManifestInvalid {
-            reason: format!("manual_fragment is not UTF-8: {e}"),
-        })?;
-        let existing = read_optional_text(&target)?;
-        let injected = crate::packs::merge::inject_block(existing, manual_text)?;
-        write_text(&opts.project_dir, &target, &injected, receipt)
-    } else {
-        let manual_text = std::str::from_utf8(&bytes).map_err(|e| PackError::ManifestInvalid {
-            reason: format!("manual_fragment is not UTF-8: {e}"),
-        })?;
-        let existing = read_optional_text(&target)?;
-        let injected = inject_pack_manual_block(existing, manual_text, &manifest.pack_id, &target)?;
-        write_text(&opts.project_dir, &target, &injected, receipt)
-    }
+    let manual_text = std::str::from_utf8(&bytes).map_err(|e| PackError::ManifestInvalid {
+        reason: format!("manual_fragment is not UTF-8: {e}"),
+    })?;
+    let existing = read_optional_text(&target)?;
+    let injected = inject_pack_manual_block(existing, manual_text, &manifest.pack_id, &target)?;
+    write_text(&opts.project_dir, &target, &injected, receipt)
 }
 
 fn inject_pack_manual_block(
@@ -254,12 +247,45 @@ fn inject_pack_manual_block(
             Ok(out)
         }
         (None, None) => {
+            if pack_id == "cairn-claude-code"
+                && let Some(migrated) =
+                    replace_legacy_claude_manual_block(&existing, normalised_body, target)?
+            {
+                return Ok(migrated);
+            }
             let separator = if existing.ends_with('\n') { "" } else { "\n" };
             Ok(format!("{existing}{separator}{normalised_body}\n"))
         }
         _ => Err(PackError::MergeConflict {
             file: target.display().to_string(),
             reason: format!("existing file has unbalanced CAIRN PACK `{pack_id}` markers"),
+        }),
+    }
+}
+
+const LEGACY_CLAUDE_MANUAL_BEGIN: &str = "<!-- BEGIN CAIRN PACK MANUAL -->";
+const LEGACY_CLAUDE_MANUAL_END: &str = "<!-- END CAIRN PACK MANUAL -->";
+
+fn replace_legacy_claude_manual_block(
+    existing: &str,
+    normalised_body: &str,
+    target: &Path,
+) -> Result<Option<String>, PackError> {
+    let begin = existing.find(LEGACY_CLAUDE_MANUAL_BEGIN);
+    let end = existing.find(LEGACY_CLAUDE_MANUAL_END);
+    match (begin, end) {
+        (Some(b), Some(e)) if b < e => {
+            let end_after = e + LEGACY_CLAUDE_MANUAL_END.len();
+            let mut out = String::with_capacity(existing.len() + normalised_body.len());
+            out.push_str(&existing[..b]);
+            out.push_str(normalised_body);
+            out.push_str(&existing[end_after..]);
+            Ok(Some(out))
+        }
+        (None, None) => Ok(None),
+        _ => Err(PackError::MergeConflict {
+            file: target.display().to_string(),
+            reason: "existing file has unbalanced CAIRN PACK MANUAL markers".to_owned(),
         }),
     }
 }
@@ -301,6 +327,7 @@ const fn harness_manual_file(harness: Harness) -> &'static str {
 /// `{{PROJECT_DIR}}` with the canonical install path.
 fn install_hook_payloads(
     source: &dyn PackSource,
+    manifest: &PackManifest,
     project_dir: &Path,
     force: bool,
     project_dir_token: &str,
@@ -313,11 +340,14 @@ fn install_hook_payloads(
             reason: format!("hooks/settings.json is not UTF-8: {e}"),
         })?;
     let project_dir_shell = shell_single_quote(project_dir_token);
+    let project_dir_json = json_string_fragment(project_dir_token)?;
+    let project_dir_shell_json = json_string_fragment(&project_dir_shell)?;
     let pack_settings: Value = serde_json::from_str(
         &pack_settings_text
-            .replace("{{PROJECT_DIR_SHELL}}", &project_dir_shell)
-            .replace("{{PROJECT_DIR}}", project_dir_token),
+            .replace("{{PROJECT_DIR_SHELL}}", &project_dir_shell_json)
+            .replace("{{PROJECT_DIR}}", &project_dir_json),
     )?;
+    manifest.validate_hook_payload_events(&pack_settings, "hooks/settings.json")?;
     let settings_target = project_dir.join(".claude/settings.json");
     let existing_settings = read_optional_json(&settings_target)?;
     let merged_settings = crate::packs::merge::merge_settings_json(
@@ -334,11 +364,8 @@ fn install_hook_payloads(
         })?;
         let pack_mcp: Value = serde_json::from_str(
             &mcp_text
-                .replace(
-                    "{{PROJECT_DIR_SHELL}}",
-                    &shell_single_quote(project_dir_token),
-                )
-                .replace("{{PROJECT_DIR}}", project_dir_token),
+                .replace("{{PROJECT_DIR_SHELL}}", &project_dir_shell_json)
+                .replace("{{PROJECT_DIR}}", &project_dir_json),
         )?;
         let mcp_target = project_dir.join(".mcp.json");
         let existing_mcp = read_optional_json(&mcp_target)?;
@@ -358,8 +385,7 @@ fn install_hook_payloads(
 /// command string. POSIX shell treats single quotes as literal
 /// delimiters with no escaping inside; the only way to embed a
 /// single quote is to close the quoted string, escape with `\'`,
-/// and re-open. So `O'Connor` becomes `'O'\''Connor'`. Backslashes
-/// are also escaped for the JSON string layer.
+/// and re-open. So `O'Connor` becomes `'O'\''Connor'`.
 fn shell_single_quote(path: &str) -> String {
     let mut out = String::with_capacity(path.len() + 2);
     out.push('\'');
@@ -372,25 +398,25 @@ fn shell_single_quote(path: &str) -> String {
         }
     }
     out.push('\'');
-    // Escape backslashes for JSON layer (the result is embedded into
-    // a JSON string literal via str::replace).
-    out.replace('\\', "\\\\")
+    out
 }
 
 /// Render `project_dir` for embedding into JSON hook/MCP command
 /// strings. Canonicalizes when possible so the saved command points
-/// at a real absolute path; falls back to the requested path
-/// otherwise. The returned string has every `\` and `"` escaped so
-/// it's safe to substitute into a JSON string literal without
-/// breaking the surrounding JSON.
+/// at a real absolute path; falls back to the requested path otherwise.
 fn render_project_dir(project_dir: &Path) -> String {
     let canonical =
         std::fs::canonicalize(project_dir).unwrap_or_else(|_| project_dir.to_path_buf());
-    canonical
-        .display()
-        .to_string()
-        .replace('\\', "\\\\")
-        .replace('"', "\\\"")
+    canonical.display().to_string()
+}
+
+fn json_string_fragment(value: &str) -> Result<String, PackError> {
+    let encoded = serde_json::to_string(value)?;
+    Ok(encoded
+        .strip_prefix('"')
+        .and_then(|s| s.strip_suffix('"'))
+        .expect("serde_json string encoding is always quoted")
+        .to_owned())
 }
 
 /// Legacy slash command file names emitted by the pre-pack inline
@@ -759,6 +785,90 @@ mod tests {
         )
     }
 
+    fn write_sample_claude_pack(root: &Path, pack_id: &str, subagent_id: &str, command_id: &str) {
+        std::fs::create_dir(root.join("agents")).expect("create agents dir");
+        std::fs::create_dir(root.join("commands")).expect("create commands dir");
+        std::fs::create_dir(root.join("hooks")).expect("create hooks dir");
+
+        std::fs::write(
+            root.join("pack.json"),
+            format!(
+                r#"{{
+  "schema": "cairn-pack/v1",
+  "pack_id": "{pack_id}",
+  "name": "{pack_id}",
+  "version": "1.0.0",
+  "harness": "claude-code",
+  "cairn_mcp_compat": ">=1.0.0",
+  "description": "Sample Claude Code harness pack.",
+  "requires_capabilities": [],
+  "subagents": [
+    {{
+      "id": "{subagent_id}",
+      "path": "agents/{subagent_id}.md",
+      "uses_mcp_tools": ["status"]
+    }}
+  ],
+  "commands": [
+    {{
+      "id": "{command_id}",
+      "path": "commands/{command_id}.md",
+      "kind": "verb-direct",
+      "verb": "status"
+    }}
+  ],
+  "hooks": {{
+    "SessionStart": {{
+      "command": "cairn status --json"
+    }}
+  }},
+  "manual_fragment": "manual.md"
+}}
+"#
+            ),
+        )
+        .expect("write pack.json");
+        std::fs::write(
+            root.join(format!("agents/{subagent_id}.md")),
+            "---\nname: context-loader\ntools: mcp__cairn__status\n---\n\nLoads context.\n",
+        )
+        .expect("write subagent");
+        std::fs::write(
+            root.join(format!("commands/{command_id}.md")),
+            format!(
+                "<!-- BEGIN CAIRN PACK {pack_id} -->\nRun Cairn status.\n<!-- END CAIRN PACK {pack_id} -->\n"
+            ),
+        )
+        .expect("write command");
+        std::fs::write(
+            root.join("manual.md"),
+            format!(
+                "<!-- BEGIN CAIRN PACK {pack_id} -->\nManual for {pack_id}.\n<!-- END CAIRN PACK {pack_id} -->\n"
+            ),
+        )
+        .expect("write manual");
+        std::fs::write(
+            root.join("hooks/settings.json"),
+            r#"{"hooks":{"SessionStart":[{"matcher":"*","hooks":[{"type":"command","command":"cairn status --json"}]}]}}"#,
+        )
+        .expect("write settings");
+    }
+
+    fn install_sample_claude_pack(
+        pack_dir: &Path,
+        project_dir: &Path,
+    ) -> Result<PackInstallReceipt, PackError> {
+        let source = FsPackSource::new(pack_dir.to_path_buf());
+        install_pack_from_source(
+            &source,
+            &PackInstallOpts {
+                harness: Harness::ClaudeCode,
+                project_dir: project_dir.to_path_buf(),
+                force: false,
+            },
+        )
+    }
+
     #[test]
     fn install_into_empty_dir_creates_expected_files() {
         let tmp = tempdir().unwrap();
@@ -824,6 +934,65 @@ mod tests {
                 .any(|p| p.ends_with("AGENTS.md")),
             "AGENTS.md must be recorded as merged; got {:?}",
             receipt
+        );
+    }
+
+    #[test]
+    fn claude_manual_composes_pack_scoped_blocks() {
+        let tmp = tempdir().unwrap();
+        let pack_a = tmp.path().join("pack-a");
+        let pack_b = tmp.path().join("pack-b");
+        let project_dir = tmp.path().join("project");
+        std::fs::create_dir_all(&pack_a).unwrap();
+        std::fs::create_dir_all(&pack_b).unwrap();
+        std::fs::create_dir_all(&project_dir).unwrap();
+        write_sample_claude_pack(&pack_a, "sample-a", "context-a", "cmd-a");
+        write_sample_claude_pack(&pack_b, "sample-b", "context-b", "cmd-b");
+
+        install_sample_claude_pack(&pack_a, &project_dir).expect("install pack a");
+        install_sample_claude_pack(&pack_b, &project_dir).expect("install pack b");
+
+        let claude = std::fs::read_to_string(project_dir.join("CLAUDE.md")).unwrap();
+        assert!(
+            claude.contains("<!-- BEGIN CAIRN PACK sample-a -->")
+                && claude.contains("Manual for sample-a.")
+                && claude.contains("<!-- END CAIRN PACK sample-a -->"),
+            "first pack manual block must remain; got {claude}"
+        );
+        assert!(
+            claude.contains("<!-- BEGIN CAIRN PACK sample-b -->")
+                && claude.contains("Manual for sample-b.")
+                && claude.contains("<!-- END CAIRN PACK sample-b -->"),
+            "second pack manual block must be added; got {claude}"
+        );
+    }
+
+    #[test]
+    fn install_rejects_unknown_hook_payload_event() {
+        let tmp = tempdir().unwrap();
+        let pack_dir = tmp.path().join("pack");
+        let project_dir = tmp.path().join("project");
+        std::fs::create_dir_all(&pack_dir).unwrap();
+        std::fs::create_dir_all(&project_dir).unwrap();
+        write_sample_codex_pack(
+            &pack_dir,
+            "# Context Loader\n\n<!-- @pack: sample-pack -->\nFresh subagent body.\n",
+        );
+        std::fs::write(
+            pack_dir.join("hooks/hooks.json"),
+            r#"{"hooks":{"DefinitelyNotAHook":[{"command":"cairn status --json"}]}}"#,
+        )
+        .expect("write hooks");
+
+        let err =
+            install_sample_codex_pack(&pack_dir, &project_dir).expect_err("install must fail");
+
+        assert!(
+            matches!(
+                err,
+                PackError::HookUnknown { ref hook } if hook == "DefinitelyNotAHook"
+            ),
+            "unexpected error: {err:?}"
         );
     }
 
@@ -1246,6 +1415,42 @@ Confirm the user wants to forget the named Cairn record, then run:
         assert!(
             cmd.contains(&format!("'{}'", canonical.display())),
             "spaces in project path must be quoted; got `{cmd}`"
+        );
+    }
+
+    #[test]
+    fn install_handles_project_dir_with_double_quote() {
+        let tmp = tempdir().unwrap();
+        let project = tmp.path().join("quote\"dir");
+        std::fs::create_dir_all(&project).unwrap();
+
+        install_pack(&PackInstallOpts {
+            harness: Harness::ClaudeCode,
+            project_dir: project.clone(),
+            force: false,
+        })
+        .expect("install ok");
+
+        let settings: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(project.join(".claude/settings.json")).unwrap(),
+        )
+        .expect("settings must parse");
+        let mcp: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(project.join(".mcp.json")).unwrap())
+                .expect("mcp must parse");
+        let canonical = std::fs::canonicalize(&project).unwrap();
+        let canonical_display = canonical.display().to_string();
+        let cmd = settings["hooks"]["SessionStart"][0]["hooks"][0]["command"]
+            .as_str()
+            .unwrap();
+
+        assert!(
+            cmd.contains(&format!("'{}'", canonical_display)),
+            "hook command must preserve quoted path inside shell quotes; got `{cmd}`"
+        );
+        assert_eq!(
+            mcp["mcpServers"]["cairn"]["args"][1].as_str(),
+            Some(canonical_display.as_str())
         );
     }
 

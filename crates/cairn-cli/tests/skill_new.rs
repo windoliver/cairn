@@ -207,7 +207,6 @@ fn skill_pack_authoring_guide_has_required_anchors() {
         "GEMINI.md",
         "hooks/settings.json",
         "hooks/hooks.json",
-        "CAIRN PACK MANUAL",
         "BEGIN CAIRN PACK my-pack",
         "--vault-path",
         "--payload-file - --json",
