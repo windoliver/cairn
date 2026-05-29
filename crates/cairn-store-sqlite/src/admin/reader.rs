@@ -94,8 +94,17 @@ impl SnapshotArtifactReader for SqliteSnapshotReader {
                 e.read_to_end(&mut buf)
                     .map_err(|e| Box::new(e) as StoreError)?;
                 db_hasher.update(&buf);
+            } else {
+                // Vault-tree member (raw/, wiki/): fold its CONTENT into the
+                // tree hash, in addition to name+size, so a same-length tamper
+                // of a markdown file changes tree_sha256 and is rejected at the
+                // restore integrity gate (round-4 review #1). Mirrors the
+                // producer's `append_tree_sorted`.
+                let mut buf = Vec::new();
+                e.read_to_end(&mut buf)
+                    .map_err(|e| Box::new(e) as StoreError)?;
+                tree_hasher.update(&buf);
             }
-            // Sub-tree entries (raw/, wiki/) contribute to tree_sha but not db_sha.
         }
 
         if manifest_sha.is_empty() {

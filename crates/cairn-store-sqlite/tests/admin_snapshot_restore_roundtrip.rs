@@ -387,10 +387,93 @@ fn restore_rejects_artifact_with_tampered_db_member() {
     );
 }
 
-/// Rewrite `path` so the `cairn.db` tar member has one extra byte appended —
-/// changing its sha256 (and the tree size hash) while leaving `manifest.json`
-/// byte-identical. Used to model post-seal tampering.
+/// Round-4 adversarial review #1: a SAME-LENGTH content edit to a vault-tree
+/// member (`raw/`/`wiki/`) must be rejected at restore. The tree hash now folds
+/// in file *contents*, so the recomputed artifact digest no longer matches the
+/// trusted registry anchor — even though every member's name and size are
+/// unchanged.
+#[test]
+fn restore_rejects_artifact_with_tampered_vault_tree_member() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let vault_root = temp.path().to_path_buf();
+    std::fs::create_dir_all(vault_root.join(".cairn")).unwrap();
+    std::fs::create_dir_all(vault_root.join("raw")).unwrap();
+    std::fs::write(vault_root.join("raw/note.md"), b"HELLO").expect("seed raw note");
+    let db_path = vault_root.join(".cairn/cairn.db");
+
+    let conn = cairn_store_sqlite::open_sync(&db_path).expect("open store");
+    seed_records(&conn, /* active= */ 1, /* tombstoned= */ 0);
+    conn.close().expect("close before snapshot");
+
+    let admin = SqliteAdminStateStore::open_in_memory().expect("admin store");
+    let op = Identity::parse("hmn:op").expect("test fixture");
+    let bootstrap = Identity::parse("hmn:bootstrap").expect("test fixture");
+    admin
+        .grant_role(&op, AdminRole::Operator, &bootstrap)
+        .expect("grant operator");
+    let ctx = AdminContext::new(op.clone(), AdminRole::Operator);
+
+    let out_dir = temp.path().join("backups");
+    let meta = SqliteSnapshotMetadata::new(db_path.clone(), TEST_VAULT.to_string());
+    let producer = SqliteSnapshotProducer::new(vault_root.clone(), db_path.clone());
+    let registry = FileBackupRegistry::new(vault_root.clone());
+    let snap_req = snapshot::SnapshotRequest {
+        out_dir: out_dir.clone(),
+        label: Some("tamper-tree".into()),
+        local_machine_id: TEST_MACHINE.into(),
+        backup_kind: "snapshot".into(),
+    };
+    let snap_resp =
+        snapshot::run(&ctx, &snap_req, &admin, &meta, &producer, &registry).expect("snapshot run");
+
+    // Rewrite raw/note.md to DIFFERENT content of the SAME length (HELLO→WORLD).
+    rewrite_member(&snap_resp.artifact_path, "raw/note.md", |d| {
+        assert_eq!(d, b"HELLO", "expected the seeded raw note content");
+        b"WORLD".to_vec()
+    });
+
+    let meta2 = SqliteSnapshotMetadata::new(db_path.clone(), TEST_VAULT.to_string());
+    let reader = SqliteSnapshotReader;
+    let applier = SqliteSnapshotApplier::new(vault_root.clone());
+    let consent = SqliteConsentLog::new(db_path.clone(), db_path.clone());
+    let restore_req = restore::RestoreRequest {
+        artifact_path: snap_resp.artifact_path.clone(),
+        dry_run: false,
+        local_machine_id: TEST_MACHINE.into(),
+    };
+    let err = restore::run(
+        &ctx,
+        &restore_req,
+        &admin,
+        &meta2,
+        &reader,
+        &applier,
+        &consent,
+        &registry,
+    )
+    .expect_err("restore must refuse a same-length vault-tree tamper");
+    assert!(
+        matches!(
+            err,
+            cairn_core::domain::admin::AdminError::IntegrityMismatch { .. }
+        ),
+        "expected IntegrityMismatch for tampered raw/note.md, got {err:?}"
+    );
+}
+
+/// Append one byte to the `cairn.db` tar member (changing its sha256) while
+/// leaving every other member byte-identical. Models post-seal DB tampering.
 fn tamper_db_member(path: &std::path::Path) {
+    rewrite_member(path, "cairn.db", |mut d| {
+        d.push(0xFF);
+        d
+    });
+}
+
+/// Re-pack the artifact at `path`, replacing the `target` member's bytes with
+/// `mutate(old_bytes)` and leaving all other members byte-identical. Used to
+/// model post-seal tampering of a specific member.
+fn rewrite_member(path: &std::path::Path, target: &str, mutate: impl Fn(Vec<u8>) -> Vec<u8>) {
     use std::io::Read as _;
 
     // Read every member into memory.
@@ -407,13 +490,11 @@ fn tamper_db_member(path: &std::path::Path) {
         }
     }
 
-    // Re-pack, mutating only the cairn.db member.
+    // Re-pack, mutating only the target member.
     let file = std::fs::File::create(path).expect("recreate artifact");
     let mut builder = tar::Builder::new(file);
-    for (name, mut data) in members {
-        if name == "cairn.db" {
-            data.push(0xFF);
-        }
+    for (name, data) in members {
+        let data = if name == target { mutate(data) } else { data };
         let mut header = tar::Header::new_gnu();
         header.set_size(data.len() as u64);
         header.set_mode(0o644);

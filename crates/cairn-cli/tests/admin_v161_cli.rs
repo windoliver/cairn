@@ -253,3 +253,53 @@ fn admin_connector_enable_without_operator_returns_64() {
         String::from_utf8_lossy(&output.stderr)
     );
 }
+
+#[test]
+fn admin_connector_backfill_fails_closed_without_spawner() {
+    // Round-4 review #4: no real BackfillSpawner is wired, so the CLI backfill
+    // must fail closed (non-zero exit) and must NOT print a misleading workflow
+    // id, rather than reporting a success for a no-op.
+    let vault = tempfile::tempdir().expect("vault tempdir");
+    bootstrap_vault(vault.path());
+
+    Command::cargo_bin("cairn")
+        .expect("cairn binary")
+        .env("CAIRN_VAULT", vault.path())
+        .args(["admin", "grant", "hmn:operator"])
+        .output()
+        .expect("grant");
+
+    let output = Command::cargo_bin("cairn")
+        .expect("cairn binary")
+        .env("CAIRN_VAULT", vault.path())
+        .args([
+            "admin",
+            "connector",
+            "backfill",
+            "github",
+            "--actor",
+            "hmn:operator",
+            "--from",
+            "2026-01-01T00:00:00Z",
+            "--to",
+            "2026-01-02T00:00:00Z",
+        ])
+        .output()
+        .expect("run connector backfill");
+
+    assert!(
+        !output.status.success(),
+        "backfill must exit non-zero while no spawner is wired; stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !stdout.contains("workflow_id"),
+        "backfill must not mint a misleading workflow_id; stdout: {stdout}"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("unavailable") || stderr.contains("BackfillSpawner"),
+        "backfill should explain it is unavailable; stderr: {stderr}"
+    );
+}

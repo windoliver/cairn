@@ -11,13 +11,9 @@ use std::process::ExitCode;
 use anyhow::{Context as _, Result};
 use clap::{Arg, ArgMatches, Command};
 
-use cairn_core::contract::backfill_spawner::{BackfillSpawner, BackfillSpec};
-use cairn_core::contract::memory_store::StoreError;
 use cairn_core::domain::Identity;
 use cairn_core::domain::admin::{AdminContext, AdminError, AdminRole};
-use cairn_core::verbs::admin::connector::{
-    self, BackfillRequest, ConnectorDisableRequest, ConnectorEnableRequest,
-};
+use cairn_core::verbs::admin::connector::{self, ConnectorDisableRequest, ConnectorEnableRequest};
 use cairn_store_sqlite::SqliteAdminStateStore;
 
 /// Build the `connector` subcommand group.
@@ -149,47 +145,36 @@ fn dispatch(matches: &ArgMatches, vault_root: &Path) -> Result<ExitCode> {
             }
         }
         Some(("backfill", sub)) => {
-            let name = sub
-                .get_one::<String>("name")
-                .expect("clap required arg")
-                .clone();
-            let actor = parse_actor(sub)?;
-            let from = sub
-                .get_one::<String>("from")
+            let name = sub.get_one::<String>("name").expect("clap required arg");
+            // Validate inputs for clean errors (mirrors enable/disable UX)
+            // before failing closed.
+            parse_actor(sub)?;
+            sub.get_one::<String>("from")
                 .expect("clap required arg")
                 .parse::<chrono::DateTime<chrono::Utc>>()
                 .context("--from must be RFC3339 (e.g. 2026-01-01T00:00:00Z)")?;
-            let to = sub
-                .get_one::<String>("to")
+            sub.get_one::<String>("to")
                 .expect("clap required arg")
                 .parse::<chrono::DateTime<chrono::Utc>>()
                 .context("--to must be RFC3339")?;
-            let rate: f64 = sub
-                .get_one::<String>("rate")
-                .map(|s| s.parse::<f64>())
-                .transpose()
-                .context("--rate-per-sec must be a positive float")?
-                .unwrap_or(10.0);
-
-            let ctx = AdminContext::new(actor, AdminRole::Operator);
-            let spawner = NoopSpawner;
-            let req = BackfillRequest {
-                name,
-                from,
-                to,
-                rate_per_sec: rate,
-            };
-            match connector::backfill(&ctx, &req, &admin, &spawner) {
-                Ok(resp) => {
-                    println!("backfill spawned workflow_id={}", resp.workflow_id);
-                    eprintln!(
-                        "note: BackfillSpawner adapter not yet wired; \
-                         this is a no-op placeholder"
-                    );
-                    Ok(ExitCode::SUCCESS)
-                }
-                Err(e) => Ok(exit_for(&e)),
+            if let Some(rate) = sub.get_one::<String>("rate") {
+                rate.parse::<f64>()
+                    .context("--rate-per-sec must be a positive float")?;
             }
+
+            // Fail closed: no real `BackfillSpawner` is wired, so calling the
+            // verb with a no-op spawner would mint a `WorkflowId` and report a
+            // "spawned" backfill that has no durable job or progress stream —
+            // a misleading success. Refuse with EX_UNAVAILABLE instead, and do
+            // NOT print a workflow id (round-4 review #4). The MCP surface
+            // fails closed the same way; remove once a real spawner lands.
+            eprintln!(
+                "cairn admin connector backfill: unavailable — no BackfillSpawner is \
+                 wired in this build, so no durable backfill job would be created for \
+                 connector '{name}'. Refusing to report a spawned backfill \
+                 (tracked: scheduler integration)."
+            );
+            Ok(ExitCode::from(69)) // EX_UNAVAILABLE (sysexits)
         }
         _ => unreachable!(
             "clap subcommand_required(true) on admin connector ensures a subcommand is present"
@@ -205,16 +190,4 @@ fn parse_actor(sub: &ArgMatches) -> Result<Identity> {
 fn exit_for(e: &AdminError) -> ExitCode {
     eprintln!("cairn admin connector: {e}");
     ExitCode::from(e.exit_code())
-}
-
-/// Placeholder spawner — `cairn.admin.v1` `connector_backfill` ships its verb
-/// signature in v0.2; the actual scheduler/handler/jsonl bus is a follow-up.
-/// The verb still validates role + connector-state and mints a `WorkflowId`;
-/// the spawner just records that it was called.
-struct NoopSpawner;
-
-impl BackfillSpawner for NoopSpawner {
-    fn spawn_backfill(&self, _spec: BackfillSpec) -> Result<(), StoreError> {
-        Ok(())
-    }
 }

@@ -74,6 +74,32 @@ fn status_health(
     }
 }
 
+/// `true` when the MCP admin bootstrap identity — `hmn:local-vault:<vault_id>`,
+/// the exact actor [`crate::admin_tools::dispatch`] constructs — actually holds
+/// the `Operator` role in the vault's admin-state store.
+///
+/// Advertising the admin capability must require *this* identity to be granted,
+/// not merely that *some* operator row exists: otherwise a vault that granted
+/// only a real identity (`hmn:alice`) would advertise the admin tools while
+/// every MCP admin call fails `NotAuthorized` (round-4 review #2). Any I/O or
+/// parse failure resolves to `false` (fail-closed).
+fn admin_bootstrap_operator_ready(vault_root: &Path) -> bool {
+    let Ok(vault_id) = std::fs::read_to_string(vault_root.join(".cairn").join("vault.id")) else {
+        return false;
+    };
+    let vault_id = vault_id.trim();
+    if vault_id.is_empty() {
+        return false;
+    }
+    let Ok(identity) = Identity::parse(format!("hmn:local-vault:{vault_id}")) else {
+        return false;
+    };
+    let db = vault_root.join(".cairn").join("cairn.db");
+    cairn_store_sqlite::SqliteAdminStateStore::open(&db)
+        .and_then(|s| s.has_role(&identity, cairn_core::domain::admin::AdminRole::Operator))
+        .unwrap_or(false)
+}
+
 /// Materialized graph-request bundle. Resolved once; carried into dispatch.
 /// Holds the **concrete** sqlite store handle — `GraphQueries` is sqlite-
 /// specific and there is no graph-capable trait on `dyn MemoryStore` yet.
@@ -550,19 +576,20 @@ impl CairnMcpHandler {
             evaluation_runtime_ready: self.evaluation_runtime_ready
                 && self.config.evaluation.enabled,
             federation_runtime_ready: self.federation_runtime_ready && self.federation.is_some(),
-            // admin_runtime_ready: true iff config.admin.enabled=true AND
-            // at least one operator row exists. Both conditions must hold:
-            // the operator opts in via config (fail-closed rollout control)
-            // and has run `cairn admin grant` (at-least-one-operator check).
-            // When no vault root is bound the store cannot be probed — hold
-            // dark (fail-closed per brief §15).
+            // admin_runtime_ready: true iff config.admin.enabled=true AND the
+            // EXACT bootstrap identity that `admin_tools::dispatch` uses
+            // (`hmn:local-vault:<vault_id>`) holds the Operator role. Probing
+            // that specific identity — not merely `has_any_operator()` — keeps
+            // advertisement in lockstep with dispatch: otherwise a vault that
+            // granted only a real identity (e.g. `hmn:alice`) would advertise
+            // the admin tools yet reject every call with NotAuthorized
+            // (round-4 review #2). When no vault root is bound the store cannot
+            // be probed — hold dark (fail-closed per brief §15).
             admin_runtime_ready: self.config.admin.enabled
-                && self.vault_root.as_ref().is_some_and(|root| {
-                    let db = root.join(".cairn").join("cairn.db");
-                    cairn_store_sqlite::SqliteAdminStateStore::open(&db)
-                        .and_then(|s| s.has_any_operator())
-                        .unwrap_or(false)
-                }),
+                && self
+                    .vault_root
+                    .as_ref()
+                    .is_some_and(|root| admin_bootstrap_operator_ready(root)),
             contract_phase: cairn_core::status::Phase::V0_1,
         };
 

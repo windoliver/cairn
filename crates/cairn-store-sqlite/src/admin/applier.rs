@@ -51,17 +51,25 @@ impl SnapshotApplier for SqliteSnapshotApplier {
         Ok(staging)
     }
 
-    /// Atomically swap the staged contents into the live vault.
+    /// Swap the staged contents into the live vault **transactionally**.
     ///
-    /// Steps:
-    ///   1. Rename `staging_root/cairn.db` → `<vault>/.cairn/cairn.db`.
-    ///   2. For each of `wiki/` and `raw/`: if present in staging, remove
-    ///      the live copy and rename the staged one in.
-    ///   3. Remove the (now-empty) staging directory.
+    /// The live `cairn.db` and (when staged) `raw/`+`wiki/` are replaced as a
+    /// unit. Each live target is first moved ASIDE to a sibling
+    /// `*.restore-bak` (an atomic same-directory rename) before the staged
+    /// copy is renamed into place — so no live data is *deleted* before its
+    /// replacement is committed. If any rename fails partway through, every
+    /// completed step is rolled back (staged copy removed, original restored
+    /// from its aside backup), leaving the vault in its pre-restore state. On
+    /// full success the aside backups and the staging directory are removed.
+    ///
+    /// This closes the data-loss window where a failed `raw/`/`wiki/` rename
+    /// could leave a swapped DB next to a deleted or half-replaced tree
+    /// (round-4 review #3).
     ///
     /// # Errors
-    /// Returns `StoreError` if `cairn.db` is absent from the staging root
-    /// or any rename fails.
+    /// Returns `StoreError` if `cairn.db` is absent from the staging root, a
+    /// stale aside backup cannot be cleared, or any rename fails (after
+    /// rolling back).
     fn swap_in(&self, staging_root: &Path) -> Result<(), StoreError> {
         let staged_db = staging_root.join("cairn.db");
         let live_cairn_dir = self.vault_root.join(".cairn");
@@ -76,26 +84,84 @@ impl SnapshotApplier for SqliteSnapshotApplier {
 
         std::fs::create_dir_all(&live_cairn_dir).map_err(|e| Box::new(e) as StoreError)?;
 
-        // Atomic rename of the DB. On most POSIX filesystems this is a
-        // single syscall when source and destination are on the same device.
-        std::fs::rename(&staged_db, &live_db).map_err(|e| Box::new(e) as StoreError)?;
-
-        // Restore markdown vault trees if present.
-        for sub in ["wiki", "raw"] {
-            let staged = staging_root.join(sub);
-            let live = self.vault_root.join(sub);
-            if staged.exists() {
-                if live.exists() {
-                    std::fs::remove_dir_all(&live).map_err(|e| Box::new(e) as StoreError)?;
-                }
-                std::fs::rename(&staged, &live).map_err(|e| Box::new(e) as StoreError)?;
+        // Replacement plan: (staged src, live dst, aside backup). The backup is
+        // a sibling of dst (same directory → same device → atomic rename).
+        // cairn.db is always present; raw/ and wiki/ only when staged.
+        let mut plan: Vec<(PathBuf, PathBuf, PathBuf)> = vec![(
+            staged_db,
+            live_db.clone(),
+            live_cairn_dir.join("cairn.db.restore-bak"),
+        )];
+        for sub in ["raw", "wiki"] {
+            let src = staging_root.join(sub);
+            if src.exists() {
+                plan.push((
+                    src,
+                    self.vault_root.join(sub),
+                    self.vault_root.join(format!("{sub}.restore-bak")),
+                ));
             }
         }
 
-        // Best-effort cleanup of the (now-mostly-empty) staging dir.
+        // Clear any stale aside backups left by a previously-interrupted swap.
+        for (_, _, bak) in &plan {
+            if bak.exists() {
+                remove_path(bak).map_err(|e| Box::new(e) as StoreError)?;
+            }
+        }
+
+        // Apply with rollback. `done` records (dst, bak, had_live) for undo.
+        let mut done: Vec<(&PathBuf, &PathBuf, bool)> = Vec::new();
+        for (src, dst, bak) in &plan {
+            let had_live = dst.exists();
+            if had_live && let Err(e) = std::fs::rename(dst, bak) {
+                rollback(&done);
+                return Err(Box::new(e) as StoreError);
+            }
+            if let Err(e) = std::fs::rename(src, dst) {
+                // Undo this step's aside move, then roll back prior steps.
+                if had_live {
+                    let _ = std::fs::rename(bak, dst);
+                }
+                rollback(&done);
+                return Err(Box::new(e) as StoreError);
+            }
+            done.push((dst, bak, had_live));
+        }
+
+        // Success: discard the aside backups and the staging dir (best-effort).
+        for (_, bak, had_live) in &done {
+            if *had_live {
+                let _ = remove_path(bak);
+            }
+        }
         let _ = std::fs::remove_dir_all(staging_root);
 
         Ok(())
+    }
+}
+
+/// Remove a path whether it is a file or a directory. Used for aside backups,
+/// which are a file (`cairn.db.restore-bak`) or a directory
+/// (`raw.restore-bak`, `wiki.restore-bak`).
+fn remove_path(p: &Path) -> std::io::Result<()> {
+    if p.is_dir() {
+        std::fs::remove_dir_all(p)
+    } else {
+        std::fs::remove_file(p)
+    }
+}
+
+/// Roll back a partially-applied swap. For each completed `(dst, bak,
+/// had_live)` in REVERSE: remove the staged copy now sitting at `dst`, and if
+/// an original was moved aside, restore it from `bak`. Best-effort — already on
+/// an error path; the goal is to restore the operator's ORIGINAL live data.
+fn rollback(done: &[(&PathBuf, &PathBuf, bool)]) {
+    for (dst, bak, had_live) in done.iter().rev() {
+        let _ = remove_path(dst);
+        if *had_live {
+            let _ = std::fs::rename(bak, dst);
+        }
     }
 }
 
@@ -156,6 +222,105 @@ mod tests {
         assert!(
             !staging.exists(),
             "staging dir must be removed after swap_in"
+        );
+    }
+
+    /// Build a vault with live `cairn.db` + `raw/` + `wiki/` originals and a
+    /// staging dir with new content; `swap_in` must replace all three and leave
+    /// no aside backups (round-4 review #3 — multi-target swap, happy path).
+    #[test]
+    fn swap_in_replaces_db_and_vault_trees() {
+        let dir = tempfile::tempdir().expect("tmpdir");
+        let vault_root = dir.path().join("vault");
+        let cairn_dir = vault_root.join(".cairn");
+        std::fs::create_dir_all(&cairn_dir).expect("cairn_dir");
+        std::fs::write(cairn_dir.join("cairn.db"), b"ORIG-DB").expect("orig db");
+        std::fs::create_dir_all(vault_root.join("raw")).expect("raw");
+        std::fs::create_dir_all(vault_root.join("wiki")).expect("wiki");
+        std::fs::write(vault_root.join("raw/a.md"), b"ORIG-RAW").expect("orig raw");
+        std::fs::write(vault_root.join("wiki/b.md"), b"ORIG-WIKI").expect("orig wiki");
+
+        // swap_in only renames files — fake db bytes are fine here (it never
+        // opens the database; that is the producer's job).
+        let staging = cairn_dir.join("restore-multi");
+        std::fs::create_dir_all(staging.join("raw")).expect("st raw");
+        std::fs::create_dir_all(staging.join("wiki")).expect("st wiki");
+        std::fs::write(staging.join("cairn.db"), b"NEW-DB").expect("new db");
+        std::fs::write(staging.join("raw/a.md"), b"NEW-RAW").expect("new raw");
+        std::fs::write(staging.join("wiki/b.md"), b"NEW-WIKI").expect("new wiki");
+
+        let applier = SqliteSnapshotApplier::new(vault_root.clone());
+        applier.swap_in(&staging).expect("swap_in");
+
+        assert_eq!(
+            std::fs::read(cairn_dir.join("cairn.db")).unwrap(),
+            b"NEW-DB"
+        );
+        assert_eq!(
+            std::fs::read(vault_root.join("raw/a.md")).unwrap(),
+            b"NEW-RAW"
+        );
+        assert_eq!(
+            std::fs::read(vault_root.join("wiki/b.md")).unwrap(),
+            b"NEW-WIKI"
+        );
+        assert!(!cairn_dir.join("cairn.db.restore-bak").exists());
+        assert!(!vault_root.join("raw.restore-bak").exists());
+        assert!(!vault_root.join("wiki.restore-bak").exists());
+        assert!(!staging.exists());
+    }
+
+    /// Inject a mid-swap failure: with `vault_root` made read-only, the
+    /// `cairn.db` swap (inside the still-writable `.cairn/`) succeeds but the
+    /// `raw/` rename (which needs write on `vault_root`) is denied — so the
+    /// `cairn.db` swap must be ROLLED BACK to the original, leaving the vault
+    /// untouched (round-4 review #3 — rollback path).
+    #[cfg(unix)]
+    #[test]
+    fn swap_in_rolls_back_on_tree_rename_failure() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().expect("tmpdir");
+        let vault_root = dir.path().join("vault");
+        let cairn_dir = vault_root.join(".cairn");
+        std::fs::create_dir_all(&cairn_dir).expect("cairn_dir");
+        std::fs::write(cairn_dir.join("cairn.db"), b"ORIG-DB").expect("orig db");
+        std::fs::create_dir_all(vault_root.join("raw")).expect("raw");
+        std::fs::write(vault_root.join("raw/a.md"), b"ORIG-RAW").expect("orig raw");
+
+        let staging = cairn_dir.join("restore-fail");
+        std::fs::create_dir_all(staging.join("raw")).expect("st raw");
+        std::fs::write(staging.join("cairn.db"), b"NEW-DB").expect("new db");
+        std::fs::write(staging.join("raw/a.md"), b"NEW-RAW").expect("new raw");
+
+        // Read-only vault_root denies renaming raw/ (parent = vault_root) while
+        // .cairn (a subdir) stays writable, so the cairn.db swap commits first.
+        let orig_perms = std::fs::metadata(&vault_root).unwrap().permissions();
+        std::fs::set_permissions(&vault_root, std::fs::Permissions::from_mode(0o555)).unwrap();
+
+        let applier = SqliteSnapshotApplier::new(vault_root.clone());
+        let result = applier.swap_in(&staging);
+
+        // Restore writability before asserting / tempdir cleanup.
+        std::fs::set_permissions(&vault_root, orig_perms).unwrap();
+
+        assert!(
+            result.is_err(),
+            "swap must fail when the raw/ rename is denied"
+        );
+        assert_eq!(
+            std::fs::read(cairn_dir.join("cairn.db")).unwrap(),
+            b"ORIG-DB",
+            "cairn.db must be rolled back to the original after a later-step failure"
+        );
+        assert_eq!(
+            std::fs::read(vault_root.join("raw/a.md")).unwrap(),
+            b"ORIG-RAW",
+            "raw/ must be untouched"
+        );
+        assert!(
+            !cairn_dir.join("cairn.db.restore-bak").exists(),
+            "no aside backup may be left behind after rollback"
         );
     }
 }

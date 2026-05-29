@@ -85,13 +85,18 @@ impl SnapshotArtifactProducer for SqliteSnapshotProducer {
         tree_hasher.update(db_len.to_le_bytes());
 
         // ── 3. Optional vault markdown tree (raw/ and wiki/) ─────────────────
+        // Walk each tree in deterministic sorted order, appending every regular
+        // file to the tar AND folding its name + size + CONTENT into the tree
+        // hash in the SAME order. Hashing file *contents* (not just name+size)
+        // means a same-length edit to a raw/wiki file changes `tree_sha256`, so
+        // restore-time integrity rejects vault-tree tampering (round-4 review
+        // #1). Writing in sorted order makes the tar member order equal the
+        // hash order, so the reader (which walks tar order) recomputes an
+        // identical digest even for multi-file trees.
         for sub in ["raw", "wiki"] {
             let dir = self.vault_root.join(sub);
             if dir.exists() && dir.is_dir() {
-                tar.append_dir_all(sub, &dir)
-                    .map_err(|e| Box::new(e) as StoreError)?;
-                // Walk deterministically (sorted) to hash name + size.
-                walk_for_tree_hash(&dir, sub, &mut tree_hasher)
+                append_tree_sorted(&mut tar, &dir, sub, &mut tree_hasher)
                     .map_err(|e| Box::new(e) as StoreError)?;
             }
         }
@@ -145,10 +150,21 @@ fn consistent_db_bytes(db_path: &Path) -> Result<Vec<u8>, StoreError> {
     Ok(bytes)
 }
 
-/// Recursively walk `dir` in deterministic (sorted) order and update
-/// `hasher` with `"<prefix>/<filename>"` bytes + file size as `u64`
-/// little-endian for every regular file.
-fn walk_for_tree_hash(dir: &Path, prefix: &str, hasher: &mut Sha256) -> std::io::Result<()> {
+/// Recursively walk `dir` in deterministic (sorted) order, appending every
+/// regular file to `tar` as `"<prefix>/<name>"` AND folding its
+/// `"<prefix>/<name>"` bytes, size (`u64` LE), and full file CONTENTS into
+/// `hasher` — in the same order they are written to the archive.
+///
+/// Hashing the contents (not just name + size) is what lets restore detect a
+/// same-length edit to a vault-tree file. Writing to the tar and hashing in a
+/// single sorted pass guarantees the tar member order equals the hash order,
+/// so the reader (which recomputes the digest in tar order) agrees.
+fn append_tree_sorted<W: std::io::Write>(
+    tar: &mut tar::Builder<W>,
+    dir: &Path,
+    prefix: &str,
+    hasher: &mut Sha256,
+) -> std::io::Result<()> {
     let mut entries: Vec<_> = std::fs::read_dir(dir)?.filter_map(Result::ok).collect();
     // Sort by path for determinism across platforms.
     entries.sort_by_key(std::fs::DirEntry::path);
@@ -156,11 +172,18 @@ fn walk_for_tree_hash(dir: &Path, prefix: &str, hasher: &mut Sha256) -> std::io:
         let path = entry.path();
         let rel = format!("{prefix}/{}", entry.file_name().to_string_lossy());
         if path.is_dir() {
-            walk_for_tree_hash(&path, &rel, hasher)?;
+            append_tree_sorted(tar, &path, &rel, hasher)?;
         } else {
-            let meta = entry.metadata()?;
+            let bytes = std::fs::read(&path)?;
             hasher.update(rel.as_bytes());
-            hasher.update(meta.len().to_le_bytes());
+            hasher.update((bytes.len() as u64).to_le_bytes());
+            hasher.update(&bytes);
+
+            let mut header = tar::Header::new_gnu();
+            header.set_size(bytes.len() as u64);
+            header.set_mode(0o644);
+            header.set_cksum();
+            tar.append_data(&mut header, &rel, &bytes[..])?;
         }
     }
     Ok(())
@@ -263,6 +286,57 @@ mod tests {
         assert_eq!(
             artifact.tree_sha256, envelope.tree_sha256,
             "producer and reader must agree on tree_sha256"
+        );
+    }
+
+    /// Round-4 review #1: the tree hash must cover vault-tree file *contents*
+    /// (not just name + size), and the producer and reader must agree even for
+    /// a multi-file, multi-directory tree. Asserts (a) producer == reader for a
+    /// populated raw/wiki tree, and (b) a same-length content edit changes
+    /// `tree_sha256`.
+    #[test]
+    fn tree_hash_covers_vault_file_contents_and_agrees() {
+        let dir = tempfile::tempdir().expect("tmpdir");
+        let vault_root = dir.path().join("vault");
+        let db_dir = vault_root.join(".cairn");
+        std::fs::create_dir_all(&db_dir).expect("db_dir");
+        let db_path = db_dir.join("cairn.db");
+        {
+            let conn = crate::open::open_sync(&db_path).expect("create real cairn.db");
+            conn.close().expect("close db");
+        }
+
+        // Populate a multi-file, nested vault tree.
+        std::fs::create_dir_all(vault_root.join("raw/sub")).expect("raw/sub");
+        std::fs::create_dir_all(vault_root.join("wiki")).expect("wiki");
+        std::fs::write(vault_root.join("raw/a.md"), b"AAAA").expect("a.md");
+        std::fs::write(vault_root.join("raw/sub/b.md"), b"BBBB").expect("b.md");
+        std::fs::write(vault_root.join("wiki/c.md"), b"CCCC").expect("c.md");
+
+        let manifest_bytes = test_manifest("tree");
+        let producer = SqliteSnapshotProducer::new(vault_root.clone(), db_path.clone());
+        let out_dir = dir.path().join("snaps1");
+        let artifact = producer
+            .materialize(&out_dir, "tree-001", &manifest_bytes, None)
+            .expect("materialize");
+
+        // (a) producer and reader agree on tree_sha for a populated tree.
+        let reader = SqliteSnapshotReader;
+        let envelope = reader.read_envelope(&artifact.path).expect("read_envelope");
+        assert_eq!(
+            artifact.tree_sha256, envelope.tree_sha256,
+            "producer and reader must agree on tree_sha256 for a multi-file tree"
+        );
+
+        // (b) a SAME-LENGTH content edit must change tree_sha256.
+        std::fs::write(vault_root.join("raw/a.md"), b"ZZZZ").expect("rewrite a.md");
+        let out_dir2 = dir.path().join("snaps2");
+        let artifact2 = producer
+            .materialize(&out_dir2, "tree-002", &manifest_bytes, None)
+            .expect("materialize 2");
+        assert_ne!(
+            artifact.tree_sha256, artifact2.tree_sha256,
+            "a same-length vault-file content edit must change tree_sha256"
         );
     }
 }
