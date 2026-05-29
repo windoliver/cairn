@@ -53,13 +53,26 @@ pub struct MaterializedArtifact {
     pub tree_sha256: String,
 }
 
-/// Registers a snapshot entry in the backup registry.
+/// Registers and looks up snapshot entries in the backup registry.
 pub trait BackupRegistry: Send + Sync {
     /// Persist a new backup registry entry. Idempotent by `backup_id`.
     fn register(
         &self,
         entry: &crate::domain::backup::BackupRegistryEntry,
     ) -> Result<(), StoreError>;
+
+    /// Look up a previously-registered entry by `backup_id`.
+    ///
+    /// Returns `Ok(None)` when no entry exists for that id (e.g. the artifact
+    /// was never produced on this vault). The restore verb uses the stored
+    /// `file_digest` as a **trusted integrity anchor**: it lives in
+    /// `.cairn/backups/<id>.json`, separate from `cairn.db`, so it survives a
+    /// lost/corrupt database and cannot be rewritten by tampering with the
+    /// artifact tarball alone (brief §3; round-3 adversarial review #4).
+    fn lookup(
+        &self,
+        backup_id: &str,
+    ) -> Result<Option<crate::domain::backup::BackupRegistryEntry>, StoreError>;
 }
 
 /// Reads a snapshot artifact to extract the manifest and verify the

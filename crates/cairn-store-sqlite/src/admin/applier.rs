@@ -112,9 +112,14 @@ mod tests {
         let cairn_dir = vault_root.join(".cairn");
         std::fs::create_dir_all(&cairn_dir).expect("cairn_dir");
 
-        // Write a fake cairn.db.
+        // Create a REAL cairn.db at schema head: the producer captures it via
+        // `VACUUM INTO`, which needs a valid SQLite source (a fake byte string
+        // is not a database).
         let db_path = cairn_dir.join("cairn.db");
-        std::fs::write(&db_path, b"original-db").expect("write original db");
+        {
+            let conn = crate::open::open_sync(&db_path).expect("create real cairn.db");
+            conn.close().expect("close db before snapshot");
+        }
 
         let manifest_bytes = b"{\"schema_version\":1,\"backup_id\":\"apply-test\"}";
         let producer = SqliteSnapshotProducer::new(vault_root.clone(), db_path.clone());
@@ -123,7 +128,7 @@ mod tests {
             .materialize(&out_dir, "apply-test-001", manifest_bytes, None)
             .expect("materialize");
 
-        // Overwrite the live DB to simulate post-snapshot mutations.
+        // Overwrite the live DB to simulate post-snapshot mutation/corruption.
         std::fs::write(&db_path, b"mutated-db").expect("mutate db");
 
         let applier = SqliteSnapshotApplier::new(vault_root.clone());
@@ -134,13 +139,18 @@ mod tests {
 
         applier.swap_in(&staging).expect("swap_in");
 
-        // After swap, the live DB should be the snapshot's cairn.db
-        // (which was `b"original-db"` at snapshot time).
+        // After swap, the live DB is the snapshot's cairn.db: the post-snapshot
+        // mutation is gone, and the restored file is a valid SQLite database at
+        // schema head (proving VACUUM INTO captured a real, restorable db).
         let restored = std::fs::read(&db_path).expect("read restored db");
-        assert_eq!(
-            restored, b"original-db" as &[u8],
-            "live db after swap must equal the snapshot's db"
+        assert_ne!(
+            restored, b"mutated-db" as &[u8],
+            "swap must overwrite the post-snapshot mutation"
         );
+        crate::open::open_sync(&db_path)
+            .expect("restored db must open at schema head")
+            .close()
+            .expect("close reopened db");
 
         // Staging dir should be cleaned up.
         assert!(

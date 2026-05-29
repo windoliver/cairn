@@ -3,7 +3,7 @@
 use crate::contract::admin_state::AdminStateStore;
 use crate::contract::memory_store::StoreError;
 use crate::contract::snapshot_artifact::{
-    ConsentLog, SnapshotApplier, SnapshotArtifactReader, SnapshotMetadataProvider,
+    BackupRegistry, ConsentLog, SnapshotApplier, SnapshotArtifactReader, SnapshotMetadataProvider,
 };
 use crate::domain::admin::{AdminContext, AdminError, AdminRole};
 use crate::verbs::admin::manifest::{MANIFEST_SCHEMA_VERSION, SnapshotManifest, sha256_hex};
@@ -41,15 +41,30 @@ pub struct RestoreResponse {
 /// 2. `manifest.source_machine_id == req.local_machine_id` else [`AdminError::CrossMachineRestore`].
 /// 3. `manifest.source_vault_id == local_vault_id` else [`AdminError::VaultIdMismatch`].
 /// 4. Each `manifest.schema_versions[k] ≤ local_heads[k]` else [`AdminError::SchemaTooNew`].
-/// 5. Integrity envelope verified else [`AdminError::IntegrityMismatch`].
+/// 5. Integrity envelope verified — recomputed `manifest_sha256` matches the
+///    canonical manifest AND the recomputed full artifact digest
+///    (`sha256(manifest_sha || db_sha || tree_sha)`) matches the trusted
+///    `file_digest` recorded in the backup registry — else
+///    [`AdminError::IntegrityMismatch`]. This binds the DB and vault-tree
+///    hashes to a trusted out-of-artifact anchor, so a tampered `cairn.db`
+///    or vault tree is rejected before `swap_in` (round-3 review #4).
 ///
 /// # Errors
 /// - [`AdminError::NotAuthorized`] — caller lacks operator role.
 /// - [`AdminError::SchemaTooNew`] — manifest format too new OR component head too new.
 /// - [`AdminError::CrossMachineRestore`] — machine-id mismatch.
 /// - [`AdminError::VaultIdMismatch`] — vault-id mismatch.
-/// - [`AdminError::IntegrityMismatch`] — recomputed envelope disagrees with the canonical manifest sha.
+/// - [`AdminError::IntegrityMismatch`] — recomputed manifest sha disagrees with
+///   the canonical manifest, the recomputed artifact digest disagrees with the
+///   registry's trusted `file_digest`, or no registry entry exists to verify
+///   against (fail closed).
 /// - [`AdminError::Store`] — adapter failure.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "I/O-free orchestrator: each contract adapter (store, metadata, \
+              reader, applier, consent, registry) is injected by value per \
+              CLAUDE.md §4; bundling them would obscure the contract boundaries"
+)]
 pub fn run(
     ctx: &AdminContext,
     req: &RestoreRequest,
@@ -58,6 +73,7 @@ pub fn run(
     reader: &dyn SnapshotArtifactReader,
     applier: &dyn SnapshotApplier,
     consent: &dyn ConsentLog,
+    registry: &dyn BackupRegistry,
 ) -> Result<RestoreResponse, AdminError> {
     super::guard::require_role(ctx, admin, AdminRole::Operator)?;
 
@@ -65,7 +81,7 @@ pub fn run(
         .read_manifest(&req.artifact_path)
         .map_err(AdminError::Store)?;
 
-    precondition_gate(&manifest, req, meta, reader, &req.artifact_path)?;
+    precondition_gate(&manifest, req, meta, reader, registry, &req.artifact_path)?;
 
     if req.dry_run {
         return Ok(RestoreResponse {
@@ -106,6 +122,7 @@ fn precondition_gate(
     req: &RestoreRequest,
     meta: &dyn SnapshotMetadataProvider,
     reader: &dyn SnapshotArtifactReader,
+    registry: &dyn BackupRegistry,
     artifact_path: &std::path::Path,
 ) -> Result<(), AdminError> {
     // Gate 1: manifest schema version.
@@ -147,6 +164,10 @@ fn precondition_gate(
     }
 
     // Gate 5: integrity envelope.
+    //
+    // (a) Recompute the envelope from the artifact on disk and confirm the
+    //     manifest member is canonical (self-consistency: the parsed manifest
+    //     re-canonicalises to the bytes whose sha is in the envelope).
     let envelope = reader
         .read_envelope(artifact_path)
         .map_err(AdminError::Store)?;
@@ -161,6 +182,32 @@ fn precondition_gate(
         });
     }
 
+    // (b) Bind the DB and vault-tree hashes to a TRUSTED anchor. The recomputed
+    //     full artifact digest `sha256(manifest_sha || db_sha || tree_sha)` must
+    //     equal the `file_digest` the registry recorded at snapshot time. The
+    //     registry entry lives outside the artifact (`.cairn/backups/<id>.json`),
+    //     so tampering with `cairn.db` or the vault tree inside the tarball — even
+    //     with a re-canonicalised manifest — changes the recomputed digest and is
+    //     rejected here, before any `swap_in`. Fail closed when no entry exists:
+    //     without the anchor we cannot confirm db/tree integrity (brief §15).
+    let recomputed_digest = envelope.artifact_sha256();
+    let entry = registry.lookup(&m.backup_id).map_err(AdminError::Store)?;
+    match entry {
+        Some(entry) if entry.file_digest == recomputed_digest => {}
+        Some(entry) => {
+            return Err(AdminError::IntegrityMismatch {
+                expected: entry.file_digest,
+                actual: recomputed_digest,
+            });
+        }
+        None => {
+            return Err(AdminError::IntegrityMismatch {
+                expected: format!("trusted registry entry for backup {}", m.backup_id),
+                actual: "absent: artifact not found in the local backup registry".to_owned(),
+            });
+        }
+    }
+
     Ok(())
 }
 
@@ -170,10 +217,12 @@ mod tests {
     use super::*;
     use crate::contract::admin_state::ConnectorStateRow;
     use crate::contract::snapshot_artifact::{
-        ConsentLog as ConsentLogTrait, SnapshotApplier as ApplierT,
+        BackupRegistry as RegistryT, ConsentLog as ConsentLogTrait, SnapshotApplier as ApplierT,
         SnapshotArtifactReader as ReaderT, SnapshotMetadataProvider as MetaT,
     };
     use crate::domain::Identity;
+    use crate::domain::Rfc3339Timestamp;
+    use crate::domain::backup::BackupRegistryEntry;
     use crate::verbs::admin::manifest::{
         IntegrityEnvelope, MANIFEST_SCHEMA_VERSION, SnapshotManifest,
     };
@@ -316,6 +365,43 @@ mod tests {
         }
     }
 
+    /// Stub backup registry. `digest = Some(d)` makes `lookup` return an entry
+    /// whose `file_digest` is `d` (the trusted anchor); `None` makes `lookup`
+    /// return no entry (artifact absent from the registry).
+    struct StubRegistry {
+        digest: Option<String>,
+    }
+
+    impl RegistryT for StubRegistry {
+        fn register(&self, _: &BackupRegistryEntry) -> Result<(), StoreError> {
+            Ok(())
+        }
+
+        fn lookup(&self, backup_id: &str) -> Result<Option<BackupRegistryEntry>, StoreError> {
+            Ok(self.digest.clone().map(|file_digest| BackupRegistryEntry {
+                backup_id: backup_id.to_owned(),
+                created_at: Rfc3339Timestamp::from_unix_secs(0).expect("epoch ts"),
+                artifact_path: "/tmp/x".to_owned(),
+                file_digest,
+                backup_kind: "snapshot".to_owned(),
+                target_ids_included: Vec::new(),
+            }))
+        }
+    }
+
+    /// Registry that returns the digest matching `good_envelope_for(m)` — the
+    /// trusted anchor for an untampered artifact.
+    fn matching_registry(m: &SnapshotManifest) -> StubRegistry {
+        StubRegistry {
+            digest: Some(good_envelope_for(m).artifact_sha256()),
+        }
+    }
+
+    /// Registry with no entry for the backup id (fail-closed integrity case).
+    fn empty_registry() -> StubRegistry {
+        StubRegistry { digest: None }
+    }
+
     fn op_ctx() -> AdminContext {
         AdminContext::new(
             Identity::parse("hmn:op").expect("test fixture: known-valid identity"),
@@ -363,7 +449,17 @@ mod tests {
         let applier = default_applier();
         let consent = StubConsent { purged: 0 };
 
-        let err = run(&op_ctx(), &req, &admin, &meta, &reader, &applier, &consent).unwrap_err();
+        let err = run(
+            &op_ctx(),
+            &req,
+            &admin,
+            &meta,
+            &reader,
+            &applier,
+            &consent,
+            &empty_registry(),
+        )
+        .unwrap_err();
         assert!(
             matches!(err, AdminError::NotAuthorized { .. }),
             "expected NotAuthorized, got {err:?}",
@@ -396,7 +492,17 @@ mod tests {
         let applier = default_applier();
         let consent = StubConsent { purged: 0 };
 
-        let err = run(&op_ctx(), &req, &admin, &meta, &reader, &applier, &consent).unwrap_err();
+        let err = run(
+            &op_ctx(),
+            &req,
+            &admin,
+            &meta,
+            &reader,
+            &applier,
+            &consent,
+            &empty_registry(),
+        )
+        .unwrap_err();
         assert!(
             matches!(
                 err,
@@ -433,7 +539,17 @@ mod tests {
         let applier = default_applier();
         let consent = StubConsent { purged: 0 };
 
-        let err = run(&op_ctx(), &req, &admin, &meta, &reader, &applier, &consent).unwrap_err();
+        let err = run(
+            &op_ctx(),
+            &req,
+            &admin,
+            &meta,
+            &reader,
+            &applier,
+            &consent,
+            &empty_registry(),
+        )
+        .unwrap_err();
         assert!(
             matches!(
                 err,
@@ -468,7 +584,17 @@ mod tests {
         let applier = default_applier();
         let consent = StubConsent { purged: 0 };
 
-        let err = run(&op_ctx(), &req, &admin, &meta, &reader, &applier, &consent).unwrap_err();
+        let err = run(
+            &op_ctx(),
+            &req,
+            &admin,
+            &meta,
+            &reader,
+            &applier,
+            &consent,
+            &empty_registry(),
+        )
+        .unwrap_err();
         assert!(
             matches!(
                 err,
@@ -507,7 +633,17 @@ mod tests {
         let applier = default_applier();
         let consent = StubConsent { purged: 0 };
 
-        let err = run(&op_ctx(), &req, &admin, &meta, &reader, &applier, &consent).unwrap_err();
+        let err = run(
+            &op_ctx(),
+            &req,
+            &admin,
+            &meta,
+            &reader,
+            &applier,
+            &consent,
+            &empty_registry(),
+        )
+        .unwrap_err();
         assert!(
             matches!(err, AdminError::IntegrityMismatch { .. }),
             "expected IntegrityMismatch, got {err:?}",
@@ -536,7 +672,19 @@ mod tests {
         let applier = default_applier();
         let consent = StubConsent { purged: 0 };
 
-        let resp = run(&op_ctx(), &req, &admin, &meta, &reader, &applier, &consent).unwrap();
+        // dry-run still runs the full precondition gate (incl. the registry
+        // integrity anchor) before the early return, so supply a matching one.
+        let resp = run(
+            &op_ctx(),
+            &req,
+            &admin,
+            &meta,
+            &reader,
+            &applier,
+            &consent,
+            &matching_registry(&m),
+        )
+        .unwrap();
         assert!(
             !*applier.swapped.lock().expect("test mutex"),
             "dry-run never swaps",
@@ -560,6 +708,7 @@ mod tests {
             heads: m.schema_versions.clone(),
             frontier: "step:99".into(),
         };
+        let registry = matching_registry(&m);
         let reader = StubReader {
             manifest: m,
             envelope: env,
@@ -567,7 +716,17 @@ mod tests {
         let applier = default_applier();
         let consent = StubConsent { purged: 3 };
 
-        let resp = run(&op_ctx(), &req, &admin, &meta, &reader, &applier, &consent).unwrap();
+        let resp = run(
+            &op_ctx(),
+            &req,
+            &admin,
+            &meta,
+            &reader,
+            &applier,
+            &consent,
+            &registry,
+        )
+        .unwrap();
         assert!(
             *applier.staged.lock().expect("test mutex"),
             "stage must have been called",
@@ -608,7 +767,17 @@ mod tests {
         let applier = default_applier();
         let consent = StubConsent { purged: 0 };
 
-        let err = run(&op_ctx(), &req, &admin, &meta, &reader, &applier, &consent).unwrap_err();
+        let err = run(
+            &op_ctx(),
+            &req,
+            &admin,
+            &meta,
+            &reader,
+            &applier,
+            &consent,
+            &empty_registry(),
+        )
+        .unwrap_err();
         assert!(
             matches!(
                 err,
@@ -618,6 +787,102 @@ mod tests {
                 } if snapshot == MANIFEST_SCHEMA_VERSION + 1 && local == MANIFEST_SCHEMA_VERSION
             ),
             "expected SchemaTooNew for manifest version, got {err:?}",
+        );
+    }
+
+    #[test]
+    fn integrity_mismatch_when_artifact_digest_differs_from_registry() {
+        // The manifest self-check (gate 5a) passes, but the recomputed full
+        // artifact digest disagrees with the trusted registry `file_digest` —
+        // models a tampered `cairn.db` or vault tree. Must fail closed before
+        // any swap (round-3 adversarial review #4).
+        let m = fixture_manifest("M", "V");
+        let env = good_envelope_for(&m);
+        let req = RestoreRequest {
+            artifact_path: PathBuf::from("/tmp/x"),
+            dry_run: false,
+            local_machine_id: "M".into(),
+        };
+        let admin = StubAdmin { is_op: true };
+        let meta = StubMeta {
+            vault: "V".into(),
+            heads: m.schema_versions.clone(),
+            frontier: "step:9".into(),
+        };
+        let reader = StubReader {
+            manifest: m,
+            envelope: env,
+        };
+        let applier = default_applier();
+        let consent = StubConsent { purged: 0 };
+        // Registry records a digest that does NOT match the artifact.
+        let registry = StubRegistry {
+            digest: Some("0".repeat(64)),
+        };
+
+        let err = run(
+            &op_ctx(),
+            &req,
+            &admin,
+            &meta,
+            &reader,
+            &applier,
+            &consent,
+            &registry,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, AdminError::IntegrityMismatch { .. }),
+            "expected IntegrityMismatch on digest disagreement, got {err:?}",
+        );
+        assert!(
+            !*applier.swapped.lock().expect("test mutex"),
+            "no swap when the artifact digest fails to match the trusted anchor",
+        );
+    }
+
+    #[test]
+    fn integrity_fails_closed_when_no_registry_entry() {
+        // No trusted anchor exists for this backup id → cannot confirm db/tree
+        // integrity → fail closed rather than swap an unverifiable artifact.
+        let m = fixture_manifest("M", "V");
+        let env = good_envelope_for(&m);
+        let req = RestoreRequest {
+            artifact_path: PathBuf::from("/tmp/x"),
+            dry_run: false,
+            local_machine_id: "M".into(),
+        };
+        let admin = StubAdmin { is_op: true };
+        let meta = StubMeta {
+            vault: "V".into(),
+            heads: m.schema_versions.clone(),
+            frontier: "step:9".into(),
+        };
+        let reader = StubReader {
+            manifest: m,
+            envelope: env,
+        };
+        let applier = default_applier();
+        let consent = StubConsent { purged: 0 };
+
+        let err = run(
+            &op_ctx(),
+            &req,
+            &admin,
+            &meta,
+            &reader,
+            &applier,
+            &consent,
+            &empty_registry(),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, AdminError::IntegrityMismatch { .. }),
+            "expected IntegrityMismatch when no registry anchor exists, got {err:?}",
+        );
+        assert!(
+            !*applier.swapped.lock().expect("test mutex"),
+            "no swap without a trusted integrity anchor",
         );
     }
 }

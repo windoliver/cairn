@@ -248,6 +248,16 @@ mod tests {
                 .push(entry.clone());
             Ok(())
         }
+
+        fn lookup(&self, backup_id: &str) -> Result<Option<BackupRegistryEntry>, StoreError> {
+            Ok(self
+                .entries
+                .lock()
+                .expect("test mutex poisoned")
+                .iter()
+                .find(|e| e.backup_id == backup_id)
+                .cloned())
+        }
     }
 
     fn op_ctx() -> AdminContext {

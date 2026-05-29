@@ -873,16 +873,21 @@ impl ServerHandler for CairnMcpHandler {
                 }
 
                 // Admin extension routing (brief §7, issue #161).
-                // The IDL TOOLS array exposes the six admin verbs.
-                // Dispatch routes through the verb layer when the vault
-                // root is known; returns `CapabilityUnavailable` when
-                // the wiring constants are dark (ADMIN_MCP_DISPATCH_WIRED
-                // = false) or when no vault root is bound.
+                // The IDL TOOLS array exposes the six admin verbs. Pass the
+                // live negotiated capability set so `dispatch` admits the
+                // call ONLY when the admin extension is actually advertised
+                // (i.e. wired AND `config.admin.enabled` AND an operator row
+                // exists — see `build_status_response`). This makes a direct
+                // `call_tool` fail closed on a config-disabled / no-operator
+                // server, not just in `tools/list` filtering
+                // (round-3 adversarial review #1; brief §15 fail-closed).
                 if crate::admin_tools::is_admin_tool(name.as_ref()) {
+                    let capabilities = self.build_status_response().capabilities;
                     return Ok(crate::admin_tools::dispatch(
                         &name,
                         arguments,
                         self.vault_root.as_deref(),
+                        &capabilities,
                     ));
                 }
 

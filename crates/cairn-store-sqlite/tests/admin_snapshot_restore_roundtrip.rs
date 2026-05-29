@@ -193,6 +193,8 @@ fn snapshot_restore_roundtrip_preserves_records() {
         local_machine_id: TEST_MACHINE.into(),
     };
 
+    // Reuse the same registry the snapshot wrote to: restore verifies the
+    // artifact's recomputed digest against the trusted `file_digest` anchor.
     let restore_resp = restore::run(
         &ctx,
         &restore_req,
@@ -201,6 +203,7 @@ fn snapshot_restore_roundtrip_preserves_records() {
         &reader,
         &applier,
         &consent,
+        &registry,
     )
     .expect("restore run");
 
@@ -233,4 +236,191 @@ fn snapshot_restore_roundtrip_preserves_records() {
         tombstone_count, 2,
         "restored DB must contain 2 tombstoned rows"
     );
+}
+
+/// Round-3 adversarial review #3: a snapshot taken while a WAL-mode
+/// connection is still OPEN — committed rows live in the `-wal` sidecar, not
+/// yet checkpointed into the main db file — must still capture those rows.
+/// The producer uses `VACUUM INTO`, which reads a transactionally-consistent
+/// committed image (WAL frames included); the old `std::fs::read` of the main
+/// db file would have silently dropped them.
+#[test]
+fn snapshot_captures_committed_rows_with_open_wal_connection() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let vault_root = temp.path().to_path_buf();
+    std::fs::create_dir_all(vault_root.join(".cairn")).unwrap();
+    let db_path = vault_root.join(".cairn/cairn.db");
+
+    // Seed + commit, but DELIBERATELY keep the connection open so the
+    // committed frames stay in the -wal sidecar (no checkpoint on close).
+    let conn = cairn_store_sqlite::open_sync(&db_path).expect("open store");
+    seed_records(&conn, /* active= */ 3, /* tombstoned= */ 1);
+    let pre = fingerprint_records(&conn);
+    assert_eq!(pre.len(), 4, "expect 3 active + 1 tombstoned seeded");
+
+    let admin = SqliteAdminStateStore::open_in_memory().expect("admin store");
+    let op = Identity::parse("hmn:op").expect("test fixture");
+    let bootstrap = Identity::parse("hmn:bootstrap").expect("test fixture");
+    admin
+        .grant_role(&op, AdminRole::Operator, &bootstrap)
+        .expect("grant operator");
+    let ctx = AdminContext::new(op.clone(), AdminRole::Operator);
+
+    let out_dir = temp.path().join("backups");
+    let meta = SqliteSnapshotMetadata::new(db_path.clone(), TEST_VAULT.to_string());
+    let producer = SqliteSnapshotProducer::new(vault_root.clone(), db_path.clone());
+    let registry = FileBackupRegistry::new(vault_root.clone());
+    let snap_req = snapshot::SnapshotRequest {
+        out_dir: out_dir.clone(),
+        label: Some("wal-open".into()),
+        local_machine_id: TEST_MACHINE.into(),
+        backup_kind: "snapshot".into(),
+    };
+    // Snapshot runs WHILE `conn` is still open.
+    let snap_resp = snapshot::run(&ctx, &snap_req, &admin, &meta, &producer, &registry)
+        .expect("snapshot with open WAL connection");
+    assert_eq!(
+        snap_resp.manifest.record_count, 3,
+        "manifest must count the 3 WAL-committed active rows"
+    );
+
+    // Now close the live connection and restore the snapshot into the vault.
+    conn.close().expect("close after snapshot");
+    let meta2 = SqliteSnapshotMetadata::new(db_path.clone(), TEST_VAULT.to_string());
+    let reader = SqliteSnapshotReader;
+    let applier = SqliteSnapshotApplier::new(vault_root.clone());
+    let consent = SqliteConsentLog::new(db_path.clone(), db_path.clone());
+    let restore_req = restore::RestoreRequest {
+        artifact_path: snap_resp.artifact_path.clone(),
+        dry_run: false,
+        local_machine_id: TEST_MACHINE.into(),
+    };
+    restore::run(
+        &ctx,
+        &restore_req,
+        &admin,
+        &meta2,
+        &reader,
+        &applier,
+        &consent,
+        &registry,
+    )
+    .expect("restore run");
+
+    // The restored DB IS the snapshot's db; its rows must match what was
+    // committed (and only in the WAL) at snapshot time.
+    let conn2 = cairn_store_sqlite::open_sync(&db_path).expect("reopen restored store");
+    let post = fingerprint_records(&conn2);
+    assert_eq!(
+        pre, post,
+        "WAL-committed rows must survive snapshot→restore (VACUUM INTO captured them)"
+    );
+}
+
+/// Round-3 adversarial review #4: a snapshot artifact whose `cairn.db` member
+/// has been tampered with after sealing — while its `manifest.json` stays
+/// byte-identical so the manifest self-check still passes — must be rejected
+/// at the restore precondition gate with `IntegrityMismatch`, before any
+/// `swap_in`. The trusted anchor is the backup registry's recorded
+/// `file_digest`, which the tampered artifact no longer hashes to.
+#[test]
+fn restore_rejects_artifact_with_tampered_db_member() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let vault_root = temp.path().to_path_buf();
+    std::fs::create_dir_all(vault_root.join(".cairn")).unwrap();
+    let db_path = vault_root.join(".cairn/cairn.db");
+
+    let conn = cairn_store_sqlite::open_sync(&db_path).expect("open store");
+    seed_records(&conn, /* active= */ 2, /* tombstoned= */ 0);
+    conn.close().expect("close before snapshot");
+
+    let admin = SqliteAdminStateStore::open_in_memory().expect("admin store");
+    let op = Identity::parse("hmn:op").expect("test fixture");
+    let bootstrap = Identity::parse("hmn:bootstrap").expect("test fixture");
+    admin
+        .grant_role(&op, AdminRole::Operator, &bootstrap)
+        .expect("grant operator");
+    let ctx = AdminContext::new(op.clone(), AdminRole::Operator);
+
+    let out_dir = temp.path().join("backups");
+    let meta = SqliteSnapshotMetadata::new(db_path.clone(), TEST_VAULT.to_string());
+    let producer = SqliteSnapshotProducer::new(vault_root.clone(), db_path.clone());
+    let registry = FileBackupRegistry::new(vault_root.clone());
+    let snap_req = snapshot::SnapshotRequest {
+        out_dir: out_dir.clone(),
+        label: Some("tamper".into()),
+        local_machine_id: TEST_MACHINE.into(),
+        backup_kind: "snapshot".into(),
+    };
+    let snap_resp =
+        snapshot::run(&ctx, &snap_req, &admin, &meta, &producer, &registry).expect("snapshot run");
+
+    // Tamper the cairn.db member in place (manifest.json kept identical).
+    tamper_db_member(&snap_resp.artifact_path);
+
+    let meta2 = SqliteSnapshotMetadata::new(db_path.clone(), TEST_VAULT.to_string());
+    let reader = SqliteSnapshotReader;
+    let applier = SqliteSnapshotApplier::new(vault_root.clone());
+    let consent = SqliteConsentLog::new(db_path.clone(), db_path.clone());
+    let restore_req = restore::RestoreRequest {
+        artifact_path: snap_resp.artifact_path.clone(),
+        dry_run: false,
+        local_machine_id: TEST_MACHINE.into(),
+    };
+    let err = restore::run(
+        &ctx,
+        &restore_req,
+        &admin,
+        &meta2,
+        &reader,
+        &applier,
+        &consent,
+        &registry,
+    )
+    .expect_err("restore must refuse a tampered artifact");
+    assert!(
+        matches!(
+            err,
+            cairn_core::domain::admin::AdminError::IntegrityMismatch { .. }
+        ),
+        "expected IntegrityMismatch for tampered cairn.db, got {err:?}"
+    );
+}
+
+/// Rewrite `path` so the `cairn.db` tar member has one extra byte appended —
+/// changing its sha256 (and the tree size hash) while leaving `manifest.json`
+/// byte-identical. Used to model post-seal tampering.
+fn tamper_db_member(path: &std::path::Path) {
+    use std::io::Read as _;
+
+    // Read every member into memory.
+    let mut members: Vec<(String, Vec<u8>)> = Vec::new();
+    {
+        let file = std::fs::File::open(path).expect("open artifact");
+        let mut archive = tar::Archive::new(file);
+        for entry in archive.entries().expect("entries") {
+            let mut entry = entry.expect("entry");
+            let name = entry.path().expect("path").to_string_lossy().into_owned();
+            let mut buf = Vec::new();
+            entry.read_to_end(&mut buf).expect("read member");
+            members.push((name, buf));
+        }
+    }
+
+    // Re-pack, mutating only the cairn.db member.
+    let file = std::fs::File::create(path).expect("recreate artifact");
+    let mut builder = tar::Builder::new(file);
+    for (name, mut data) in members {
+        if name == "cairn.db" {
+            data.push(0xFF);
+        }
+        let mut header = tar::Header::new_gnu();
+        header.set_size(data.len() as u64);
+        header.set_mode(0o644);
+        header.set_cksum();
+        builder
+            .append_data(&mut header, &name, &data[..])
+            .expect("append member");
+    }
+    builder.finish().expect("finish tar");
 }

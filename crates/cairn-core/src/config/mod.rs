@@ -635,7 +635,7 @@ pub struct CairnConfig {
     /// Default `false` — the extension stays dark until the operator
     /// explicitly enables it in `.cairn/config.yaml`. Advertising
     /// admin capabilities also requires at least one operator row in
-    /// the admin_state store (`has_any_operator() = true`).
+    /// the `admin_state` store (`has_any_operator() = true`).
     #[serde(default)]
     pub admin: AdminConfig,
 }

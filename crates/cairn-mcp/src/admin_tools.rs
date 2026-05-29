@@ -84,16 +84,27 @@ pub fn capability_unavailable(name: &str) -> CallToolResult {
 /// Dispatch an admin MCP tool through the verb layer.
 ///
 /// Returns `CapabilityUnavailable` when:
-/// - `dispatch_ready()` is `false` (wiring constants are dark), OR
+/// - `runtime_ready(capabilities)` is `false` — i.e. either the build-time
+///   wiring constants are dark OR the admin extension capability is absent
+///   from the negotiated `status` advertisement, OR
 /// - `vault_root` is `None` (no vault is bound to this handler).
+///
+/// The capability slice is the authoritative admission gate: the handler
+/// advertises `cairn.mcp.v1.extension.admin` **only** when
+/// `config.admin.enabled` is true AND at least one operator row exists
+/// (see `handler::build_status_response`). Passing that live slice in here
+/// means a direct `call_tool` against an admin tool fails closed on a
+/// config-disabled or no-operator server — not just in `tools/list`
+/// filtering (brief §15 fail-closed; round-3 adversarial review #1).
 ///
 /// When both gates pass, routes to the matching verb function.
 pub fn dispatch(
     name: &str,
     arguments: Option<serde_json::Map<String, serde_json::Value>>,
     vault_root: Option<&Path>,
+    capabilities: &[Capabilities],
 ) -> CallToolResult {
-    if !dispatch_ready() {
+    if !runtime_ready(capabilities) {
         return capability_unavailable(name);
     }
     let Some(vault_root) = vault_root else {
@@ -125,13 +136,37 @@ fn open_admin_store(
         .map_err(|e| aborted_internal_admin(verb, &format!("open admin state store: {e}")))
 }
 
-/// Internal helper — derive the local-vault identity and vault id from `.cairn/vault.id`.
+/// Internal helper — derive the **local-operator bootstrap identity** and
+/// vault id from `.cairn/vault.id`.
 ///
-/// Returns `(actor_identity, vault_id_string)`. Using the vault id as the
-/// actor makes the MCP actor machine-specific: the operator must explicitly
-/// grant `hmn:local-vault:<vault_id>` as Operator (not a universal sentinel).
-/// Phase 2 will replace this with a proper signed-intent actor once
-/// MCP-level auth is wired end-to-end (brief §7.4).
+/// Returns `(actor_identity, vault_id_string)`.
+///
+/// ## This is a local bootstrap principal, NOT signed-chain auth
+///
+/// The IDL annotates every admin verb `x-cairn-auth: signed_chain`, but the
+/// stdio MCP transport is single-tenant — there is no per-request signed
+/// intent to verify yet (`McpAuthContext` carries only the fixed server
+/// principal; per-request signature extraction from `RequestContext` is
+/// deferred to Phase 2, brief §7.4). Rather than collapse callers into a
+/// universal sentinel, this derives a **machine-and-vault-specific** actor
+/// `hmn:local-vault:<vault_id>` from the on-disk vault id.
+///
+/// Three locks must ALL be satisfied before any admin verb runs through
+/// this path, so it is a deliberate, opt-in, local-trust bootstrap — not a
+/// silent bypass:
+/// 1. `config.admin.enabled = true` (operator opt-in; default false), AND
+/// 2. an operator row exists AND has explicitly granted
+///    `hmn:local-vault:<vault_id>` the `Operator` role — `guard::require_role`
+///    rejects with `NotAuthorized` otherwise, AND
+/// 3. the build-time wiring constants are flipped on.
+///
+/// Locks (1)+(2) are also what gate advertisement of the
+/// `cairn.mcp.v1.extension.admin` capability, so the whole surface is dark
+/// until the operator deliberately enables it. Until Phase 2 lands signed
+/// intent, operators exposing the MCP server over a network transport should
+/// keep `config.admin.enabled = false` and drive admin verbs from the CLI
+/// (which has the real signed-verb path). See round-1/round-3 adversarial
+/// review.
 ///
 /// # Errors
 /// Returns a `CallToolResult::error` when `.cairn/vault.id` is absent,
@@ -146,9 +181,7 @@ fn local_vault_identity(
         .map_err(|e| {
             aborted_internal_admin(
                 verb,
-                &format!(
-                    "read .cairn/vault.id (run `cairn bootstrap` to initialise): {e}"
-                ),
+                &format!("read .cairn/vault.id (run `cairn bootstrap` to initialise): {e}"),
             )
         })?;
     if vault_id.is_empty() {
@@ -192,9 +225,11 @@ fn dispatch_snapshot(args_value: serde_json::Value, vault_root: &Path) -> CallTo
         vault_root.to_path_buf(),
         vault_root.join(".cairn").join("cairn.db"),
     );
-    let registry = cairn_store_sqlite::FileBackupRegistry::new(
-        vault_root.join(".cairn").join("backups.jsonl"),
-    );
+    // The registry roots at the vault dir and writes
+    // `<vault>/.cairn/backups/<backup_id>.json`. Pass the vault root itself —
+    // NOT a `.cairn/backups.jsonl` sub-path — so restore-time integrity
+    // verification (which reads the same registry) agrees on the location.
+    let registry = cairn_store_sqlite::FileBackupRegistry::new(vault_root.to_path_buf());
 
     let ctx = AdminContext::new(actor, AdminRole::Operator);
     let req = cairn_core::verbs::admin::snapshot::SnapshotRequest {
@@ -247,11 +282,15 @@ fn dispatch_restore(args_value: serde_json::Value, vault_root: &Path) -> CallToo
         Err(r) => return r,
     };
     let db_path = vault_root.join(".cairn").join("cairn.db");
-    let meta =
-        cairn_store_sqlite::SqliteSnapshotMetadata::new(db_path.clone(), vault_id.clone());
+    let meta = cairn_store_sqlite::SqliteSnapshotMetadata::new(db_path.clone(), vault_id.clone());
     let reader = cairn_store_sqlite::SqliteSnapshotReader;
     let applier = cairn_store_sqlite::SqliteSnapshotApplier::new(vault_root.to_path_buf());
     let consent = cairn_store_sqlite::SqliteConsentLog::new(db_path.clone(), db_path);
+    // Trusted integrity anchor: the backup registry stores the artifact's
+    // full three-part digest at snapshot time, in `.cairn/backups/` —
+    // separate from `cairn.db`, so it survives DB loss. Restore verifies the
+    // artifact against it before swapping (round-3 adversarial review #4).
+    let registry = cairn_store_sqlite::FileBackupRegistry::new(vault_root.to_path_buf());
 
     let ctx = AdminContext::new(actor, AdminRole::Operator);
     let req = cairn_core::verbs::admin::restore::RestoreRequest {
@@ -263,7 +302,7 @@ fn dispatch_restore(args_value: serde_json::Value, vault_root: &Path) -> CallToo
     };
 
     match cairn_core::verbs::admin::restore::run(
-        &ctx, &req, &admin, &meta, &reader, &applier, &consent,
+        &ctx, &req, &admin, &meta, &reader, &applier, &consent, &registry,
     ) {
         Ok(resp) => {
             let data = AdminRestoreData {
@@ -468,88 +507,41 @@ fn dispatch_connector_disable(args_value: serde_json::Value, vault_root: &Path) 
     }
 }
 
-fn dispatch_connector_backfill(args_value: serde_json::Value, vault_root: &Path) -> CallToolResult {
-    use cairn_core::contract::backfill_spawner::{BackfillSpawner, BackfillSpec};
-    use cairn_core::contract::memory_store::StoreError;
-    use cairn_core::generated::envelope::ResponseData;
-    use cairn_core::generated::verbs::admin_connector_backfill::{
-        AdminConnectorBackfillArgs, AdminConnectorBackfillData,
-    };
-    use cairn_core::verbs::admin::connector::{self, BackfillRequest};
+fn dispatch_connector_backfill(
+    args_value: serde_json::Value,
+    _vault_root: &Path,
+) -> CallToolResult {
+    use cairn_core::generated::verbs::admin_connector_backfill::AdminConnectorBackfillArgs;
 
-    struct NoopSpawner;
-    impl BackfillSpawner for NoopSpawner {
-        fn spawn_backfill(&self, _spec: BackfillSpec) -> Result<(), StoreError> {
-            Ok(())
-        }
-    }
-
-    let args: AdminConnectorBackfillArgs = match serde_json::from_value(args_value) {
-        Ok(a) => a,
-        Err(e) => {
-            return admin_error_result(
-                ResponseVerb::AdminConnectorBackfill,
-                &format!("invalid admin_connector_backfill arguments: {e}"),
-            );
-        }
-    };
-
-    let admin = match open_admin_store(vault_root, ResponseVerb::AdminConnectorBackfill) {
-        Ok(a) => a,
-        Err(r) => return r,
-    };
-    let (actor, _) =
-        match local_vault_identity(vault_root, ResponseVerb::AdminConnectorBackfill) {
-            Ok(pair) => pair,
-            Err(r) => return r,
-        };
-
-    let from = match args.from.parse::<chrono::DateTime<chrono::Utc>>() {
-        Ok(dt) => dt,
-        Err(e) => {
-            return admin_error_result(
-                ResponseVerb::AdminConnectorBackfill,
-                &format!("invalid `from` date-time: {e}"),
-            );
-        }
-    };
-    let to = match args.to.parse::<chrono::DateTime<chrono::Utc>>() {
-        Ok(dt) => dt,
-        Err(e) => {
-            return admin_error_result(
-                ResponseVerb::AdminConnectorBackfill,
-                &format!("invalid `to` date-time: {e}"),
-            );
-        }
-    };
-
-    let ctx = AdminContext::new(actor, AdminRole::Operator);
-    let spawner = NoopSpawner;
-    let req = BackfillRequest {
-        name: args.name,
-        from,
-        to,
-        rate_per_sec: args.rate_per_sec,
-    };
-
-    match connector::backfill(&ctx, &req, &admin, &spawner) {
-        Ok(resp) => {
-            let data = AdminConnectorBackfillData {
-                workflow_id: resp.workflow_id.to_string(),
-                started_at: resp.started_at.to_rfc3339(),
-            };
-            let envelope = crate::verb_envelope::committed(
-                ResponseVerb::AdminConnectorBackfill,
-                ResponseData::AdminConnectorBackfill(data),
-                Vec::new(),
-            );
-            crate::verb_envelope::call_result_from_response(&envelope)
-        }
-        Err(e) => admin_error_result(
+    // Validate the argument shape so malformed calls still get a clean
+    // InvalidArgs-style error rather than the generic "not wired" message.
+    if let Err(e) = serde_json::from_value::<AdminConnectorBackfillArgs>(args_value) {
+        return admin_error_result(
             ResponseVerb::AdminConnectorBackfill,
-            &format!("admin_connector_backfill: {e}"),
-        ),
+            &format!("invalid admin_connector_backfill arguments: {e}"),
+        );
     }
+
+    // Fail closed instead of faking success. No `BackfillSpawner` is wired
+    // into the MCP adapter, so executing the verb here would persist no job
+    // and start no scheduler work — yet the previous code returned a
+    // `committed` envelope with a fabricated workflow id, giving operators a
+    // false "backfill running" signal (round-3 adversarial review #5).
+    //
+    // Until a real spawner is wired (scheduler integration follow-up), this
+    // verb is advertised for API/wire compatibility under the admin umbrella
+    // but cannot execute over MCP. Return an explicit aborted error so the
+    // caller never mistakes a no-op for a started backfill. Operators who
+    // need a backfill today must drive it from the CLI, which surfaces the
+    // same "spawner not yet wired" caveat.
+    admin_error_result(
+        ResponseVerb::AdminConnectorBackfill,
+        "admin_connector_backfill is not executable over MCP in this build: \
+         no BackfillSpawner is wired, so no job would be enqueued. The verb is \
+         advertised for compatibility but refuses rather than reporting a \
+         false success. Run the backfill from the CLI or wait for scheduler \
+         integration.",
+    )
 }
 
 /// Convert an admin error string into a `CallToolResult` with the aborted
@@ -612,14 +604,16 @@ mod tests {
     }
 
     #[test]
-    fn dispatch_returns_capability_unavailable_when_dispatch_not_ready() {
-        // ADMIN_MCP_DISPATCH_WIRED = false → dispatch_ready() = false
-        // → dispatch returns capability_unavailable regardless of vault_root.
-        if dispatch_ready() {
-            // Gap 8 has flipped the constants; skip this particular assertion.
-            return;
-        }
-        let result = dispatch("admin_snapshot", None, Some(std::path::Path::new("/tmp")));
+    fn dispatch_returns_capability_unavailable_when_capability_absent() {
+        // An empty capability slice models a server that did not advertise the
+        // admin extension (config disabled / no operator) — `dispatch` must
+        // fail closed regardless of vault_root or wiring state.
+        let result = dispatch(
+            "admin_snapshot",
+            None,
+            Some(std::path::Path::new("/tmp")),
+            &[],
+        );
         assert!(result.is_error.unwrap_or(false));
         let text = result
             .content
@@ -640,12 +634,17 @@ mod tests {
 
     #[test]
     fn dispatch_returns_capability_unavailable_when_no_vault_root() {
-        // When dispatch_ready() is true but vault_root is None,
-        // capability_unavailable is still returned.
+        // With the admin capability advertised AND wiring on, the runtime gate
+        // passes — but a missing vault_root still yields capability_unavailable.
         if !dispatch_ready() {
-            return; // skip — can only test this when wired
+            return; // skip — the runtime gate can't pass when wiring is dark
         }
-        let result = dispatch("admin_snapshot", None, None);
+        let result = dispatch(
+            "admin_snapshot",
+            None,
+            None,
+            &[Capabilities::CairnMcpV1ExtensionAdmin],
+        );
         assert!(result.is_error.unwrap_or(false));
     }
 }

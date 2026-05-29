@@ -44,6 +44,25 @@ impl BackupRegistry for FileBackupRegistry {
         std::fs::write(&path, bytes).map_err(|e| Box::new(e) as StoreError)?;
         Ok(())
     }
+
+    /// Read `<vault>/.cairn/backups/<backup_id>.json` and parse it.
+    ///
+    /// Returns `Ok(None)` when the file is absent (no entry for that id). A
+    /// missing-file error is the only error mapped to `None`; malformed JSON
+    /// or other I/O errors propagate so a corrupt registry fails loudly rather
+    /// than silently degrading the restore-time integrity check.
+    fn lookup(&self, backup_id: &str) -> Result<Option<BackupRegistryEntry>, StoreError> {
+        let path = self.dir().join(format!("{backup_id}.json"));
+        match std::fs::read(&path) {
+            Ok(bytes) => {
+                let entry: BackupRegistryEntry =
+                    serde_json::from_slice(&bytes).map_err(|e| Box::new(e) as StoreError)?;
+                Ok(Some(entry))
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(Box::new(e) as StoreError),
+        }
+    }
 }
 
 #[cfg(test)]

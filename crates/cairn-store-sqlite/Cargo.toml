@@ -27,6 +27,9 @@ serde_json = { workspace = true }
 serde = { workspace = true }
 sha2 = { workspace = true }
 tar = { workspace = true }
+# Runtime temp dir for the snapshot producer's WAL-safe `VACUUM INTO`
+# destination (admin/producer.rs). Not test-only.
+tempfile = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["time", "rt"] }
 tokio-util = { workspace = true }
@@ -56,7 +59,10 @@ cairn-test-fixtures = { workspace = true }
 insta = { workspace = true }
 proptest = { workspace = true }
 serde = { workspace = true }
-tempfile = { workspace = true }
+# Used by admin_snapshot_restore_roundtrip.rs to surgically tamper a tar
+# member and assert restore-time integrity rejection.
+tar = { workspace = true }
+# `tempfile` is a normal dependency (see [dependencies]); tests use it too.
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 rand_core = { workspace = true }
 rstest = { workspace = true }

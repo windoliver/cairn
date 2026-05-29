@@ -68,9 +68,11 @@ impl SnapshotArtifactProducer for SqliteSnapshotProducer {
         tree_hasher.update(manifest_len.to_le_bytes());
 
         // ── 2. cairn.db ──────────────────────────────────────────────────────
-        // Read once into memory — vaults are small enough for v0.2.
+        // Capture a transactionally-consistent image of the live DB (WAL-safe)
+        // rather than reading the main file in place. Read once into memory —
+        // vaults are small enough for v0.2.
         // TODO(perf): stream-while-hashing for large vaults (follow-up).
-        let db_bytes = std::fs::read(&self.db_path).map_err(|e| Box::new(e) as StoreError)?;
+        let db_bytes = consistent_db_bytes(&self.db_path)?;
         db_hasher.update(&db_bytes);
         let db_len = db_bytes.len() as u64;
         let mut db_header = tar::Header::new_gnu();
@@ -102,6 +104,45 @@ impl SnapshotArtifactProducer for SqliteSnapshotProducer {
             tree_sha256: hex_encode(tree_hasher.finalize().as_slice()),
         })
     }
+}
+
+/// Produce a transactionally-consistent byte image of the live `SQLite`
+/// database at `db_path`, safe under WAL mode.
+///
+/// The store runs `PRAGMA journal_mode=WAL`, so freshly-committed rows can
+/// live in the `-wal` sidecar that a naive `std::fs::read` of the main DB
+/// file would miss — yielding a snapshot that silently drops recent commits
+/// or captures a torn page mid-checkpoint. Instead we open our own
+/// connection and run `VACUUM INTO`, which takes a read transaction over the
+/// current committed state (WAL frames included) and writes a fresh,
+/// standalone, defragmented copy. We then read that copy's bytes
+/// (round-3 adversarial review #3).
+fn consistent_db_bytes(db_path: &Path) -> Result<Vec<u8>, StoreError> {
+    // Register the sqlite-vec vec0 module first so VACUUM can reconstruct the
+    // `record_vectors` virtual table in the destination database. Registration
+    // is process-global and idempotent.
+    crate::vec_ext::register_vec0();
+    let conn = rusqlite::Connection::open(db_path).map_err(|e| Box::new(e) as StoreError)?;
+    // `trusted_schema=ON` lets VACUUM process the vec0 virtual table; the
+    // busy_timeout lets us wait out a concurrent writer's lock rather than
+    // failing immediately with SQLITE_BUSY.
+    conn.execute_batch("PRAGMA trusted_schema=ON; PRAGMA busy_timeout=5000;")
+        .map_err(|e| Box::new(e) as StoreError)?;
+
+    let tmp = tempfile::tempdir().map_err(|e| Box::new(e) as StoreError)?;
+    let dest = tmp.path().join("snapshot.db");
+    // VACUUM INTO requires a destination path that does NOT already exist; the
+    // tempdir is empty so `snapshot.db` is fresh. Double any single-quote for
+    // SQL string-literal escaping — tempdir paths normally contain none, but
+    // escape defensively.
+    let dest_sql = dest.display().to_string().replace('\'', "''");
+    conn.execute_batch(&format!("VACUUM INTO '{dest_sql}'"))
+        .map_err(|e| Box::new(e) as StoreError)?;
+    drop(conn);
+
+    let bytes = std::fs::read(&dest).map_err(|e| Box::new(e) as StoreError)?;
+    // `tmp` (holding `dest`) is removed when it drops at end of scope.
+    Ok(bytes)
 }
 
 /// Recursively walk `dir` in deterministic (sorted) order and update
@@ -168,11 +209,16 @@ mod tests {
         let vault_root = dir.path().join("vault");
         std::fs::create_dir_all(&vault_root).expect("vault_root");
 
-        // Create a minimal cairn.db (a few bytes — not a real DB for this test).
+        // Create a REAL minimal cairn.db at schema head: the producer now
+        // captures the DB via `VACUUM INTO`, which needs a valid SQLite
+        // source (the old `b"fake-db-bytes"` placeholder is not a database).
         let db_dir = vault_root.join(".cairn");
         std::fs::create_dir_all(&db_dir).expect("db_dir");
         let db_path = db_dir.join("cairn.db");
-        std::fs::write(&db_path, b"fake-db-bytes").expect("write db");
+        {
+            let conn = crate::open::open_sync(&db_path).expect("create real cairn.db");
+            conn.close().expect("close db before snapshot");
+        }
 
         // Build a valid canonical-JSON manifest payload.
         let manifest_bytes = test_manifest("test");

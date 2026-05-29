@@ -74,19 +74,19 @@ fn umbrella_capability_string_matches_idl() {
 }
 
 #[test]
-fn dispatch_returns_capability_unavailable_for_every_tool_while_dark() {
-    // ADMIN_MCP_DISPATCH_WIRED = false in the current phase.
-    if dispatch_ready() {
-        // Gap 8 has flipped the constants; this test's preconditions no
-        // longer hold. Bail out — there's a sibling test that exercises
-        // the wired path.
-        return;
-    }
+fn dispatch_fails_closed_when_admin_capability_not_advertised() {
+    // An empty capability slice models a server that did NOT advertise
+    // `cairn.mcp.v1.extension.admin` — i.e. `config.admin.enabled = false`
+    // OR no operator row exists (see handler::build_status_response). A
+    // direct `call_tool` against any admin tool must then fail closed,
+    // regardless of the build-time wiring constants — covering the
+    // config-disabled / no-operator cases, not just `tools/list` filtering
+    // (round-3 adversarial review #1; brief §15 fail-closed).
     for &tool in EXPECTED_TOOLS {
-        let result = dispatch(tool, None, Some(std::path::Path::new("/tmp")));
+        let result = dispatch(tool, None, Some(std::path::Path::new("/tmp")), &[]);
         assert!(
             result.is_error.unwrap_or(false),
-            "{tool}: expected is_error=true while dark"
+            "{tool}: expected is_error=true when capability absent"
         );
         let text = first_text(&result.content).unwrap_or_default();
         assert!(
@@ -101,14 +101,40 @@ fn dispatch_returns_capability_unavailable_for_every_tool_while_dark() {
 }
 
 #[test]
-fn dispatch_unknown_admin_tool_returns_capability_unavailable() {
-    // dispatch() with an arbitrary name still goes through the
-    // capability gate — we don't want to leak structural details about
-    // which admin verbs ship in this build.
+fn dispatch_gate_passes_only_when_capability_present_and_wired() {
+    use cairn_core::generated::common::Capabilities;
+
+    // With the admin capability advertised AND the wiring constants on, the
+    // capability gate admits the call (it then fails downstream on the
+    // bogus vault path — but NOT with the "capability unavailable" message).
+    // When wiring is dark the gate still rejects even with the capability
+    // present, so only assert the positive path when dispatch_ready().
+    if !dispatch_ready() {
+        return;
+    }
+    let caps = [Capabilities::CairnMcpV1ExtensionAdmin];
+    let result = dispatch(
+        "admin_snapshot",
+        None,
+        Some(std::path::Path::new("/cairn-nonexistent-vault-xyz")),
+        &caps,
+    );
+    let text = first_text(&result.content).unwrap_or_default();
+    assert!(
+        !text.contains("capability unavailable"),
+        "gate must admit the call when capability present + wired; got: {text}"
+    );
+}
+
+#[test]
+fn dispatch_unknown_admin_tool_fails_closed_without_capability() {
+    // dispatch() with an arbitrary name still goes through the capability
+    // gate first — we don't leak which admin verbs ship in this build.
     let result = dispatch(
         "admin_does_not_exist",
         None,
         Some(std::path::Path::new("/tmp")),
+        &[],
     );
     assert!(result.is_error.unwrap_or(false));
 }

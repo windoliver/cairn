@@ -108,6 +108,7 @@ fn restore_refuses_cross_machine_snapshot() {
         &reader,
         &applier,
         &consent,
+        &registry,
     );
 
     // ── 6. Assert typed error ──────────────────────────────────────────────
