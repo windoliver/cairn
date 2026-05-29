@@ -185,7 +185,7 @@ fn snapshot_restore_roundtrip_preserves_records() {
     // ConsentLog: after swap_in the restored DB IS the live DB, so we pass
     // db_path for both sides. No records were forgotten in this round-trip so
     // apply_post_restore_purge will return 0.
-    let consent = SqliteConsentLog::new(db_path.clone(), db_path.clone());
+    let consent = SqliteConsentLog::new(db_path.clone());
 
     let restore_req = restore::RestoreRequest {
         artifact_path: snap_resp.artifact_path.clone(),
@@ -289,7 +289,7 @@ fn snapshot_captures_committed_rows_with_open_wal_connection() {
     let meta2 = SqliteSnapshotMetadata::new(db_path.clone(), TEST_VAULT.to_string());
     let reader = SqliteSnapshotReader;
     let applier = SqliteSnapshotApplier::new(vault_root.clone());
-    let consent = SqliteConsentLog::new(db_path.clone(), db_path.clone());
+    let consent = SqliteConsentLog::new(db_path.clone());
     let restore_req = restore::RestoreRequest {
         artifact_path: snap_resp.artifact_path.clone(),
         dry_run: false,
@@ -361,7 +361,7 @@ fn restore_rejects_artifact_with_tampered_db_member() {
     let meta2 = SqliteSnapshotMetadata::new(db_path.clone(), TEST_VAULT.to_string());
     let reader = SqliteSnapshotReader;
     let applier = SqliteSnapshotApplier::new(vault_root.clone());
-    let consent = SqliteConsentLog::new(db_path.clone(), db_path.clone());
+    let consent = SqliteConsentLog::new(db_path.clone());
     let restore_req = restore::RestoreRequest {
         artifact_path: snap_resp.artifact_path.clone(),
         dry_run: false,
@@ -435,7 +435,7 @@ fn restore_rejects_artifact_with_tampered_vault_tree_member() {
     let meta2 = SqliteSnapshotMetadata::new(db_path.clone(), TEST_VAULT.to_string());
     let reader = SqliteSnapshotReader;
     let applier = SqliteSnapshotApplier::new(vault_root.clone());
-    let consent = SqliteConsentLog::new(db_path.clone(), db_path.clone());
+    let consent = SqliteConsentLog::new(db_path.clone());
     let restore_req = restore::RestoreRequest {
         artifact_path: snap_resp.artifact_path.clone(),
         dry_run: false,

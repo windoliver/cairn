@@ -92,21 +92,20 @@ pub fn run(
         });
     }
 
-    // Pre-capture forget hashes from the LIVE DB before swap_in() overwrites
-    // the live DB path with the restored DB (finding #161-R2-4 fix). The
-    // ConsentLog adapter caches these hashes so apply_post_restore_purge()
-    // can use them even when live_db == restored_db (MCP path).
-    consent
-        .forgotten_record_target_hashes()
-        .map_err(AdminError::Store)?;
-
+    // Stage the artifact, then purge forget-tombstones from the STAGED database
+    // BEFORE swapping it in. Purging pre-swap means a purge failure aborts the
+    // restore with the ORIGINAL vault still live — records forgotten since the
+    // snapshot can never reappear through a half-completed restore (the old
+    // swap-then-purge order had no rollback if purge failed post-swap)
+    // (brief §14; round-5 review #1).
     let staging = applier
         .stage(&req.artifact_path, &manifest.backup_id)
         .map_err(AdminError::Store)?;
-    applier.swap_in(&staging).map_err(AdminError::Store)?;
+    let staged_db = applier.staged_db_path(&staging);
     let tombstones = consent
-        .apply_post_restore_purge()
+        .apply_post_restore_purge(&staged_db)
         .map_err(AdminError::Store)?;
+    applier.swap_in(&staging).map_err(AdminError::Store)?;
     let frontier = meta.frontier_step().map_err(AdminError::Store)?;
 
     Ok(RestoreResponse {
@@ -360,8 +359,22 @@ mod tests {
             Ok(HashSet::new())
         }
 
-        fn apply_post_restore_purge(&self) -> Result<u64, StoreError> {
+        fn apply_post_restore_purge(&self, _target_db: &Path) -> Result<u64, StoreError> {
             Ok(self.purged)
+        }
+    }
+
+    /// `ConsentLog` whose purge always fails — used to prove the verb aborts
+    /// BEFORE `swap_in` so a purge failure never leaves a half-restored vault.
+    struct FailingConsent;
+
+    impl ConsentLogTrait for FailingConsent {
+        fn forgotten_record_target_hashes(&self) -> Result<HashSet<String>, StoreError> {
+            Ok(HashSet::new())
+        }
+
+        fn apply_post_restore_purge(&self, _target_db: &Path) -> Result<u64, StoreError> {
+            Err(Box::new(std::io::Error::other("purge failed")) as StoreError)
         }
     }
 
@@ -883,6 +896,57 @@ mod tests {
         assert!(
             !*applier.swapped.lock().expect("test mutex"),
             "no swap without a trusted integrity anchor",
+        );
+    }
+
+    /// Round-5 review #1: purge runs against the STAGED db BEFORE `swap_in`, so
+    /// a purge failure must abort the restore with NO swap performed — the
+    /// original vault stays live and forgotten records cannot reappear.
+    #[test]
+    fn purge_failure_aborts_before_swap() {
+        let m = fixture_manifest("M", "V");
+        let env = good_envelope_for(&m);
+        let registry = matching_registry(&m);
+        let req = RestoreRequest {
+            artifact_path: PathBuf::from("/tmp/x"),
+            dry_run: false,
+            local_machine_id: "M".into(),
+        };
+        let admin = StubAdmin { is_op: true };
+        let meta = StubMeta {
+            vault: "V".into(),
+            heads: m.schema_versions.clone(),
+            frontier: "step:9".into(),
+        };
+        let reader = StubReader {
+            manifest: m,
+            envelope: env,
+        };
+        let applier = default_applier();
+        let consent = FailingConsent;
+
+        let err = run(
+            &op_ctx(),
+            &req,
+            &admin,
+            &meta,
+            &reader,
+            &applier,
+            &consent,
+            &registry,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, AdminError::Store(_)),
+            "expected Store error from purge failure, got {err:?}"
+        );
+        assert!(
+            *applier.staged.lock().expect("test mutex"),
+            "stage runs before the purge"
+        );
+        assert!(
+            !*applier.swapped.lock().expect("test mutex"),
+            "swap_in must NOT run when the pre-swap purge fails"
         );
     }
 }

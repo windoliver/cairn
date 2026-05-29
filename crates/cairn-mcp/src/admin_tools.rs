@@ -195,6 +195,25 @@ fn local_vault_identity(
     Ok((identity, vault_id))
 }
 
+/// Derive the local **machine** fingerprint for the cross-machine restore
+/// guard — the host name, NOT the vault id.
+///
+/// A snapshot records this as its `source_machine_id`; restore refuses when it
+/// differs from the local value. Using the host name (not `.cairn/vault.id`,
+/// which travels with a copied vault) means a vault relocated to a different
+/// host cannot restore a snapshot made elsewhere — preserving the per-machine
+/// salt / integrity assumptions the guard protects (round-5 review #2). Fails
+/// closed when the host name cannot be read.
+fn local_machine_id(verb: ResponseVerb) -> Result<String, CallToolResult> {
+    let host = whoami::fallible::hostname()
+        .map_err(|e| aborted_internal_admin(verb, &format!("read machine hostname: {e}")))?;
+    let host = host.trim().to_owned();
+    if host.is_empty() {
+        return Err(aborted_internal_admin(verb, "machine hostname is empty"));
+    }
+    Ok(host)
+}
+
 fn dispatch_snapshot(args_value: serde_json::Value, vault_root: &Path) -> CallToolResult {
     use cairn_core::generated::envelope::ResponseData;
     use cairn_core::generated::verbs::admin_snapshot::{AdminSnapshotArgs, AdminSnapshotData};
@@ -217,6 +236,10 @@ fn dispatch_snapshot(args_value: serde_json::Value, vault_root: &Path) -> CallTo
         Ok(pair) => pair,
         Err(r) => return r,
     };
+    let machine_id = match local_machine_id(ResponseVerb::AdminSnapshot) {
+        Ok(m) => m,
+        Err(r) => return r,
+    };
     let meta = cairn_store_sqlite::SqliteSnapshotMetadata::new(
         vault_root.join(".cairn").join("cairn.db"),
         vault_id.clone(),
@@ -235,7 +258,9 @@ fn dispatch_snapshot(args_value: serde_json::Value, vault_root: &Path) -> CallTo
     let req = cairn_core::verbs::admin::snapshot::SnapshotRequest {
         out_dir: std::path::PathBuf::from(&args.out_dir),
         label: args.label,
-        local_machine_id: vault_id,
+        // Machine fingerprint (host), recorded as the manifest's
+        // source_machine_id — NOT the vault id.
+        local_machine_id: machine_id,
         backup_kind: args.backup_kind,
     };
 
@@ -276,16 +301,23 @@ fn dispatch_restore(args_value: serde_json::Value, vault_root: &Path) -> CallToo
         Ok(a) => a,
         Err(r) => return r,
     };
-    // Derive machine id and actor from the vault — never trust caller-supplied identity.
+    // Derive the actor (bootstrap identity) from the vault — never trust
+    // caller-supplied identity.
     let (actor, vault_id) = match local_vault_identity(vault_root, ResponseVerb::AdminRestore) {
         Ok(pair) => pair,
+        Err(r) => return r,
+    };
+    // The cross-machine guard compares against the host fingerprint, not the
+    // vault id (a copied vault carries its id but lands on a different host).
+    let machine_id = match local_machine_id(ResponseVerb::AdminRestore) {
+        Ok(m) => m,
         Err(r) => return r,
     };
     let db_path = vault_root.join(".cairn").join("cairn.db");
     let meta = cairn_store_sqlite::SqliteSnapshotMetadata::new(db_path.clone(), vault_id.clone());
     let reader = cairn_store_sqlite::SqliteSnapshotReader;
     let applier = cairn_store_sqlite::SqliteSnapshotApplier::new(vault_root.to_path_buf());
-    let consent = cairn_store_sqlite::SqliteConsentLog::new(db_path.clone(), db_path);
+    let consent = cairn_store_sqlite::SqliteConsentLog::new(db_path);
     // Trusted integrity anchor: the backup registry stores the artifact's
     // full three-part digest at snapshot time, in `.cairn/backups/` —
     // separate from `cairn.db`, so it survives DB loss. Restore verifies the
@@ -296,9 +328,9 @@ fn dispatch_restore(args_value: serde_json::Value, vault_root: &Path) -> CallToo
     let req = cairn_core::verbs::admin::restore::RestoreRequest {
         artifact_path: std::path::PathBuf::from(&args.artifact_path),
         dry_run: args.dry_run,
-        // Derive local_machine_id from the vault; ignore caller-supplied value
-        // so a remote caller cannot bypass the cross-machine guard.
-        local_machine_id: vault_id,
+        // Host fingerprint; ignore any caller-supplied value so a remote caller
+        // cannot bypass the cross-machine guard.
+        local_machine_id: machine_id,
     };
 
     match cairn_core::verbs::admin::restore::run(

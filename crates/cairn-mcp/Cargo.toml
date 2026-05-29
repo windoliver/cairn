@@ -23,6 +23,9 @@ tokio = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 memchr = { workspace = true }
+# Machine fingerprint (hostname) for the cross-machine restore guard — the MCP
+# admin local_machine_id must be host-derived, not vault-derived (review #5.2).
+whoami = { workspace = true }
 
 [dev-dependencies]
 cairn-test-fixtures = { workspace = true }

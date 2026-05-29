@@ -93,7 +93,7 @@ fn restore_refuses_cross_machine_snapshot() {
     let reader = SqliteSnapshotReader;
     let applier = SqliteSnapshotApplier::new(vault_root.clone());
     // ConsentLog references db_path for both sides (no forgotten records here).
-    let consent = SqliteConsentLog::new(db_path.clone(), db_path.clone());
+    let consent = SqliteConsentLog::new(db_path.clone());
 
     let restore_req = restore::RestoreRequest {
         artifact_path: snap_resp.artifact_path.clone(),

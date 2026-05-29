@@ -101,6 +101,16 @@ pub trait SnapshotApplier: Send + Sync {
     /// the staging root for diagnostic/audit logging.
     fn stage(&self, artifact_path: &Path, backup_id: &str) -> Result<PathBuf, StoreError>;
 
+    /// Path to the staged (not-yet-live) `cairn.db` inside `staging_root`.
+    ///
+    /// The verb purges forget-tombstones against THIS staged database before
+    /// `swap_in`, so a purge failure cannot leave forgotten records live
+    /// (brief §14; round-5 review #1). Default is `<staging_root>/cairn.db`,
+    /// matching the tarball layout every producer writes.
+    fn staged_db_path(&self, staging_root: &Path) -> PathBuf {
+        staging_root.join("cairn.db")
+    }
+
     /// Atomically swap the staged contents in as the live vault DB.
     /// After this returns Ok, readers see the restored vault. Idempotent
     /// is NOT required — the caller guarantees `stage`→`swap_in` runs once.
@@ -119,10 +129,14 @@ pub trait ConsentLog: Send + Sync {
         &self,
     ) -> Result<std::collections::HashSet<String>, StoreError>;
 
-    /// Apply the forget tombstones (purge matching targets in the
-    /// restored DB). The adapter implementation walks the post-swap DB,
-    /// hashes each target id, and removes matches. Returns the count of
-    /// targets purged so the caller can populate
+    /// Apply the forget tombstones to the database at `target_db`: walk it,
+    /// hash each target id, and remove rows whose hash is in the live forget
+    /// set. Returns the count purged so the caller can populate
     /// `RestoreResponse::tombstones_replayed`.
-    fn apply_post_restore_purge(&self) -> Result<u64, StoreError>;
+    ///
+    /// The verb calls this against the STAGED database (before `swap_in`), so a
+    /// purge failure aborts the restore with the original vault still live —
+    /// forgotten records can never reappear via a half-completed restore
+    /// (brief §14; round-5 review #1).
+    fn apply_post_restore_purge(&self, target_db: &Path) -> Result<u64, StoreError>;
 }

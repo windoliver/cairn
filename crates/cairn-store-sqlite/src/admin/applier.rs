@@ -44,9 +44,33 @@ impl SnapshotApplier for SqliteSnapshotApplier {
 
         let file = std::fs::File::open(artifact_path).map_err(|e| Box::new(e) as StoreError)?;
         let mut archive = tar::Archive::new(file);
-        archive
-            .unpack(&staging)
-            .map_err(|e| Box::new(e) as StoreError)?;
+        // Unpack member-by-member, rejecting anything that is not a regular file
+        // or directory. `tar::Archive::unpack` honors symlinks/hardlinks/devices,
+        // so a tampered artifact could otherwise materialize a symlink that
+        // redirects a restored path outside the vault — even if its
+        // path/size/content digest matched the integrity envelope
+        // (round-5 review #3).
+        for entry in archive.entries().map_err(|e| Box::new(e) as StoreError)? {
+            let mut entry = entry.map_err(|e| Box::new(e) as StoreError)?;
+            let etype = entry.header().entry_type();
+            if !(etype.is_file() || etype.is_dir()) {
+                let path = entry
+                    .path()
+                    .map_or_else(|_| "<unreadable>".to_owned(), |p| p.display().to_string());
+                return Err(Box::new(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!(
+                        "snapshot artifact contains a disallowed member `{path}` of \
+                         type {etype:?}; only regular files and directories may be \
+                         restored",
+                    ),
+                )) as StoreError);
+            }
+            // `unpack_in` creates parent dirs and rejects `..` path escapes.
+            entry
+                .unpack_in(&staging)
+                .map_err(|e| Box::new(e) as StoreError)?;
+        }
 
         Ok(staging)
     }
@@ -103,10 +127,31 @@ impl SnapshotApplier for SqliteSnapshotApplier {
             }
         }
 
-        // Clear any stale aside backups left by a previously-interrupted swap.
-        for (_, _, bak) in &plan {
+        // Recover from a previously-interrupted (crashed) swap. A pre-existing
+        // aside backup is NOT a stale temp file — it is the only copy of the
+        // operator's original data from a swap that crashed mid-flight.
+        // Blindly deleting it (the old behavior) turns one crash into data loss
+        // (round-5 review #4). Instead:
+        //   - live target MISSING + backup present → the crash happened between
+        //     moving the original aside and renaming the replacement in; restore
+        //     the original from the backup, then proceed.
+        //   - live target present + backup present → ambiguous; fail closed and
+        //     leave the backup untouched for manual inspection.
+        for (_, dst, bak) in &plan {
             if bak.exists() {
-                remove_path(bak).map_err(|e| Box::new(e) as StoreError)?;
+                if dst.exists() {
+                    return Err(Box::new(std::io::Error::new(
+                        std::io::ErrorKind::AlreadyExists,
+                        format!(
+                            "found both live target `{}` and aside backup `{}` from an \
+                             interrupted restore; refusing to proceed — verify which is \
+                             correct and remove the other before retrying",
+                            dst.display(),
+                            bak.display(),
+                        ),
+                    )) as StoreError);
+                }
+                std::fs::rename(bak, dst).map_err(|e| Box::new(e) as StoreError)?;
             }
         }
 
@@ -321,6 +366,120 @@ mod tests {
         assert!(
             !cairn_dir.join("cairn.db.restore-bak").exists(),
             "no aside backup may be left behind after rollback"
+        );
+    }
+
+    /// Round-5 review #3: `stage` must refuse a tar member that is not a regular
+    /// file or directory (e.g. a symlink), so a tampered artifact cannot
+    /// materialize a link that redirects a restored path outside the vault.
+    #[test]
+    fn stage_rejects_symlink_member() {
+        let dir = tempfile::tempdir().expect("tmpdir");
+        let vault_root = dir.path().join("vault");
+        std::fs::create_dir_all(vault_root.join(".cairn")).expect("cairn_dir");
+
+        // Build an artifact whose `cairn.db` is a regular file but which also
+        // contains a SYMLINK member.
+        let artifact = dir.path().join("evil.tar");
+        {
+            let file = std::fs::File::create(&artifact).expect("create artifact");
+            let mut builder = tar::Builder::new(file);
+
+            let db = b"db-bytes";
+            let mut h = tar::Header::new_gnu();
+            h.set_size(db.len() as u64);
+            h.set_mode(0o644);
+            h.set_entry_type(tar::EntryType::Regular);
+            h.set_cksum();
+            builder
+                .append_data(&mut h, "cairn.db", &db[..])
+                .expect("append db");
+
+            // A symlink member pointing outside the vault.
+            let mut link = tar::Header::new_gnu();
+            link.set_size(0);
+            link.set_entry_type(tar::EntryType::Symlink);
+            link.set_mode(0o777);
+            builder
+                .append_link(&mut link, "raw/evil", "/etc/passwd")
+                .expect("append symlink");
+            builder.finish().expect("finish tar");
+        }
+
+        let applier = SqliteSnapshotApplier::new(vault_root.clone());
+        let err = applier
+            .stage(&artifact, "evil-001")
+            .expect_err("stage must reject a symlink member");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("disallowed member") && msg.contains("raw/evil"),
+            "expected a disallowed-member error naming the symlink; got: {msg}"
+        );
+    }
+
+    /// Round-5 review #4: a pre-existing aside backup with BOTH the live target
+    /// and the backup present is an ambiguous crash state — `swap_in` must fail
+    /// closed and must NOT delete the backup (the only copy of the original).
+    #[test]
+    fn swap_in_fails_closed_when_backup_and_live_both_present() {
+        let dir = tempfile::tempdir().expect("tmpdir");
+        let vault_root = dir.path().join("vault");
+        let cairn_dir = vault_root.join(".cairn");
+        std::fs::create_dir_all(&cairn_dir).expect("cairn_dir");
+        std::fs::write(cairn_dir.join("cairn.db"), b"LIVE-DB").expect("live db");
+        // Orphaned backup from a crashed prior swap.
+        std::fs::write(cairn_dir.join("cairn.db.restore-bak"), b"ORIG-DB").expect("orphan bak");
+
+        let staging = cairn_dir.join("restore-z");
+        std::fs::create_dir_all(&staging).expect("staging");
+        std::fs::write(staging.join("cairn.db"), b"NEW-DB").expect("staged db");
+
+        let applier = SqliteSnapshotApplier::new(vault_root.clone());
+        let err = applier
+            .swap_in(&staging)
+            .expect_err("swap must fail closed when both live and backup exist");
+        assert!(
+            err.to_string().contains("interrupted restore"),
+            "expected an interrupted-restore error; got: {err}"
+        );
+        // The backup (only copy of the original) must be preserved.
+        assert_eq!(
+            std::fs::read(cairn_dir.join("cairn.db.restore-bak")).unwrap(),
+            b"ORIG-DB",
+            "swap_in must NOT delete the aside backup in the ambiguous crash state"
+        );
+    }
+
+    /// Round-5 review #4: a crash that moved the original aside but never landed
+    /// the replacement leaves the live target MISSING with the backup present.
+    /// `swap_in` must recover the original from the backup, then proceed —
+    /// never losing the original.
+    #[test]
+    fn swap_in_recovers_orphaned_backup_when_live_missing() {
+        let dir = tempfile::tempdir().expect("tmpdir");
+        let vault_root = dir.path().join("vault");
+        let cairn_dir = vault_root.join(".cairn");
+        std::fs::create_dir_all(&cairn_dir).expect("cairn_dir");
+        // Live target MISSING; only the aside backup survives the crash.
+        std::fs::write(cairn_dir.join("cairn.db.restore-bak"), b"ORIG-DB").expect("orphan bak");
+
+        let staging = cairn_dir.join("restore-w");
+        std::fs::create_dir_all(&staging).expect("staging");
+        std::fs::write(staging.join("cairn.db"), b"NEW-DB").expect("staged db");
+
+        let applier = SqliteSnapshotApplier::new(vault_root.clone());
+        applier
+            .swap_in(&staging)
+            .expect("swap must recover the orphaned backup and proceed");
+
+        // The new content is live and the backup was consumed (not orphaned).
+        assert_eq!(
+            std::fs::read(cairn_dir.join("cairn.db")).unwrap(),
+            b"NEW-DB"
+        );
+        assert!(
+            !cairn_dir.join("cairn.db.restore-bak").exists(),
+            "aside backup must be consumed after a successful swap"
         );
     }
 }

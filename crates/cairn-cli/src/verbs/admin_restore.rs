@@ -46,9 +46,9 @@ pub fn run(sub: &ArgMatches, _vault_root: &Path) -> ExitCode {
                 use cairn_store_sqlite::SqliteConsentLog;
                 let live_db = from.join(".cairn").join("cairn.db");
                 let restored_db = into.join(".cairn").join("cairn.db");
-                let consent = SqliteConsentLog::new(live_db, restored_db);
+                let consent = SqliteConsentLog::new(live_db);
                 consent
-                    .apply_post_restore_purge()
+                    .apply_post_restore_purge(&restored_db)
                     .map(|_| ())
                     .map_err(|e| anyhow::anyhow!("replay-current-forgets via ConsentLog: {e}"))
             });
