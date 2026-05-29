@@ -165,7 +165,11 @@ fn append_tree_sorted<W: std::io::Write>(
     prefix: &str,
     hasher: &mut Sha256,
 ) -> std::io::Result<()> {
-    let mut entries: Vec<_> = std::fs::read_dir(dir)?.filter_map(Result::ok).collect();
+    // Propagate per-entry read errors instead of silently dropping them
+    // (`filter_map(Result::ok)`) — a permission error or filesystem race must
+    // FAIL the snapshot, never produce an artifact that omits vault-tree files
+    // while still passing the integrity envelope (round-7 review #5).
+    let mut entries: Vec<_> = std::fs::read_dir(dir)?.collect::<std::io::Result<Vec<_>>>()?;
     // Sort by path for determinism across platforms.
     entries.sort_by_key(std::fs::DirEntry::path);
     for entry in entries {

@@ -576,16 +576,25 @@ impl CairnMcpHandler {
             evaluation_runtime_ready: self.evaluation_runtime_ready
                 && self.config.evaluation.enabled,
             federation_runtime_ready: self.federation_runtime_ready && self.federation.is_some(),
-            // admin_runtime_ready: true iff config.admin.enabled=true AND the
-            // EXACT bootstrap identity that `admin_tools::dispatch` uses
-            // (`hmn:local-vault:<vault_id>`) holds the Operator role. Probing
-            // that specific identity — not merely `has_any_operator()` — keeps
-            // advertisement in lockstep with dispatch: otherwise a vault that
-            // granted only a real identity (e.g. `hmn:alice`) would advertise
-            // the admin tools yet reject every call with NotAuthorized
-            // (round-4 review #2). When no vault root is bound the store cannot
-            // be probed — hold dark (fail-closed per brief §15).
-            admin_runtime_ready: self.config.admin.enabled
+            // admin_runtime_ready: true iff
+            //   (a) the transport is local stdio, AND
+            //   (b) config.admin.enabled=true, AND
+            //   (c) the EXACT bootstrap identity that `admin_tools::dispatch`
+            //       uses (`hmn:local-vault:<vault_id>`) holds the Operator role.
+            //
+            // (a) binds the admin surface to a local-only transport: MCP admin
+            // uses a vault-derived bootstrap actor, NOT per-request signed-chain
+            // auth (that is Phase 2, brief §7.4). On a future network transport
+            // any reachable client would share that principal, so admin MUST
+            // stay dark there until signed intent is verified per request
+            // (round-7 review #1). `McpTransport` is #[non_exhaustive]; this
+            // matches ONLY Stdio, so new transports fail closed by default.
+            //
+            // (c) probes that specific identity — not merely `has_any_operator`
+            // — so advertisement stays in lockstep with dispatch (round-4 #2).
+            // No vault root bound → cannot probe → dark (brief §15).
+            admin_runtime_ready: matches!(self.transport, McpTransport::Stdio)
+                && self.config.admin.enabled
                 && self
                     .vault_root
                     .as_ref()

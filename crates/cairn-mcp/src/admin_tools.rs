@@ -224,9 +224,27 @@ fn host_fingerprint() -> std::io::Result<String> {
 /// from [`host_fingerprint`] so tests can drive it with an explicit path
 /// instead of mutating process-global `XDG_CONFIG_HOME`/`HOME`.
 fn host_fingerprint_at(path: &std::path::Path) -> std::io::Result<String> {
+    // Generate a fresh secret ONLY on first use (NotFound). An empty, corrupt,
+    // or unreadable host-id must NOT be silently overwritten — that would
+    // change the machine identity and break cross-machine restore of older
+    // same-host snapshots. Fail closed so the operator repairs it explicitly
+    // (round-7 review #6).
     let secret = match std::fs::read_to_string(path) {
-        Ok(s) if !s.trim().is_empty() => s.trim().to_owned(),
-        _ => {
+        Ok(s) => {
+            let trimmed = s.trim();
+            if trimmed.is_empty() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!(
+                        "host-id at {} is empty; refusing to regenerate — remove it \
+                         explicitly to mint a new machine identity",
+                        path.display()
+                    ),
+                ));
+            }
+            trimmed.to_owned()
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             if let Some(parent) = path.parent() {
                 std::fs::create_dir_all(parent)?;
             }
@@ -234,6 +252,8 @@ fn host_fingerprint_at(path: &std::path::Path) -> std::io::Result<String> {
             write_host_id(path, &secret)?;
             secret
         }
+        // Permission denied, invalid UTF-8, etc. — do not regenerate; surface it.
+        Err(e) => return Err(e),
     };
     Ok(cairn_core::verbs::admin::manifest::sha256_hex(
         secret.as_bytes(),
