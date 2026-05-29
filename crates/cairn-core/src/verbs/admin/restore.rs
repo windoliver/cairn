@@ -92,6 +92,15 @@ pub fn run(
         });
     }
 
+    // Capture the live WAL frontier BEFORE purging. Forgets, ingests, and other
+    // mutations advance it, so we re-check it just before the swap and abort if
+    // it moved — i.e. a concurrent write landed during the restore. Without
+    // this, a forget committed between the purge and the swap would be written
+    // only to the old DB that swap_in then discards, resurrecting the record
+    // (round-6 review #2). This is optimistic (the residual window before the
+    // swap is tiny); a hard guarantee would need writers quiesced under a lock.
+    let frontier_before = meta.frontier_step().map_err(AdminError::Store)?;
+
     // Stage the artifact, then purge forget-tombstones from the STAGED database
     // BEFORE swapping it in. Purging pre-swap means a purge failure aborts the
     // restore with the ORIGINAL vault still live — records forgotten since the
@@ -105,6 +114,18 @@ pub fn run(
     let tombstones = consent
         .apply_post_restore_purge(&staged_db)
         .map_err(AdminError::Store)?;
+
+    // Re-check the live frontier immediately before swapping. If it advanced,
+    // a write (possibly a new forget) raced the restore — abort rather than
+    // risk dropping that write / resurrecting a forgotten record.
+    let frontier_recheck = meta.frontier_step().map_err(AdminError::Store)?;
+    if frontier_recheck != frontier_before {
+        return Err(AdminError::RestoreConflict {
+            before: frontier_before,
+            after: frontier_recheck,
+        });
+    }
+
     applier.swap_in(&staging).map_err(AdminError::Store)?;
     let frontier = meta.frontier_step().map_err(AdminError::Store)?;
 
@@ -307,6 +328,39 @@ mod tests {
 
         fn frontier_step(&self) -> Result<String, StoreError> {
             Ok(self.frontier.clone())
+        }
+
+        fn vault_id(&self) -> Result<String, StoreError> {
+            Ok(self.vault.clone())
+        }
+
+        fn migration_heads(&self) -> Result<BTreeMap<String, u32>, StoreError> {
+            Ok(self.heads.clone())
+        }
+    }
+
+    /// Metadata whose `frontier_step` returns a DIFFERENT value on each call —
+    /// simulating a concurrent write advancing the WAL frontier during restore.
+    struct RacingMeta {
+        vault: String,
+        heads: BTreeMap<String, u32>,
+        frontier_calls: std::sync::atomic::AtomicU32,
+    }
+
+    impl MetaT for RacingMeta {
+        fn record_count(&self) -> Result<u64, StoreError> {
+            Ok(0)
+        }
+
+        fn tombstone_count(&self) -> Result<u64, StoreError> {
+            Ok(0)
+        }
+
+        fn frontier_step(&self) -> Result<String, StoreError> {
+            let n = self
+                .frontier_calls
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(format!("step:{n}"))
         }
 
         fn vault_id(&self) -> Result<String, StoreError> {
@@ -947,6 +1001,55 @@ mod tests {
         assert!(
             !*applier.swapped.lock().expect("test mutex"),
             "swap_in must NOT run when the pre-swap purge fails"
+        );
+    }
+
+    /// Round-6 review #2: if the live WAL frontier advances between the
+    /// pre-purge capture and the pre-swap recheck (a concurrent write — e.g. a
+    /// new forget), restore aborts with `RestoreConflict` and performs NO swap.
+    #[test]
+    fn concurrent_write_during_restore_aborts_before_swap() {
+        let m = fixture_manifest("M", "V");
+        let env = good_envelope_for(&m);
+        let registry = matching_registry(&m);
+        let req = RestoreRequest {
+            artifact_path: PathBuf::from("/tmp/x"),
+            dry_run: false,
+            local_machine_id: "M".into(),
+        };
+        let admin = StubAdmin { is_op: true };
+        // frontier_step returns a different value on each call → the pre-swap
+        // recheck sees a moved frontier.
+        let meta = RacingMeta {
+            vault: "V".into(),
+            heads: m.schema_versions.clone(),
+            frontier_calls: std::sync::atomic::AtomicU32::new(0),
+        };
+        let reader = StubReader {
+            manifest: m,
+            envelope: env,
+        };
+        let applier = default_applier();
+        let consent = StubConsent { purged: 0 };
+
+        let err = run(
+            &op_ctx(),
+            &req,
+            &admin,
+            &meta,
+            &reader,
+            &applier,
+            &consent,
+            &registry,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, AdminError::RestoreConflict { .. }),
+            "expected RestoreConflict on a racing frontier, got {err:?}"
+        );
+        assert!(
+            !*applier.swapped.lock().expect("test mutex"),
+            "swap_in must NOT run when a concurrent write is detected"
         );
     }
 }

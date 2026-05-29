@@ -171,9 +171,24 @@ fn append_tree_sorted<W: std::io::Write>(
     for entry in entries {
         let path = entry.path();
         let rel = format!("{prefix}/{}", entry.file_name().to_string_lossy());
-        if path.is_dir() {
+        // `file_type()` does NOT follow symlinks. Skip symlinks (and any other
+        // non-regular node) WITHOUT descending or reading through them: a
+        // symlink under raw/wiki pointing outside the vault would otherwise be
+        // archived as regular snapshot content, leaking out-of-vault data
+        // (round-6 review #3). `is_dir()`/`read()` on `path` below are only
+        // reached for genuine directories/regular files.
+        let ftype = entry.file_type()?;
+        if ftype.is_symlink() {
+            tracing::warn!(
+                entry = %rel,
+                "skipping symlink during snapshot: symlinks are not archived to \
+                 avoid following links outside the vault tree",
+            );
+            continue;
+        }
+        if ftype.is_dir() {
             append_tree_sorted(tar, &path, &rel, hasher)?;
-        } else {
+        } else if ftype.is_file() {
             let bytes = std::fs::read(&path)?;
             hasher.update(rel.as_bytes());
             hasher.update((bytes.len() as u64).to_le_bytes());
@@ -184,6 +199,9 @@ fn append_tree_sorted<W: std::io::Write>(
             header.set_mode(0o644);
             header.set_cksum();
             tar.append_data(&mut header, &rel, &bytes[..])?;
+        } else {
+            // FIFO, socket, device, etc. — not snapshot content. Skip.
+            tracing::warn!(entry = %rel, "skipping non-regular filesystem node during snapshot");
         }
     }
     Ok(())
@@ -337,6 +355,69 @@ mod tests {
         assert_ne!(
             artifact.tree_sha256, artifact2.tree_sha256,
             "a same-length vault-file content edit must change tree_sha256"
+        );
+    }
+
+    /// Round-6 review #3: snapshot production must NOT follow symlinks in the
+    /// vault tree — a symlink under raw/ pointing outside the vault must be
+    /// skipped, never archived as regular content (no out-of-vault data leak).
+    #[cfg(unix)]
+    #[test]
+    fn snapshot_skips_symlinks_in_vault_tree() {
+        use std::io::Read as _;
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().expect("tmpdir");
+        let vault_root = dir.path().join("vault");
+        let db_dir = vault_root.join(".cairn");
+        std::fs::create_dir_all(&db_dir).expect("db_dir");
+        let db_path = db_dir.join("cairn.db");
+        {
+            let conn = crate::open::open_sync(&db_path).expect("create real cairn.db");
+            conn.close().expect("close db");
+        }
+
+        // A secret OUTSIDE the vault tree.
+        let secret = dir.path().join("secret.txt");
+        std::fs::write(&secret, b"TOP-SECRET-OUTSIDE-VAULT").expect("secret");
+
+        // raw/ holds a real file plus a symlink to the out-of-vault secret.
+        std::fs::create_dir_all(vault_root.join("raw")).expect("raw");
+        std::fs::write(vault_root.join("raw/real.md"), b"real content").expect("real");
+        symlink(&secret, vault_root.join("raw/leak.md")).expect("symlink");
+
+        let manifest_bytes = test_manifest("sym");
+        let producer = SqliteSnapshotProducer::new(vault_root.clone(), db_path.clone());
+        let out_dir = dir.path().join("snaps");
+        let artifact = producer
+            .materialize(&out_dir, "sym-001", &manifest_bytes, None)
+            .expect("materialize");
+
+        // The secret's content must NOT appear anywhere in the artifact.
+        let raw = std::fs::read(&artifact.path).expect("read artifact");
+        assert!(
+            !String::from_utf8_lossy(&raw).contains("TOP-SECRET-OUTSIDE-VAULT"),
+            "symlink target content must never be archived"
+        );
+
+        // The real file is archived; the symlink member is absent.
+        let file = std::fs::File::open(&artifact.path).expect("open artifact");
+        let mut archive = tar::Archive::new(file);
+        let mut names = Vec::new();
+        for entry in archive.entries().expect("entries") {
+            let mut entry = entry.expect("entry");
+            let name = entry.path().expect("path").to_string_lossy().into_owned();
+            let mut buf = Vec::new();
+            entry.read_to_end(&mut buf).expect("read");
+            names.push(name);
+        }
+        assert!(
+            names.iter().any(|n| n == "raw/real.md"),
+            "the real file must be archived; got {names:?}"
+        );
+        assert!(
+            !names.iter().any(|n| n == "raw/leak.md"),
+            "the symlink must be skipped, not archived; got {names:?}"
         );
     }
 }

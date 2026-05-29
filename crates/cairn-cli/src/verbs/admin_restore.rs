@@ -15,7 +15,7 @@ struct RestoreReceipt {
 
 /// Run `cairn admin restore`.
 #[must_use]
-pub fn run(sub: &ArgMatches, _vault_root: &Path) -> ExitCode {
+pub fn run(sub: &ArgMatches, vault_root: &Path) -> ExitCode {
     let from = PathBuf::from(
         sub.get_one::<String>("from")
             .expect("invariant: clap requires --from"),
@@ -35,20 +35,27 @@ pub fn run(sub: &ArgMatches, _vault_root: &Path) -> ExitCode {
     let restore_result =
         super::admin_snapshot::validate_non_overlapping_paths("backup", &from, "restore", &into)
             .and_then(|()| super::admin_snapshot::validate_backup_root(&from))
-            .and_then(|()| super::admin_snapshot::materialize_backup_artifact(&from, &into))
             .and_then(|()| {
-                // #161: forget-replay through the SqliteConsentLog adapter
-                // that replaced the inline helper. Tombstones recorded
-                // since the backup was taken are re-applied to the
-                // restored DB before reads resume — same semantics as the
-                // v0.1 `replay_current_forgets` inline path.
+                // #161: forget-replay. Tombstones recorded since the backup was
+                // taken are re-applied to the restored DB before reads resume.
+                //
+                // The forget set MUST come from the LIVE vault (vault_root) —
+                // NOT the backup, whose consent journal only reflects
+                // snapshot-time state and would miss anything forgotten since
+                // (round-6 review #1). Capture it BEFORE the copy, because when
+                // restoring in place (`into` == vault) the copy overwrites the
+                // live consent journal.
                 use cairn_core::contract::snapshot_artifact::ConsentLog as _;
                 use cairn_store_sqlite::SqliteConsentLog;
-                let live_db = from.join(".cairn").join("cairn.db");
+                let live_db = vault_root.join(".cairn").join("cairn.db");
                 let restored_db = into.join(".cairn").join("cairn.db");
                 let consent = SqliteConsentLog::new(live_db);
+                let forgets = consent
+                    .forgotten_record_target_hashes()
+                    .map_err(|e| anyhow::anyhow!("read live vault forget set: {e}"))?;
+                super::admin_snapshot::materialize_backup_artifact(&from, &into)?;
                 consent
-                    .apply_post_restore_purge(&restored_db)
+                    .purge_targets_matching(&restored_db, &forgets)
                     .map(|_| ())
                     .map_err(|e| anyhow::anyhow!("replay-current-forgets via ConsentLog: {e}"))
             });

@@ -44,6 +44,38 @@ impl SqliteConsentLog {
     pub fn new(live_db: PathBuf) -> Self {
         Self { live_db }
     }
+
+    /// Purge from `target_db` every record whose `sha256(target_id)` appears in
+    /// `forget_hashes`, returning the count removed.
+    ///
+    /// Lets a caller that has ALREADY captured the live forget set apply it to
+    /// the restored database — e.g. the CLI, which must read the live vault's
+    /// forgets BEFORE a filesystem copy overwrites that vault (round-6 review
+    /// #1). The trait [`ConsentLog::apply_post_restore_purge`] is the
+    /// read-live-then-purge convenience built on top of this.
+    ///
+    /// # Errors
+    /// Returns `StoreError` if `target_db` cannot be read or written.
+    pub fn purge_targets_matching(
+        &self,
+        target_db: &Path,
+        forget_hashes: &HashSet<String>,
+    ) -> Result<u64, StoreError> {
+        if forget_hashes.is_empty() {
+            return Ok(0);
+        }
+        let targets = collect_target_ids(target_db).map_err(|e| Box::new(e) as StoreError)?;
+        let to_purge: Vec<TargetId> = targets
+            .into_iter()
+            .filter(|t| forget_hashes.contains(&target_id_hash(t.as_str())))
+            .collect();
+        if to_purge.is_empty() {
+            return Ok(0);
+        }
+        let count = u64::try_from(to_purge.len()).unwrap_or(u64::MAX);
+        purge_targets(target_db, &to_purge).map_err(|e| Box::new(e) as StoreError)?;
+        Ok(count)
+    }
 }
 
 impl ConsentLog for SqliteConsentLog {
@@ -59,20 +91,7 @@ impl ConsentLog for SqliteConsentLog {
             .map_err(|e| Box::new(e) as StoreError)?
             .into_iter()
             .collect();
-        if forget_hashes.is_empty() {
-            return Ok(0);
-        }
-        let targets = collect_target_ids(target_db).map_err(|e| Box::new(e) as StoreError)?;
-        let to_purge: Vec<TargetId> = targets
-            .into_iter()
-            .filter(|t| forget_hashes.contains(&target_id_hash(t.as_str())))
-            .collect();
-        if to_purge.is_empty() {
-            return Ok(0);
-        }
-        let count = u64::try_from(to_purge.len()).unwrap_or(u64::MAX);
-        purge_targets(target_db, &to_purge).map_err(|e| Box::new(e) as StoreError)?;
-        Ok(count)
+        self.purge_targets_matching(target_db, &forget_hashes)
     }
 }
 
@@ -205,5 +224,60 @@ mod tests {
             "hash must be deterministic"
         );
         assert_ne!(target_id_hash("other"), h, "hash must be input-sensitive");
+    }
+
+    /// Round-6 review #1: `purge_targets_matching` removes exactly the records
+    /// whose target-id hash is in the supplied forget set (the mechanism the
+    /// CLI uses after capturing the LIVE vault's forgets) and leaves the rest.
+    #[test]
+    fn purge_targets_matching_removes_only_forgotten_targets() {
+        // Valid 26-char ULID target ids (collect_target_ids parses via TargetId).
+        const KEEP_TID: &str = "01HQZX9F5N0000000000000001";
+        const DROP_TID: &str = "01HQZX9F5N0000000000000002";
+
+        let dir = tempfile::tempdir().expect("tmpdir");
+        let db = dir.path().join("cairn.db");
+        {
+            let conn = crate::open::open_sync(&db).expect("open db");
+            seed_record(&conn, "01HQZX9F5N0000000000000011", KEEP_TID);
+            seed_record(&conn, "01HQZX9F5N0000000000000012", DROP_TID);
+            conn.close().expect("close");
+        }
+
+        let consent = SqliteConsentLog::new(db.clone());
+        // Forget only the DROP target.
+        let forgets: HashSet<String> = std::iter::once(target_id_hash(DROP_TID)).collect();
+        let purged = consent
+            .purge_targets_matching(&db, &forgets)
+            .expect("purge");
+        assert_eq!(purged, 1, "exactly the one forgotten target is purged");
+
+        let conn = crate::open::open_sync(&db).expect("reopen db");
+        let mut stmt = conn
+            .prepare("SELECT target_id FROM records ORDER BY target_id")
+            .expect("prepare");
+        let remaining: Vec<String> = stmt
+            .query_map([], |r| r.get::<_, String>(0))
+            .expect("query")
+            .map(|r| r.expect("row"))
+            .collect();
+        assert_eq!(
+            remaining,
+            vec![KEEP_TID.to_string()],
+            "only the kept target survives the purge"
+        );
+    }
+
+    fn seed_record(conn: &Connection, rid: &str, tid: &str) {
+        conn.execute(
+            "INSERT INTO records \
+               (record_id, target_id, version, path, kind, class, visibility, \
+                scope, actor_chain, body, body_hash, created_at, updated_at, \
+                active, tombstoned, is_static) \
+             VALUES (?1, ?2, 1, 'test/x', 'user', 'semantic', 'private', \
+                     '{\"user\":\"hmn:t\"}', '[]', 'body', 'h', 1, 1, 1, 0, 0)",
+            rusqlite::params![rid, tid],
+        )
+        .expect("insert record");
     }
 }

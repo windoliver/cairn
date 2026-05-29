@@ -196,22 +196,82 @@ fn local_vault_identity(
 }
 
 /// Derive the local **machine** fingerprint for the cross-machine restore
-/// guard — the host name, NOT the vault id.
+/// guard — a stable, host-local secret, NOT the vault id and NOT the hostname.
 ///
 /// A snapshot records this as its `source_machine_id`; restore refuses when it
-/// differs from the local value. Using the host name (not `.cairn/vault.id`,
-/// which travels with a copied vault) means a vault relocated to a different
-/// host cannot restore a snapshot made elsewhere — preserving the per-machine
-/// salt / integrity assumptions the guard protects (round-5 review #2). Fails
-/// closed when the host name cannot be read.
+/// differs from the local value, so a vault relocated to a different host
+/// cannot restore a snapshot made elsewhere — preserving the per-machine
+/// salt/integrity assumptions the guard protects. Fails closed when the
+/// fingerprint cannot be derived.
 fn local_machine_id(verb: ResponseVerb) -> Result<String, CallToolResult> {
-    let host = whoami::fallible::hostname()
-        .map_err(|e| aborted_internal_admin(verb, &format!("read machine hostname: {e}")))?;
-    let host = host.trim().to_owned();
-    if host.is_empty() {
-        return Err(aborted_internal_admin(verb, "machine hostname is empty"));
-    }
-    Ok(host)
+    host_fingerprint()
+        .map_err(|e| aborted_internal_admin(verb, &format!("derive host fingerprint: {e}")))
+}
+
+/// Stable, host-local machine fingerprint.
+///
+/// Reads (or generates on first use) a random secret at
+/// `$XDG_CONFIG_HOME/cairn/host-id` (else `$HOME/.config/cairn/host-id`) — kept
+/// OUTSIDE any vault so it does NOT travel with a copied vault — and returns
+/// its sha256 so the raw secret never lands in a manifest. Unlike a hostname
+/// this is stable across machine renames and unique per host even when
+/// hostnames collide across cloned VMs (round-6 review #4).
+fn host_fingerprint() -> std::io::Result<String> {
+    host_fingerprint_at(&host_id_path()?)
+}
+
+/// Read-or-generate the host secret at `path` and return its sha256. Split out
+/// from [`host_fingerprint`] so tests can drive it with an explicit path
+/// instead of mutating process-global `XDG_CONFIG_HOME`/`HOME`.
+fn host_fingerprint_at(path: &std::path::Path) -> std::io::Result<String> {
+    let secret = match std::fs::read_to_string(path) {
+        Ok(s) if !s.trim().is_empty() => s.trim().to_owned(),
+        _ => {
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            let secret = uuid::Uuid::new_v4().to_string();
+            write_host_id(path, &secret)?;
+            secret
+        }
+    };
+    Ok(cairn_core::verbs::admin::manifest::sha256_hex(
+        secret.as_bytes(),
+    ))
+}
+
+/// Path to the host-local secret: `$XDG_CONFIG_HOME/cairn/host-id`, else
+/// `$HOME/.config/cairn/host-id`.
+fn host_id_path() -> std::io::Result<std::path::PathBuf> {
+    let base = std::env::var_os("XDG_CONFIG_HOME")
+        .map(std::path::PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".config")))
+        .ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "neither XDG_CONFIG_HOME nor HOME is set; cannot locate host-id",
+            )
+        })?;
+    Ok(base.join("cairn").join("host-id"))
+}
+
+/// Write the host secret, restricting it to the owner (0600) on Unix.
+#[cfg(unix)]
+fn write_host_id(path: &std::path::Path, secret: &str) -> std::io::Result<()> {
+    use std::io::Write as _;
+    use std::os::unix::fs::OpenOptionsExt as _;
+    let mut f = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(path)?;
+    f.write_all(secret.as_bytes())
+}
+
+#[cfg(not(unix))]
+fn write_host_id(path: &std::path::Path, secret: &str) -> std::io::Result<()> {
+    std::fs::write(path, secret.as_bytes())
 }
 
 fn dispatch_snapshot(args_value: serde_json::Value, vault_root: &Path) -> CallToolResult {
@@ -678,5 +738,31 @@ mod tests {
             &[Capabilities::CairnMcpV1ExtensionAdmin],
         );
         assert!(result.is_error.unwrap_or(false));
+    }
+
+    /// Round-6 review #4: the host fingerprint is a STABLE sha256 of a persisted
+    /// secret (not the raw secret), and distinct host secrets hash differently.
+    #[test]
+    fn host_fingerprint_is_stable_and_hashed() {
+        let dir = tempfile::tempdir().expect("tmpdir");
+        let path = dir.path().join("cairn").join("host-id");
+
+        let fp1 = host_fingerprint_at(&path).expect("first fingerprint");
+        let fp2 = host_fingerprint_at(&path).expect("second fingerprint");
+        assert_eq!(fp1, fp2, "fingerprint must be stable across calls");
+        assert_eq!(fp1.len(), 64, "sha256 hex is 64 chars");
+        assert!(
+            fp1.chars().all(|c| c.is_ascii_hexdigit()),
+            "fingerprint must be lowercase hex"
+        );
+
+        // The persisted secret is NOT the fingerprint (it is hashed).
+        let raw_secret = std::fs::read_to_string(&path).expect("read host-id");
+        assert_ne!(fp1, raw_secret.trim(), "the raw secret must be hashed");
+
+        // A different host secret yields a different fingerprint.
+        let dir2 = tempfile::tempdir().expect("tmpdir2");
+        let fp3 = host_fingerprint_at(&dir2.path().join("host-id")).expect("third fingerprint");
+        assert_ne!(fp1, fp3, "distinct host secrets must hash differently");
     }
 }

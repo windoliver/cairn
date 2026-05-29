@@ -91,6 +91,21 @@ pub enum AdminError {
         step: String,
     },
 
+    /// The live vault changed (a write advanced the WAL frontier) between the
+    /// restore's forget-purge and the swap, so the purge may not reflect the
+    /// latest forgets. Restore aborts before swapping rather than risk
+    /// resurrecting a concurrently-forgotten record (round-6 review #2).
+    #[error(
+        "live vault changed during restore (frontier {before} -> {after}); \
+         aborted before swap — retry with writers quiesced"
+    )]
+    RestoreConflict {
+        /// WAL frontier captured before the purge.
+        before: String,
+        /// WAL frontier observed just before the swap.
+        after: String,
+    },
+
     /// Underlying store error (propagated from a `MemoryStore` call).
     ///
     /// `StoreError` is `Box<dyn Error + Send + Sync + 'static>` at the
@@ -118,6 +133,7 @@ impl AdminError {
             Self::UnknownConnector { .. } => "UnknownConnector",
             Self::UnknownStepMarker { .. } => "UnknownStepMarker",
             Self::ReplayEscalated { .. } => "ReplayEscalated",
+            Self::RestoreConflict { .. } => "RestoreConflict",
             Self::Store(_) => "StoreError",
             Self::Wal(_) => "WalError",
         }
@@ -135,7 +151,9 @@ impl AdminError {
             | Self::SchemaTooNew { .. }
             | Self::UnknownStepMarker { .. }
             | Self::UnknownConnector { .. } => 70,
-            Self::ReplayEscalated { .. } => 75,
+            // 75 == EX_TEMPFAIL: replay escalation and a raced restore are both
+            // transient — the operator may retry.
+            Self::ReplayEscalated { .. } | Self::RestoreConflict { .. } => 75,
             Self::Store(_) | Self::Wal(_) => 1,
         }
     }
