@@ -41,7 +41,13 @@
       "verbs/forget.json",
       "verbs/propose_share.json",
       "verbs/accept_share.json",
-      "verbs/revoke_share.json"
+      "verbs/revoke_share.json",
+      "verbs/admin_snapshot.json",
+      "verbs/admin_restore.json",
+      "verbs/admin_replay_wal.json",
+      "verbs/admin_connector_enable.json",
+      "verbs/admin_connector_disable.json",
+      "verbs/admin_connector_backfill.json"
     ],
     "plugin": [
       "plugin/manifest.json"
@@ -58,6 +64,12 @@
     "forget",
     "propose_share",
     "accept_share",
-    "revoke_share"
+    "revoke_share",
+    "admin_snapshot",
+    "admin_restore",
+    "admin_replay_wal",
+    "admin_connector_enable",
+    "admin_connector_disable",
+    "admin_connector_backfill"
   ]
 }

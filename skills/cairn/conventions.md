@@ -14,6 +14,12 @@ Verb ids in the contract:
 - `propose_share`
 - `accept_share`
 - `revoke_share`
+- `admin_snapshot`
+- `admin_restore`
+- `admin_replay_wal`
+- `admin_connector_enable`
+- `admin_connector_disable`
+- `admin_connector_backfill`
 
 ## Kind cheat-sheet (pick one — never invent new kinds)
 

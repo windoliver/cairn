@@ -45,6 +45,13 @@ pub(crate) async fn apply_forget_record(
 ) -> Result<ForgetOutcome, StoreError> {
     let started = Instant::now();
     let conn = Arc::clone(store.require_conn("forget_record")?);
+    // Hold the vault write gate SHARED for the whole forget. A restore holds
+    // the gate EXCLUSIVE across its purge→swap, so this blocks until any
+    // in-flight restore finishes — and conversely makes a restore wait for an
+    // in-flight forget — guaranteeing a forget can never commit into the DB
+    // that a restore is about to discard, which would resurrect the record
+    // (round-7 review #2). Released when `_write_gate` drops at function end.
+    let _write_gate = store.acquire_write_gate_shared().await?;
     let incarnation = store.incarnation().cloned().ok_or(StoreError::Invariant {
         what: "forget_record requires daemon incarnation".to_owned(),
     })?;

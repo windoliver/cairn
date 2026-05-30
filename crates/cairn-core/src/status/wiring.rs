@@ -180,3 +180,69 @@ pub const fn federation_extension_ready() -> bool {
         && FEDERATION_WORKFLOW_WIRED
         && FEDERATION_MCP_TOOLS_WIRED
 }
+
+/// `cairn.admin.v1` extension capability registration (issue #161).
+///
+/// Live as of issue #161 Gap 8. Capability advertisement still gates on
+/// runtime preconditions (`admin.enabled` config + at-least-one-operator)
+/// through [`admin_extension_ready`].
+pub const ADMIN_EXTENSION_WIRED: bool = true;
+
+/// `true` — `cairn admin {grant, replay-wal, connector {enable,disable,
+/// backfill}}` route through `cairn-core::verbs::admin::*` (issue #161
+/// Gap 2). Note: `cairn admin snapshot` and `cairn admin restore` still
+/// take the v0.1 directory-tree dispatch path for backward compatibility;
+/// the v0.2 IDL verbs `admin_snapshot` / `admin_restore` ship via MCP and
+/// SDK only.
+pub const ADMIN_CLI_DISPATCH_WIRED: bool = true;
+
+/// `true` — `cairn-mcp` registers tool decls + handler dispatch for all
+/// six admin verbs (issue #161 Gap 5). `tools/list` advertises them
+/// when the negotiated capability set includes
+/// `cairn.mcp.v1.extension.admin`.
+pub const ADMIN_MCP_DISPATCH_WIRED: bool = true;
+
+/// Truth-table gate for advertising the `cairn.admin.v1` extension.
+///
+/// All preconditions must hold: build-time wiring, both per-surface
+/// dispatch constants, runtime config opt-in, and at least one operator
+/// identity present in `admin_roles`. If ANY is false, the capability is
+/// not advertised — brief §15 "fail closed" / CLAUDE.md §4 invariant 6.
+///
+/// Not a `const fn` because it depends on runtime state (config + DB).
+#[must_use]
+pub fn admin_extension_ready(config_enabled: bool, has_operator: bool) -> bool {
+    ADMIN_EXTENSION_WIRED
+        && ADMIN_CLI_DISPATCH_WIRED
+        && ADMIN_MCP_DISPATCH_WIRED
+        && config_enabled
+        && has_operator
+}
+
+#[cfg(test)]
+mod admin_extension_ready_tests {
+    use super::*;
+
+    #[test]
+    fn truth_table() {
+        // The helper is true iff ALL of {WIRED, CLI_DISPATCH_WIRED,
+        // MCP_DISPATCH_WIRED, config_enabled, has_operator} hold. With any
+        // of the build-time constants `false`, the last row collapses to
+        // `false` — exactly what we want during phased rollout.
+        let all_wired =
+            ADMIN_EXTENSION_WIRED && ADMIN_CLI_DISPATCH_WIRED && ADMIN_MCP_DISPATCH_WIRED;
+        let cases = [
+            (false, false, false),
+            (false, true, false),
+            (true, false, false),
+            (true, true, all_wired),
+        ];
+        for (config, has_op, expected) in cases {
+            assert_eq!(
+                admin_extension_ready(config, has_op),
+                expected,
+                "config={config} has_op={has_op}"
+            );
+        }
+    }
+}

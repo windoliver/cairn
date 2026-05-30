@@ -77,6 +77,7 @@ fn gates_full() -> CapabilityGates {
         expiration_runtime_ready: true,
         evaluation_runtime_ready: true,
         federation_runtime_ready: false,
+        admin_runtime_ready: false,
     }
 }
 

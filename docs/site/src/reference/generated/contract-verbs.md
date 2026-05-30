@@ -17,3 +17,9 @@ Generated from `cairn.mcp.v1` IDL schema files.
 | `propose_share` | `signed_chain` | `cairn.mcp.v1.extension.federation` | `propose-share` | `$defs.Args` | `$defs.Data` |
 | `accept_share` | `signed_chain` | `cairn.mcp.v1.extension.federation` | `accept-share` | `$defs.Args` | `$defs.Data` |
 | `revoke_share` | `signed_chain` | `cairn.mcp.v1.extension.federation` | `revoke-share` | `$defs.Args` | `$defs.Data` |
+| `admin_snapshot` | `signed_chain` | `cairn.mcp.v1.extension.admin` | `snapshot-v2` | `$defs.Args` | `$defs.Data` |
+| `admin_restore` | `signed_chain` | `cairn.mcp.v1.extension.admin` | `restore-v2` | `$defs.Args` | `$defs.Data` |
+| `admin_replay_wal` | `signed_chain` | `cairn.mcp.v1.extension.admin` | `replay-wal` | `$defs.Args` | `$defs.Data` |
+| `admin_connector_enable` | `signed_chain` | `cairn.mcp.v1.extension.admin` | `connector-enable` | `$defs.Args` | `$defs.Data` |
+| `admin_connector_disable` | `signed_chain` | `cairn.mcp.v1.extension.admin` | `connector-disable` | `$defs.Args` | `$defs.Data` |
+| `admin_connector_backfill` | `signed_chain` | `cairn.mcp.v1.extension.admin` | `connector-backfill` | `$defs.Args` | `$defs.Data` |

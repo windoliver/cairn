@@ -455,6 +455,12 @@ fn compute_capabilities(
             expiration_runtime_ready,
             evaluation_runtime_ready,
             federation_runtime_ready: false,
+            // admin_runtime_ready: true iff config.admin.enabled AND the
+            // bound vault has at least one operator row. Both gates must
+            // pass — the operator opts in via config first, then runs
+            // `cairn admin grant` to create the operator row.
+            admin_runtime_ready: config.admin.enabled
+                && vault_root.is_some_and(probe_has_any_operator),
             contract_phase: CLI_CONTRACT_PHASE,
         })
     } else {
@@ -562,6 +568,22 @@ fn probe_mcp_graph_tools(
     (Some((avail, wire)), probe_basis)
 }
 
+/// Probe the bound vault for at least one operator-role identity in
+/// `admin_roles`. Cheap (sync open + single SELECT). Returns `false`
+/// on any IO/store error so admin advertisement stays fail-closed —
+/// brief §15.
+fn probe_has_any_operator(vault_root: &Path) -> bool {
+    use cairn_core::contract::admin_state::AdminStateStore as _;
+    let db_path = vault_root.join(".cairn").join("cairn.db");
+    if !db_path.exists() {
+        return false;
+    }
+    let Ok(admin) = cairn_store_sqlite::SqliteAdminStateStore::open(&db_path) else {
+        return false;
+    };
+    admin.has_any_operator().unwrap_or(false)
+}
+
 /// Project a [`CairnConfig`] + model-on-disk state into the wire-format
 /// capability list, *without* the vault-presence gate. Used by the
 /// `--explain` capability gate at parse time, before any vault is resolved.
@@ -590,6 +612,10 @@ fn capabilities_for_config(config: &CairnConfig, model_present: bool) -> Vec<Cap
         expiration_runtime_ready,
         evaluation_runtime_ready,
         federation_runtime_ready: false,
+        // capabilities_for_config has no vault_root so cannot probe
+        // has_any_operator(); use config opt-in alone as a conservative
+        // approximation (the main status path adds the operator check).
+        admin_runtime_ready: config.admin.enabled,
         contract_phase: CLI_CONTRACT_PHASE,
     })
 }

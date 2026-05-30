@@ -151,3 +151,62 @@ pub fn revoke_share_subcommand() -> clap::Command {
         .about("cairn.mcp.v1 verb: revoke-share")
         .arg(clap::Arg::new("link_id").long("link-id").value_name("STRING").required(true))
 }
+
+/// `cairn admin_snapshot` subcommand builder.
+#[must_use]
+pub fn admin_snapshot_subcommand() -> clap::Command {
+    clap::Command::new("snapshot-v2")
+        .about("cairn.mcp.v1 verb: snapshot-v2")
+        .arg(clap::Arg::new("out_dir").long("out-dir").value_name("STRING").required(true))
+        .arg(clap::Arg::new("label").long("label").value_name("STRING"))
+        .arg(clap::Arg::new("local_machine_id").long("local-machine-id").value_name("STRING").required(true))
+        .arg(clap::Arg::new("backup_kind").long("backup-kind").value_name("STRING").required(true))
+}
+
+/// `cairn admin_restore` subcommand builder.
+#[must_use]
+pub fn admin_restore_subcommand() -> clap::Command {
+    clap::Command::new("restore-v2")
+        .about("cairn.mcp.v1 verb: restore-v2")
+        .arg(clap::Arg::new("artifact_path").long("artifact-path").value_name("STRING").required(true))
+        .arg(clap::Arg::new("dry_run").long("dry-run").action(clap::ArgAction::SetTrue).required(true))
+        .arg(clap::Arg::new("local_machine_id").long("local-machine-id").value_name("STRING").required(true))
+}
+
+/// `cairn admin_replay_wal` subcommand builder.
+#[must_use]
+pub fn admin_replay_wal_subcommand() -> clap::Command {
+    clap::Command::new("replay-wal")
+        .about("cairn.mcp.v1 verb: replay-wal")
+        .arg(clap::Arg::new("kind").long("kind").value_name("ENUM").value_parser(["upsert", "forget_record", "expire", "evolve"]).required(true))
+        .arg(clap::Arg::new("from_ord").long("from-ord").value_name("VALUE").required(true))
+        .arg(clap::Arg::new("apply").long("apply").action(clap::ArgAction::SetTrue).required(true))
+}
+
+/// `cairn admin_connector_enable` subcommand builder.
+#[must_use]
+pub fn admin_connector_enable_subcommand() -> clap::Command {
+    clap::Command::new("connector-enable")
+        .about("cairn.mcp.v1 verb: connector-enable")
+        .arg(clap::Arg::new("name").long("name").value_name("STRING").required(true))
+}
+
+/// `cairn admin_connector_disable` subcommand builder.
+#[must_use]
+pub fn admin_connector_disable_subcommand() -> clap::Command {
+    clap::Command::new("connector-disable")
+        .about("cairn.mcp.v1 verb: connector-disable")
+        .arg(clap::Arg::new("name").long("name").value_name("STRING").required(true))
+        .arg(clap::Arg::new("reason").long("reason").value_name("STRING"))
+}
+
+/// `cairn admin_connector_backfill` subcommand builder.
+#[must_use]
+pub fn admin_connector_backfill_subcommand() -> clap::Command {
+    clap::Command::new("connector-backfill")
+        .about("cairn.mcp.v1 verb: connector-backfill")
+        .arg(clap::Arg::new("name").long("name").value_name("STRING").required(true))
+        .arg(clap::Arg::new("from").long("from").value_name("STRING").required(true))
+        .arg(clap::Arg::new("to").long("to").value_name("STRING").required(true))
+        .arg(clap::Arg::new("rate_per_sec").long("rate-per-sec").value_name("VALUE").required(true))
+}

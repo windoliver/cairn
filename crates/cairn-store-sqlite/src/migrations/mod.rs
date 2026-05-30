@@ -141,6 +141,10 @@ const M0068_FEDERATION_CONSENT_KINDS: &str = include_str!("sql/0068_federation_c
 // Issue #123 — composite lookup indexes for the four ConsentLookup queries added in T12.
 const M0069_FEDERATION_CONSENT_INDEXES: &str =
     include_str!("sql/0069_federation_consent_indexes.sql");
+// Issue #161 — cairn.admin.v1 operator-role storage.
+const M0070_ADMIN_ROLES: &str = include_str!("sql/0070_admin_roles.sql");
+// Issue #161 — cairn.admin.v1 connector enable/disable state.
+const M0071_CONNECTOR_STATE: &str = include_str!("sql/0071_connector_state.sql");
 
 /// Canonical SQL for migration 0020 (`workflow_jobs`). Re-exported so
 /// downstream crates (notably `cairn-workflows`, which hashes the
@@ -351,6 +355,8 @@ pub(crate) const MIGRATION_SOURCES: &[(i64, &str, &str)] = &[
         "0069_federation_consent_indexes",
         M0069_FEDERATION_CONSENT_INDEXES,
     ),
+    (70, "0070_admin_roles", M0070_ADMIN_ROLES),
+    (71, "0071_connector_state", M0071_CONNECTOR_STATE),
 ];
 
 /// All migrations, in order. Returns a fresh `Migrations` set on every call
@@ -421,5 +427,7 @@ pub fn migrations() -> Migrations<'static> {
         M::up(M0067_PROJECTION_LEDGER),
         M::up(M0068_FEDERATION_CONSENT_KINDS),
         M::up(M0069_FEDERATION_CONSENT_INDEXES),
+        M::up(M0070_ADMIN_ROLES),
+        M::up(M0071_CONNECTOR_STATE),
     ])
 }

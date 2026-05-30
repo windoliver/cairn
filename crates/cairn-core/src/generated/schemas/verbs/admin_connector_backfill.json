@@ -1,0 +1,103 @@
+{
+  "$defs": {
+    "Args": {
+      "additionalProperties": false,
+      "properties": {
+        "from": {
+          "format": "date-time",
+          "minLength": 20,
+          "type": "string"
+        },
+        "name": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "rate_per_sec": {
+          "minimum": 0.001,
+          "type": "number"
+        },
+        "to": {
+          "format": "date-time",
+          "minLength": 20,
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "from",
+        "to",
+        "rate_per_sec"
+      ],
+      "type": "object"
+    },
+    "Data": {
+      "additionalProperties": false,
+      "properties": {
+        "started_at": {
+          "format": "date-time",
+          "minLength": 20,
+          "type": "string"
+        },
+        "workflow_id": {
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "workflow_id",
+        "started_at"
+      ],
+      "type": "object"
+    }
+  },
+  "$id": "https://cairn.dev/schema/cairn.mcp.v1/verbs/admin_connector_backfill.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Cairn verb: admin_connector_backfill",
+  "type": "object",
+  "x-cairn-auth": "signed_chain",
+  "x-cairn-capability": "cairn.mcp.v1.extension.admin",
+  "x-cairn-cli": {
+    "command": "connector-backfill",
+    "flags": [
+      {
+        "cli_exemplar": "github",
+        "long": "name",
+        "name": "name",
+        "value_source": "string"
+      },
+      {
+        "cli_exemplar": "2026-01-01T00:00:00Z",
+        "long": "from",
+        "name": "from",
+        "value_source": "string"
+      },
+      {
+        "cli_exemplar": "2026-05-01T00:00:00Z",
+        "long": "to",
+        "name": "to",
+        "value_source": "string"
+      },
+      {
+        "cli_exemplar": "10.0",
+        "long": "rate-per-sec",
+        "name": "rate_per_sec",
+        "value_source": "number"
+      }
+    ]
+  },
+  "x-cairn-contract": "cairn.mcp.v1",
+  "x-cairn-extension": "cairn.admin.v1",
+  "x-cairn-skill-triggers": {
+    "exclusivity_hints": "this is the sole connector-backfill surface for the cairn.admin.v1 extension",
+    "negative_triggers": [
+      "do NOT use to enable or disable a connector — use admin_connector_enable or admin_connector_disable",
+      "do NOT use for ongoing incremental polling — that is the connector's normal polling loop"
+    ],
+    "positive_triggers": [
+      "use when the operator wants to backfill historical data for a connector over a specific time window",
+      "use when the user says 'backfill the github connector', 'import historical data', or 'run a connector backfill'",
+      "use to recover data after a connector was disabled for a period"
+    ]
+  },
+  "x-cairn-verb-id": "admin_connector_backfill"
+}

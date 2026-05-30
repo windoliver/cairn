@@ -33,6 +33,12 @@ pub fn core_verb_for_tool(name: &str) -> Option<RequestVerb> {
         "propose_share" => Some(RequestVerb::ProposeShare),
         "accept_share" => Some(RequestVerb::AcceptShare),
         "revoke_share" => Some(RequestVerb::RevokeShare),
+        "admin_snapshot" => Some(RequestVerb::AdminSnapshot),
+        "admin_restore" => Some(RequestVerb::AdminRestore),
+        "admin_replay_wal" => Some(RequestVerb::AdminReplayWal),
+        "admin_connector_enable" => Some(RequestVerb::AdminConnectorEnable),
+        "admin_connector_disable" => Some(RequestVerb::AdminConnectorDisable),
+        "admin_connector_backfill" => Some(RequestVerb::AdminConnectorBackfill),
         _ => None,
     }
 }
@@ -52,6 +58,12 @@ pub fn response_verb(verb: RequestVerb) -> ResponseVerb {
         RequestVerb::ProposeShare => ResponseVerb::ProposeShare,
         RequestVerb::AcceptShare => ResponseVerb::AcceptShare,
         RequestVerb::RevokeShare => ResponseVerb::RevokeShare,
+        RequestVerb::AdminSnapshot => ResponseVerb::AdminSnapshot,
+        RequestVerb::AdminRestore => ResponseVerb::AdminRestore,
+        RequestVerb::AdminReplayWal => ResponseVerb::AdminReplayWal,
+        RequestVerb::AdminConnectorEnable => ResponseVerb::AdminConnectorEnable,
+        RequestVerb::AdminConnectorDisable => ResponseVerb::AdminConnectorDisable,
+        RequestVerb::AdminConnectorBackfill => ResponseVerb::AdminConnectorBackfill,
         _ => ResponseVerb::Unknown,
     }
 }
@@ -317,6 +329,24 @@ fn response_data_matches_verb(verb: ResponseVerb, data: &ResponseData) -> bool {
             | (ResponseVerb::CaptureTrace, ResponseData::CaptureTrace(_))
             | (ResponseVerb::Lint, ResponseData::Lint(_))
             | (ResponseVerb::Forget, ResponseData::Forget(_))
+            | (ResponseVerb::AdminSnapshot, ResponseData::AdminSnapshot(_))
+            | (ResponseVerb::AdminRestore, ResponseData::AdminRestore(_))
+            | (
+                ResponseVerb::AdminReplayWal,
+                ResponseData::AdminReplayWal(_)
+            )
+            | (
+                ResponseVerb::AdminConnectorEnable,
+                ResponseData::AdminConnectorEnable(_)
+            )
+            | (
+                ResponseVerb::AdminConnectorDisable,
+                ResponseData::AdminConnectorDisable(_)
+            )
+            | (
+                ResponseVerb::AdminConnectorBackfill,
+                ResponseData::AdminConnectorBackfill(_)
+            )
     )
 }
 

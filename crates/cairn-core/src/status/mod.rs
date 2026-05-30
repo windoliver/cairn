@@ -167,6 +167,13 @@ pub struct CapabilityGates {
     /// independently because federation requires signing keys + transport
     /// that are deployment-specific. Issue #123, brief §12.a.
     pub federation_runtime_ready: bool,
+    /// True when (a) `admin.enabled = true` in the active config AND
+    /// (b) at least one operator identity is present in `admin_roles`
+    /// (per `AdminStateStore::has_any_operator()`). Without both, the
+    /// `cairn.admin.v1` capability is not advertised even if
+    /// `ADMIN_EXTENSION_WIRED = true`. Defaults to `false` for back-compat
+    /// with callers that don't yet populate the field.
+    pub admin_runtime_ready: bool,
 }
 
 impl CapabilityGates {
@@ -262,6 +269,9 @@ pub fn advertise(gates: &CapabilityGates) -> Vec<Capabilities> {
     }
 
     // -- extensions -------------------------------------------------------
+    if wiring::ADMIN_EXTENSION_WIRED && gates.admin_runtime_ready {
+        out.push(Capabilities::CairnMcpV1ExtensionAdmin);
+    }
     if phase >= Phase::V0_3 && wiring::coord_extension_ready() {
         out.push(Capabilities::CairnMcpV1ExtensionCoord);
     }

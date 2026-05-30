@@ -2,19 +2,21 @@
 
 # cairn admin snapshot
 
-Prepare a vault backup snapshot
+Produce a vault snapshot tarball (cairn.admin.v1)
 
 ## Help
 
 ```text
-Prepare a vault backup snapshot
+Produce a vault snapshot tarball (cairn.admin.v1)
 
 Usage: cairn admin snapshot [OPTIONS] --backup <PATH>
 
 Options:
-      --backup <PATH>         Destination path for the prepared backup
+      --backup <PATH>         Output directory for the .cairn-snap.tar artifact
       --vault <NAME_OR_PATH>  Active vault: name from registry or filesystem path (overrides
                               CAIRN_VAULT)
+      --label <STRING>        Optional human-readable label embedded in the snapshot manifest
+      --actor <IDENTITY>      Operator identity wire form (e.g. hmn:alice)
       --json                  Emit JSON output
   -h, --help                  Print help
 ```

@@ -327,9 +327,33 @@ pub struct ConnectorRegistry {
     /// Registered connector entries, keyed by connector name.
     #[builder(skip)]
     entries: HashMap<String, Entry>,
+    /// Optional admin-state store consulted by the poll loop to honor the
+    /// `connector_state.enabled` flag set via the `cairn.admin.v1` connector
+    /// enable/disable verbs (issue #161).
+    ///
+    /// `None` (default) → every registered connector ticks unconditionally,
+    /// preserving pre-#161 behavior for callers that have not wired admin state.
+    #[builder(skip)]
+    admin_state: Option<std::sync::Arc<dyn cairn_core::contract::admin_state::AdminStateStore>>,
 }
 
 impl ConnectorRegistry {
+    /// Install an admin-state store so the poll loop honors the
+    /// `connector_state.enabled` flag set via the `cairn.admin.v1`
+    /// connector enable/disable verbs (issue #161).
+    ///
+    /// When `None` (default), every registered connector ticks
+    /// unconditionally — preserves pre-#161 behavior for callers that
+    /// haven't wired admin state yet.
+    #[must_use]
+    pub fn with_admin_state(
+        mut self,
+        admin: std::sync::Arc<dyn cairn_core::contract::admin_state::AdminStateStore>,
+    ) -> Self {
+        self.admin_state = Some(admin);
+        self
+    }
+
     /// Register a connector plugin.
     ///
     /// The connector starts in the `ConnectorState::Disabled`
@@ -513,6 +537,9 @@ impl ConnectorRegistry {
             let interval = Duration::from_mins(5);
             // Clone the token for the task; store the original for cancel.
             let task_token = entry_token.clone();
+            // Clone the admin-state handle into the task so the poll gate can
+            // consult connector_state.enabled on each tick (issue #161).
+            let admin_state_for_task = self.admin_state.clone();
 
             // # At-least-once delivery guarantee (Finding E)
             //
@@ -533,6 +560,31 @@ impl ConnectorRegistry {
                         // Cancellation arm: per-entry token or registry shutdown.
                         () = task_token.cancelled() => break,
                         () = tokio::time::sleep(interval) => {
+                            // #161: honor connector_state.enabled. When admin_state is Some,
+                            // consult the store; when None with the admin extension wired,
+                            // fail closed (no poll) so enable/disable commands are always
+                            // observable. When None without the extension, preserve
+                            // pre-#161 unconditional-tick behavior.
+                            if let Some(admin) = admin_state_for_task.as_ref() {
+                                let row = admin.get_connector_state(&name_owned).ok().flatten();
+                                let enabled = row.is_none_or(|r| r.enabled);
+                                if !enabled {
+                                    tracing::debug!(
+                                        connector = %name_owned,
+                                        "poll tick skipped: connector disabled via cairn.admin.v1",
+                                    );
+                                    continue;
+                                }
+                            } else if cairn_core::status::wiring::ADMIN_EXTENSION_WIRED {
+                                // Admin extension live but state store not wired — fail closed.
+                                tracing::warn!(
+                                    connector = %name_owned,
+                                    "poll tick skipped: cairn.admin.v1 wired but ConnectorRegistry \
+                                     has no admin_state; call with_admin_state() at construction",
+                                );
+                                continue;
+                            }
+
                             // Read the current cursor before calling poll so
                             // the upstream window starts from where we left off.
                             let last_cursor = cursor_ref.lock().await.clone();
@@ -849,6 +901,19 @@ impl ConnectorRegistry {
             .entries
             .get(name)
             .ok_or_else(|| ConnectorError::fatal_msg(format!("unknown connector {name}")))?;
+
+        // #161 Task 4.4: honor connector_state.enabled. None (no row) defaults to enabled.
+        if let Some(admin) = self.admin_state.as_ref() {
+            let enabled = admin
+                .get_connector_state(name)
+                .ok()
+                .flatten()
+                .is_none_or(|r| r.enabled);
+            if !enabled {
+                tracing::debug!(connector = %name, "poll_now skipped: disabled via cairn.admin.v1");
+                return Ok(());
+            }
+        }
 
         let last_cursor = entry.cursor.lock().await.clone();
 

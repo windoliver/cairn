@@ -629,6 +629,120 @@
     {
       "if": {
         "properties": {
+          "verb": {
+            "const": "admin_snapshot"
+          }
+        },
+        "required": [
+          "verb"
+        ]
+      },
+      "then": {
+        "properties": {
+          "data": {
+            "$ref": "../verbs/admin_snapshot.json#/$defs/Data"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "verb": {
+            "const": "admin_restore"
+          }
+        },
+        "required": [
+          "verb"
+        ]
+      },
+      "then": {
+        "properties": {
+          "data": {
+            "$ref": "../verbs/admin_restore.json#/$defs/Data"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "verb": {
+            "const": "admin_replay_wal"
+          }
+        },
+        "required": [
+          "verb"
+        ]
+      },
+      "then": {
+        "properties": {
+          "data": {
+            "$ref": "../verbs/admin_replay_wal.json#/$defs/Data"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "verb": {
+            "const": "admin_connector_enable"
+          }
+        },
+        "required": [
+          "verb"
+        ]
+      },
+      "then": {
+        "properties": {
+          "data": {
+            "$ref": "../verbs/admin_connector_enable.json#/$defs/Data"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "verb": {
+            "const": "admin_connector_disable"
+          }
+        },
+        "required": [
+          "verb"
+        ]
+      },
+      "then": {
+        "properties": {
+          "data": {
+            "$ref": "../verbs/admin_connector_disable.json#/$defs/Data"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "verb": {
+            "const": "admin_connector_backfill"
+          }
+        },
+        "required": [
+          "verb"
+        ]
+      },
+      "then": {
+        "properties": {
+          "data": {
+            "$ref": "../verbs/admin_connector_backfill.json#/$defs/Data"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
           "status": {
             "const": "committed"
           }
@@ -820,6 +934,12 @@
         "propose_share",
         "accept_share",
         "revoke_share",
+        "admin_snapshot",
+        "admin_restore",
+        "admin_replay_wal",
+        "admin_connector_enable",
+        "admin_connector_disable",
+        "admin_connector_backfill",
         "unknown"
       ],
       "type": "string"

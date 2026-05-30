@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 359ca3c180f216b726725b5739e7f281011a0555f63cdc93f582c99a45b88db7 # shrinks to m = SnapshotManifest { schema_version: 1, backup_id: "A0a0a00a", created_at: 1970-01-01T00:00:00Z, source_machine_id: "0a0a0a0a00aa0000", source_vault_id: "00a000-0", frontier_step: "000aaaa0", record_count: 0, tombstone_count: 18085270740456765, schema_versions: {}, label: None }

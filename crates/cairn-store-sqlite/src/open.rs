@@ -74,6 +74,7 @@ fn build_store(
     embedder: Option<Arc<dyn EmbeddingModel>>,
     fts_column_weights: [f64; 4],
     graph_search: bool,
+    write_gate_path: Option<std::path::PathBuf>,
 ) -> SqliteMemoryStore {
     let vector = embedder.is_some();
     let caps = base_caps(vector, graph_search);
@@ -93,6 +94,7 @@ fn build_store(
         caps,
         _cancel: cancel,
         fts_column_weights,
+        write_gate_path,
     }
 }
 
@@ -207,12 +209,20 @@ pub async fn open_with_embedder_and_config(
         .await
         .map_err(|e| StoreError::LockInit(Box::new(e)))?;
     run_boot_recovery(&conn, Arc::clone(&incarnation)).await?;
+    // The write gate lives beside the db (`<vault>/.cairn/write-gate.lock`),
+    // NOT in cairn.db, so it survives a restore swap. `path` is the db file,
+    // so `path.parent()` is the `.cairn` dir — matching
+    // `write_gate::gate_path(vault_root)`.
+    let write_gate_path = path
+        .parent()
+        .map(|cairn_dir| cairn_dir.join("write-gate.lock"));
     Ok(build_store(
         conn,
         incarnation,
         embedder,
         fts_column_weights,
         graph_search,
+        write_gate_path,
     ))
 }
 
@@ -257,12 +267,14 @@ pub async fn open_in_memory_with_embedder_and_config(
         .await
         .map_err(|e| StoreError::LockInit(Box::new(e)))?;
     run_boot_recovery(&conn, Arc::clone(&incarnation)).await?;
+    // In-memory store has no on-disk vault to gate against a restore swap.
     Ok(build_store(
         conn,
         incarnation,
         embedder,
         fts_column_weights,
         graph_search,
+        None,
     ))
 }
 

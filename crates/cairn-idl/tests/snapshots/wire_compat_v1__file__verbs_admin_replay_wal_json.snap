@@ -1,0 +1,70 @@
+---
+source: crates/cairn-idl/tests/wire_compat_v1.rs
+expression: body
+---
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cairn.dev/schema/cairn.mcp.v1/verbs/admin_replay_wal.json",
+  "title": "Cairn verb: admin_replay_wal",
+  "x-cairn-contract": "cairn.mcp.v1",
+  "x-cairn-verb-id": "admin_replay_wal",
+  "x-cairn-capability": "cairn.mcp.v1.extension.admin",
+  "x-cairn-auth": "signed_chain",
+  "x-cairn-extension": "cairn.admin.v1",
+  "x-cairn-cli": {
+    "command": "replay-wal",
+    "flags": [
+      { "name": "kind",     "long": "kind",     "value_source": "enum(upsert,forget_record,expire,evolve)" },
+      { "name": "from_ord", "long": "from-ord", "value_source": "integer", "cli_exemplar": "0" },
+      { "name": "apply",    "long": "apply",    "value_source": "bool" }
+    ]
+  },
+  "x-cairn-skill-triggers": {
+    "positive_triggers": [
+      "use when the operator wants to inspect or replay the WAL step graph for a specific operation kind",
+      "use when the user says 'replay the WAL', 'inspect WAL steps', or 'dry-run WAL replay'",
+      "use with apply=false (dry-run) to audit the WAL step sequence without side effects"
+    ],
+    "negative_triggers": [
+      "do NOT use to create a snapshot — that belongs to admin_snapshot",
+      "do NOT use to restore from a snapshot — that belongs to admin_restore"
+    ],
+    "exclusivity_hints": "this is the sole WAL-replay surface for the cairn.admin.v1 extension"
+  },
+  "type": "object",
+  "$defs": {
+    "Args": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "from_ord", "apply"],
+      "properties": {
+        "kind":     { "type": "string", "enum": ["upsert", "forget_record", "expire", "evolve"] },
+        "from_ord": { "type": "integer", "minimum": 0 },
+        "apply":    { "type": "boolean" }
+      }
+    },
+    "StepEvent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["ord", "name", "idempotent"],
+      "properties": {
+        "ord":       { "type": "integer", "minimum": 0 },
+        "name":      { "type": "string",  "minLength": 1 },
+        "idempotent":{ "type": "boolean" }
+      }
+    },
+    "Data": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["steps_visited", "steps_applied", "events"],
+      "properties": {
+        "steps_visited": { "type": "integer", "minimum": 0 },
+        "steps_applied": { "type": "integer", "minimum": 0 },
+        "events": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/StepEvent" }
+        }
+      }
+    }
+  }
+}

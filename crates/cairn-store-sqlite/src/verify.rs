@@ -312,6 +312,11 @@ const EXPECTED_OBJECTS: &[(&str, &str)] = &[
     // for the four ConsentLookup queries added in T12.
     ("index", "consent_journal_federation_kind_subject_idx"),
     ("index", "workflow_jobs_dedupe_key_idx"),
+    // 0003_admin_roles (issue #161): operator-role table for cairn.admin.v1.
+    ("table", "admin_roles"),
+    ("index", "admin_roles_active"),
+    // 0004_connector_state (issue #161): connector enable/disable state.
+    ("table", "connector_state"),
 ];
 
 /// Identity registry objects share `cairn.db` but are owned by

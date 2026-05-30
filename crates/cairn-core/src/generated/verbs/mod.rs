@@ -14,6 +14,12 @@ pub mod forget;
 pub mod propose_share;
 pub mod accept_share;
 pub mod revoke_share;
+pub mod admin_snapshot;
+pub mod admin_restore;
+pub mod admin_replay_wal;
+pub mod admin_connector_enable;
+pub mod admin_connector_disable;
+pub mod admin_connector_backfill;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
@@ -29,6 +35,12 @@ pub enum VerbId {
     ProposeShare,
     AcceptShare,
     RevokeShare,
+    AdminSnapshot,
+    AdminRestore,
+    AdminReplayWal,
+    AdminConnectorEnable,
+    AdminConnectorDisable,
+    AdminConnectorBackfill,
 }
 
 impl VerbId {
@@ -46,6 +58,12 @@ impl VerbId {
             Self::ProposeShare => "propose_share",
             Self::AcceptShare => "accept_share",
             Self::RevokeShare => "revoke_share",
+            Self::AdminSnapshot => "admin_snapshot",
+            Self::AdminRestore => "admin_restore",
+            Self::AdminReplayWal => "admin_replay_wal",
+            Self::AdminConnectorEnable => "admin_connector_enable",
+            Self::AdminConnectorDisable => "admin_connector_disable",
+            Self::AdminConnectorBackfill => "admin_connector_backfill",
         }
     }
 
@@ -63,6 +81,12 @@ impl VerbId {
             Self::ProposeShare => Some("cairn.mcp.v1.extension.federation"),
             Self::AcceptShare => Some("cairn.mcp.v1.extension.federation"),
             Self::RevokeShare => Some("cairn.mcp.v1.extension.federation"),
+            Self::AdminSnapshot => Some("cairn.mcp.v1.extension.admin"),
+            Self::AdminRestore => Some("cairn.mcp.v1.extension.admin"),
+            Self::AdminReplayWal => Some("cairn.mcp.v1.extension.admin"),
+            Self::AdminConnectorEnable => Some("cairn.mcp.v1.extension.admin"),
+            Self::AdminConnectorDisable => Some("cairn.mcp.v1.extension.admin"),
+            Self::AdminConnectorBackfill => Some("cairn.mcp.v1.extension.admin"),
         }
     }
 
@@ -80,6 +104,12 @@ impl VerbId {
             Self::ProposeShare => "signed_chain",
             Self::AcceptShare => "signed_chain",
             Self::RevokeShare => "signed_chain",
+            Self::AdminSnapshot => "signed_chain",
+            Self::AdminRestore => "signed_chain",
+            Self::AdminReplayWal => "signed_chain",
+            Self::AdminConnectorEnable => "signed_chain",
+            Self::AdminConnectorDisable => "signed_chain",
+            Self::AdminConnectorBackfill => "signed_chain",
         }
     }
 }

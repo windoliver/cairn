@@ -802,6 +802,7 @@ dependencies = [
  "axum",
  "bon",
  "cairn-core",
+ "chrono",
  "hex",
  "hmac",
  "insta",
@@ -1050,6 +1051,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tracing",
+ "uuid",
 ]
 
 [[package]]
@@ -1103,6 +1105,7 @@ dependencies = [
  "cairn-test-fixtures",
  "chrono",
  "ed25519-dalek",
+ "fs2",
  "indexmap",
  "insta",
  "parking_lot",
@@ -1116,6 +1119,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "sqlite-vec",
+ "tar",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",

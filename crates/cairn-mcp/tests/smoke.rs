@@ -111,20 +111,22 @@ fn handler_get_info_experimental_carries_cairn_status() {
 
 #[test]
 fn list_tools_returns_eight_core_verbs() {
-    // The IDL TOOLS array contains the 8 brief §8 core verbs plus the
-    // federation extension verbs (`propose_share`, `accept_share`,
-    // `revoke_share`) gated on `cairn.mcp.v1.extension.federation`.
-    // Count the core surface explicitly so a future extension verb
-    // landing in the IDL does not silently inflate the "core" count.
+    // The IDL TOOLS array contains the 8 brief §8 core verbs plus
+    // extension-gated verbs (federation, admin, etc.). Count the core
+    // surface explicitly so a future extension verb landing in the IDL
+    // does not silently inflate the "core" count.
     let core: Vec<&str> = TOOLS
         .iter()
-        .filter(|d| !cairn_mcp::federation_tools::is_federation_tool(d.name))
+        .filter(|d| {
+            !cairn_mcp::federation_tools::is_federation_tool(d.name)
+                && !cairn_mcp::admin_tools::is_admin_tool(d.name)
+        })
         .map(|d| d.name)
         .collect();
     assert_eq!(
         core.len(),
         8,
-        "TOOLS must contain exactly 8 core verbs (federation extension verbs are gated)",
+        "TOOLS must contain exactly 8 core verbs (extension verbs are gated)",
     );
 }
 
@@ -445,7 +447,9 @@ async fn wire_tools_list_descriptions_match_generated_output() {
         // used in this test does not advertise the federation
         // capability, so iterating the full IDL TOOLS array would
         // wrongly expect federation verbs in the response.
-        if cairn_mcp::federation_tools::is_federation_tool(decl.name) {
+        if cairn_mcp::federation_tools::is_federation_tool(decl.name)
+            || cairn_mcp::admin_tools::is_admin_tool(decl.name)
+        {
             continue;
         }
         let advertised = tools

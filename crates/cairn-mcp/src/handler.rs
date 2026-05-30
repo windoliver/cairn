@@ -23,6 +23,7 @@ use rmcp::{
 };
 
 use cairn_core::config::CairnConfig;
+use cairn_core::contract::admin_state::AdminStateStore;
 use cairn_core::contract::federation_transport::FederationTransport;
 use cairn_core::contract::memory_store::{ListArgs, MemoryStore};
 use cairn_core::domain::identity::Identity;
@@ -74,6 +75,32 @@ fn status_health(
             reason: None,
         },
     }
+}
+
+/// `true` when the MCP admin bootstrap identity — `hmn:local-vault:<vault_id>`,
+/// the exact actor [`crate::admin_tools::dispatch`] constructs — actually holds
+/// the `Operator` role in the vault's admin-state store.
+///
+/// Advertising the admin capability must require *this* identity to be granted,
+/// not merely that *some* operator row exists: otherwise a vault that granted
+/// only a real identity (`hmn:alice`) would advertise the admin tools while
+/// every MCP admin call fails `NotAuthorized` (round-4 review #2). Any I/O or
+/// parse failure resolves to `false` (fail-closed).
+fn admin_bootstrap_operator_ready(vault_root: &Path) -> bool {
+    let Ok(vault_id) = std::fs::read_to_string(vault_root.join(".cairn").join("vault.id")) else {
+        return false;
+    };
+    let vault_id = vault_id.trim();
+    if vault_id.is_empty() {
+        return false;
+    }
+    let Ok(identity) = Identity::parse(format!("hmn:local-vault:{vault_id}")) else {
+        return false;
+    };
+    let db = vault_root.join(".cairn").join("cairn.db");
+    cairn_store_sqlite::SqliteAdminStateStore::open(&db)
+        .and_then(|s| s.has_role(&identity, cairn_core::domain::admin::AdminRole::Operator))
+        .unwrap_or(false)
 }
 
 /// Materialized graph-request bundle. Resolved once; carried into dispatch.
@@ -552,6 +579,29 @@ impl CairnMcpHandler {
             evaluation_runtime_ready: self.evaluation_runtime_ready
                 && self.config.evaluation.enabled,
             federation_runtime_ready: self.federation_runtime_ready && self.federation.is_some(),
+            // admin_runtime_ready: true iff
+            //   (a) the transport is local stdio, AND
+            //   (b) config.admin.enabled=true, AND
+            //   (c) the EXACT bootstrap identity that `admin_tools::dispatch`
+            //       uses (`hmn:local-vault:<vault_id>`) holds the Operator role.
+            //
+            // (a) binds the admin surface to a local-only transport: MCP admin
+            // uses a vault-derived bootstrap actor, NOT per-request signed-chain
+            // auth (that is Phase 2, brief §7.4). On a future network transport
+            // any reachable client would share that principal, so admin MUST
+            // stay dark there until signed intent is verified per request
+            // (round-7 review #1). `McpTransport` is #[non_exhaustive]; this
+            // matches ONLY Stdio, so new transports fail closed by default.
+            //
+            // (c) probes that specific identity — not merely `has_any_operator`
+            // — so advertisement stays in lockstep with dispatch (round-4 #2).
+            // No vault root bound → cannot probe → dark (brief §15).
+            admin_runtime_ready: matches!(self.transport, McpTransport::Stdio)
+                && self.config.admin.enabled
+                && self
+                    .vault_root
+                    .as_ref()
+                    .is_some_and(|root| admin_bootstrap_operator_ready(root)),
             contract_phase: cairn_core::status::Phase::V0_1,
         };
 
@@ -716,11 +766,14 @@ impl ServerHandler for CairnMcpHandler {
         // cannot honor end-to-end.
         let advertised_caps = self.build_status_response().capabilities;
         let federation_ready = crate::federation_tools::runtime_ready(&advertised_caps);
+        let admin_ready = crate::admin_tools::runtime_ready(&advertised_caps);
         let mut tools: Vec<Tool> = TOOLS
             .iter()
             .filter(|decl| {
                 if crate::federation_tools::is_federation_tool(decl.name) {
                     federation_ready
+                } else if crate::admin_tools::is_admin_tool(decl.name) {
+                    admin_ready
                 } else {
                     true
                 }
@@ -858,6 +911,25 @@ impl ServerHandler for CairnMcpHandler {
                     return Ok(crate::coord_tools::dispatch(&name, arguments));
                 }
 
+                // Admin extension routing (brief §7, issue #161).
+                // The IDL TOOLS array exposes the six admin verbs. Pass the
+                // live negotiated capability set so `dispatch` admits the
+                // call ONLY when the admin extension is actually advertised
+                // (i.e. wired AND `config.admin.enabled` AND an operator row
+                // exists — see `build_status_response`). This makes a direct
+                // `call_tool` fail closed on a config-disabled / no-operator
+                // server, not just in `tools/list` filtering
+                // (round-3 adversarial review #1; brief §15 fail-closed).
+                if crate::admin_tools::is_admin_tool(name.as_ref()) {
+                    let capabilities = self.build_status_response().capabilities;
+                    return Ok(crate::admin_tools::dispatch(
+                        &name,
+                        arguments,
+                        self.vault_root.as_deref(),
+                        &capabilities,
+                    ));
+                }
+
                 // Federation extension routing (brief §12.a, issue
                 // #123). The IDL TOOLS array exposes
                 // `propose_share`, `accept_share`, and `revoke_share`
@@ -882,18 +954,20 @@ impl ServerHandler for CairnMcpHandler {
                 let config = self.config.clone();
 
                 let Some(request_verb) = request_verb else {
-                    // Filter federation verbs out of the available-verbs
-                    // hint while the federation extension is unwired —
+                    // Filter extension verbs out of the available-verbs
+                    // hint while their capabilities are unwired —
                     // brief §15 fail-closed: never advertise a verb
                     // tools/list itself does not surface.
-                    let federation_ready = crate::federation_tools::runtime_ready(
-                        &self.build_status_response().capabilities,
-                    );
+                    let status_caps = self.build_status_response().capabilities;
+                    let federation_ready = crate::federation_tools::runtime_ready(&status_caps);
+                    let admin_ready = crate::admin_tools::runtime_ready(&status_caps);
                     let available: Vec<&str> = TOOLS
                         .iter()
                         .filter(|d| {
                             if crate::federation_tools::is_federation_tool(d.name) {
                                 federation_ready
+                            } else if crate::admin_tools::is_admin_tool(d.name) {
+                                admin_ready
                             } else {
                                 true
                             }

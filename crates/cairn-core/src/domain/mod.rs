@@ -18,6 +18,7 @@
 //!   JSON form so a YAML projector reuses the same `serde` derive.
 
 pub mod actor_chain;
+pub mod admin;
 pub mod admission;
 pub mod agent_audit;
 pub mod agent_canary;
@@ -57,6 +58,7 @@ pub mod time;
 pub mod timestamp;
 pub mod trace;
 pub mod tree_read_window;
+pub mod workflow;
 pub mod zero_capture;
 
 pub use actor_chain::{ActorChainEntry, ChainRole, validate_chain};
@@ -130,6 +132,7 @@ pub use tree_read_window::{
     TreeBudgetReport, TreeReadRecord, TreeReadSegmentKind, TreeReadSelection, TreeReadWindow,
     TreeReadWindowError, TreeReadWindowInput, plan_tree_read_window,
 };
+pub use workflow::{ProgressEvent, ProgressKind, WorkflowId};
 pub use zero_capture::{
     ZeroCaptureAuditInput, ZeroCaptureDecision, ZeroCaptureDecisionCode, ZeroCaptureNudge,
     ZeroCaptureReport, ZeroCaptureReportSummary, ZeroCaptureSuppression, ZeroCaptureTrigger,

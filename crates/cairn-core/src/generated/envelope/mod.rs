@@ -20,6 +20,12 @@ pub enum RequestVerb {
     ProposeShare,
     AcceptShare,
     RevokeShare,
+    AdminSnapshot,
+    AdminRestore,
+    AdminReplayWal,
+    AdminConnectorEnable,
+    AdminConnectorDisable,
+    AdminConnectorBackfill,
 }
 
 /// Per-verb request payload, dispatched on `Request.verb` at deserialize time.
@@ -38,6 +44,12 @@ pub enum RequestArgs {
     ProposeShare(crate::generated::verbs::propose_share::ProposeShareArgs),
     AcceptShare(crate::generated::verbs::accept_share::AcceptShareArgs),
     RevokeShare(crate::generated::verbs::revoke_share::RevokeShareArgs),
+    AdminSnapshot(crate::generated::verbs::admin_snapshot::AdminSnapshotArgs),
+    AdminRestore(crate::generated::verbs::admin_restore::AdminRestoreArgs),
+    AdminReplayWal(crate::generated::verbs::admin_replay_wal::AdminReplayWalArgs),
+    AdminConnectorEnable(crate::generated::verbs::admin_connector_enable::AdminConnectorEnableArgs),
+    AdminConnectorDisable(crate::generated::verbs::admin_connector_disable::AdminConnectorDisableArgs),
+    AdminConnectorBackfill(crate::generated::verbs::admin_connector_backfill::AdminConnectorBackfillArgs),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -99,6 +111,24 @@ impl<'de> ::serde::Deserialize<'de> for Request {
             ),
             RequestVerb::RevokeShare => RequestArgs::RevokeShare(
                 <crate::generated::verbs::revoke_share::RevokeShareArgs as ::serde::Deserialize>::deserialize(raw.args).map_err(::serde::de::Error::custom)?
+            ),
+            RequestVerb::AdminSnapshot => RequestArgs::AdminSnapshot(
+                <crate::generated::verbs::admin_snapshot::AdminSnapshotArgs as ::serde::Deserialize>::deserialize(raw.args).map_err(::serde::de::Error::custom)?
+            ),
+            RequestVerb::AdminRestore => RequestArgs::AdminRestore(
+                <crate::generated::verbs::admin_restore::AdminRestoreArgs as ::serde::Deserialize>::deserialize(raw.args).map_err(::serde::de::Error::custom)?
+            ),
+            RequestVerb::AdminReplayWal => RequestArgs::AdminReplayWal(
+                <crate::generated::verbs::admin_replay_wal::AdminReplayWalArgs as ::serde::Deserialize>::deserialize(raw.args).map_err(::serde::de::Error::custom)?
+            ),
+            RequestVerb::AdminConnectorEnable => RequestArgs::AdminConnectorEnable(
+                <crate::generated::verbs::admin_connector_enable::AdminConnectorEnableArgs as ::serde::Deserialize>::deserialize(raw.args).map_err(::serde::de::Error::custom)?
+            ),
+            RequestVerb::AdminConnectorDisable => RequestArgs::AdminConnectorDisable(
+                <crate::generated::verbs::admin_connector_disable::AdminConnectorDisableArgs as ::serde::Deserialize>::deserialize(raw.args).map_err(::serde::de::Error::custom)?
+            ),
+            RequestVerb::AdminConnectorBackfill => RequestArgs::AdminConnectorBackfill(
+                <crate::generated::verbs::admin_connector_backfill::AdminConnectorBackfillArgs as ::serde::Deserialize>::deserialize(raw.args).map_err(::serde::de::Error::custom)?
             ),
         };
         Ok(Self {
@@ -165,6 +195,12 @@ pub enum ResponseVerb {
     ProposeShare,
     AcceptShare,
     RevokeShare,
+    AdminSnapshot,
+    AdminRestore,
+    AdminReplayWal,
+    AdminConnectorEnable,
+    AdminConnectorDisable,
+    AdminConnectorBackfill,
     Unknown,
 }
 
@@ -199,6 +235,12 @@ pub enum ResponseData {
     ProposeShare(crate::generated::verbs::propose_share::ProposeShareData),
     AcceptShare(crate::generated::verbs::accept_share::AcceptShareData),
     RevokeShare(crate::generated::verbs::revoke_share::RevokeShareData),
+    AdminSnapshot(crate::generated::verbs::admin_snapshot::AdminSnapshotData),
+    AdminRestore(crate::generated::verbs::admin_restore::AdminRestoreData),
+    AdminReplayWal(crate::generated::verbs::admin_replay_wal::AdminReplayWalData),
+    AdminConnectorEnable(crate::generated::verbs::admin_connector_enable::AdminConnectorEnableData),
+    AdminConnectorDisable(crate::generated::verbs::admin_connector_disable::AdminConnectorDisableData),
+    AdminConnectorBackfill(crate::generated::verbs::admin_connector_backfill::AdminConnectorBackfillData),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -344,6 +386,24 @@ impl<'de> ::serde::Deserialize<'de> for Response {
                 ),
                 ResponseVerb::RevokeShare => ResponseData::RevokeShare(
                     <crate::generated::verbs::revoke_share::RevokeShareData as ::serde::Deserialize>::deserialize(payload).map_err(::serde::de::Error::custom)?
+                ),
+                ResponseVerb::AdminSnapshot => ResponseData::AdminSnapshot(
+                    <crate::generated::verbs::admin_snapshot::AdminSnapshotData as ::serde::Deserialize>::deserialize(payload).map_err(::serde::de::Error::custom)?
+                ),
+                ResponseVerb::AdminRestore => ResponseData::AdminRestore(
+                    <crate::generated::verbs::admin_restore::AdminRestoreData as ::serde::Deserialize>::deserialize(payload).map_err(::serde::de::Error::custom)?
+                ),
+                ResponseVerb::AdminReplayWal => ResponseData::AdminReplayWal(
+                    <crate::generated::verbs::admin_replay_wal::AdminReplayWalData as ::serde::Deserialize>::deserialize(payload).map_err(::serde::de::Error::custom)?
+                ),
+                ResponseVerb::AdminConnectorEnable => ResponseData::AdminConnectorEnable(
+                    <crate::generated::verbs::admin_connector_enable::AdminConnectorEnableData as ::serde::Deserialize>::deserialize(payload).map_err(::serde::de::Error::custom)?
+                ),
+                ResponseVerb::AdminConnectorDisable => ResponseData::AdminConnectorDisable(
+                    <crate::generated::verbs::admin_connector_disable::AdminConnectorDisableData as ::serde::Deserialize>::deserialize(payload).map_err(::serde::de::Error::custom)?
+                ),
+                ResponseVerb::AdminConnectorBackfill => ResponseData::AdminConnectorBackfill(
+                    <crate::generated::verbs::admin_connector_backfill::AdminConnectorBackfillData as ::serde::Deserialize>::deserialize(payload).map_err(::serde::de::Error::custom)?
                 ),
                 ResponseVerb::Unknown => return Err(::serde::de::Error::custom("verb=unknown is rejected-only and cannot carry data")),
             })

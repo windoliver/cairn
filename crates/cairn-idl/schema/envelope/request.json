@@ -21,7 +21,13 @@
         "forget",
         "propose_share",
         "accept_share",
-        "revoke_share"
+        "revoke_share",
+        "admin_snapshot",
+        "admin_restore",
+        "admin_replay_wal",
+        "admin_connector_enable",
+        "admin_connector_disable",
+        "admin_connector_backfill"
       ]
     },
     "signed_intent": { "$ref": "signed_intent.json" },
@@ -41,6 +47,12 @@
     { "if": { "properties": { "verb": { "const": "forget" } } },         "then": { "properties": { "args": { "$ref": "../verbs/forget.json#/$defs/Args" } } } },
     { "if": { "properties": { "verb": { "const": "propose_share" } } }, "then": { "properties": { "args": { "$ref": "../verbs/propose_share.json#/$defs/Args" } } } },
     { "if": { "properties": { "verb": { "const": "accept_share" } } },  "then": { "properties": { "args": { "$ref": "../verbs/accept_share.json#/$defs/Args" } } } },
-    { "if": { "properties": { "verb": { "const": "revoke_share" } } },  "then": { "properties": { "args": { "$ref": "../verbs/revoke_share.json#/$defs/Args" } } } }
+    { "if": { "properties": { "verb": { "const": "revoke_share" } } },                  "then": { "properties": { "args": { "$ref": "../verbs/revoke_share.json#/$defs/Args" } } } },
+    { "if": { "properties": { "verb": { "const": "admin_snapshot" } } },               "then": { "properties": { "args": { "$ref": "../verbs/admin_snapshot.json#/$defs/Args" } } } },
+    { "if": { "properties": { "verb": { "const": "admin_restore" } } },                "then": { "properties": { "args": { "$ref": "../verbs/admin_restore.json#/$defs/Args" } } } },
+    { "if": { "properties": { "verb": { "const": "admin_replay_wal" } } },             "then": { "properties": { "args": { "$ref": "../verbs/admin_replay_wal.json#/$defs/Args" } } } },
+    { "if": { "properties": { "verb": { "const": "admin_connector_enable" } } },       "then": { "properties": { "args": { "$ref": "../verbs/admin_connector_enable.json#/$defs/Args" } } } },
+    { "if": { "properties": { "verb": { "const": "admin_connector_disable" } } },      "then": { "properties": { "args": { "$ref": "../verbs/admin_connector_disable.json#/$defs/Args" } } } },
+    { "if": { "properties": { "verb": { "const": "admin_connector_backfill" } } },     "then": { "properties": { "args": { "$ref": "../verbs/admin_connector_backfill.json#/$defs/Args" } } } }
   ]
 }

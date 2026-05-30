@@ -991,6 +991,9 @@ fn run_admin(matches: &ArgMatches, explicit_vault: Option<&str>) -> ExitCode {
         }
         Some(("snapshot", sub)) => verbs::admin_snapshot::run(sub, &vault_root),
         Some(("restore", sub)) => verbs::admin_restore::run(sub, &vault_root),
+        Some(("grant", sub)) => verbs::admin_grant::run(sub, &vault_root),
+        Some(("replay-wal", sub)) => verbs::admin_replay_wal::run(sub, &vault_root),
+        Some(("connector", sub)) => verbs::admin_connector::run(sub, &vault_root),
         Some(("sre", sub)) => match sub.subcommand() {
             Some(("report", s)) => cairn_cli::sre::run_report(s, &vault_root),
             _ => unreachable!(

@@ -1,0 +1,58 @@
+---
+source: crates/cairn-idl/tests/wire_compat_v1.rs
+expression: body
+---
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cairn.dev/schema/cairn.mcp.v1/verbs/admin_connector_backfill.json",
+  "title": "Cairn verb: admin_connector_backfill",
+  "x-cairn-contract": "cairn.mcp.v1",
+  "x-cairn-verb-id": "admin_connector_backfill",
+  "x-cairn-capability": "cairn.mcp.v1.extension.admin",
+  "x-cairn-auth": "signed_chain",
+  "x-cairn-extension": "cairn.admin.v1",
+  "x-cairn-cli": {
+    "command": "connector-backfill",
+    "flags": [
+      { "name": "name",         "long": "name",         "value_source": "string", "cli_exemplar": "github" },
+      { "name": "from",         "long": "from",         "value_source": "string", "cli_exemplar": "2026-01-01T00:00:00Z" },
+      { "name": "to",           "long": "to",           "value_source": "string", "cli_exemplar": "2026-05-01T00:00:00Z" },
+      { "name": "rate_per_sec", "long": "rate-per-sec", "value_source": "number", "cli_exemplar": "10.0" }
+    ]
+  },
+  "x-cairn-skill-triggers": {
+    "positive_triggers": [
+      "use when the operator wants to backfill historical data for a connector over a specific time window",
+      "use when the user says 'backfill the github connector', 'import historical data', or 'run a connector backfill'",
+      "use to recover data after a connector was disabled for a period"
+    ],
+    "negative_triggers": [
+      "do NOT use to enable or disable a connector — use admin_connector_enable or admin_connector_disable",
+      "do NOT use for ongoing incremental polling — that is the connector's normal polling loop"
+    ],
+    "exclusivity_hints": "this is the sole connector-backfill surface for the cairn.admin.v1 extension"
+  },
+  "type": "object",
+  "$defs": {
+    "Args": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "from", "to", "rate_per_sec"],
+      "properties": {
+        "name":         { "type": "string", "minLength": 1 },
+        "from":         { "type": "string", "format": "date-time", "minLength": 20 },
+        "to":           { "type": "string", "format": "date-time", "minLength": 20 },
+        "rate_per_sec": { "type": "number", "minimum": 0.001 }
+      }
+    },
+    "Data": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["workflow_id", "started_at"],
+      "properties": {
+        "workflow_id": { "type": "string", "minLength": 1 },
+        "started_at":  { "type": "string", "format": "date-time", "minLength": 20 }
+      }
+    }
+  }
+}

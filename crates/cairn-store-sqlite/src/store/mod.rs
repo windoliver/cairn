@@ -68,6 +68,13 @@ pub struct SqliteMemoryStore {
     /// Set at open time via `open_with_embedder_and_config`; the registry
     /// stub built by `Default::default` carries the defaults.
     pub(crate) fts_column_weights: [f64; 4],
+    /// Path to this vault's write-gate lock file
+    /// (`<vault>/.cairn/write-gate.lock`), or `None` for an in-memory / stub
+    /// store (no filesystem vault to gate). Record mutations that a restore
+    /// swap could lose-then-resurrect (notably `forget`) take this gate SHARED
+    /// so they cannot commit while a restore holds it EXCLUSIVE
+    /// (round-7 review #2). See [`crate::write_gate`].
+    pub(crate) write_gate_path: Option<std::path::PathBuf>,
 }
 
 impl Default for SqliteMemoryStore {
@@ -87,6 +94,7 @@ impl Default for SqliteMemoryStore {
             },
             _cancel: None,
             fts_column_weights: [10.0, 10.0, 5.0, 1.0],
+            write_gate_path: None,
         }
     }
 }
@@ -160,6 +168,28 @@ impl SqliteMemoryStore {
     #[must_use]
     pub fn incarnation(&self) -> Option<&Arc<str>> {
         self.incarnation.as_ref()
+    }
+
+    /// Acquire this vault's write gate in SHARED mode for the duration of a
+    /// record mutation, blocking only while a restore holds it EXCLUSIVE.
+    ///
+    /// Returns `None` for an in-memory / stub store (no `write_gate_path`) —
+    /// such stores have no on-disk vault for a restore to swap, so there is
+    /// nothing to gate against. The `flock` is acquired on a blocking thread so
+    /// a waiting writer never parks a runtime worker (round-7 review #2).
+    pub(crate) async fn acquire_write_gate_shared(
+        &self,
+    ) -> Result<Option<crate::write_gate::WriteGateGuard>, StoreError> {
+        let Some(path) = self.write_gate_path.clone() else {
+            return Ok(None);
+        };
+        let guard = tokio::task::spawn_blocking(move || crate::write_gate::lock_shared(&path))
+            .await
+            .map_err(|e| StoreError::Invariant {
+                what: format!("write-gate task join failed: {e}"),
+            })?
+            .map_err(|e| StoreError::VaultPath(format!("acquire vault write gate: {e}")))?;
+        Ok(Some(guard))
     }
 
     /// Insert or replace a deterministic active record for projection tests.

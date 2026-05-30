@@ -36,6 +36,7 @@ fn gates(bound: bool, model_present: bool, store: Option<StoreCaps>) -> Capabili
         expiration_runtime_ready: false,
         evaluation_runtime_ready: false,
         federation_runtime_ready: false,
+        admin_runtime_ready: false,
         contract_phase: Phase::V0_1,
     }
 }
@@ -465,6 +466,7 @@ mod remediation_tests {
             expiration_runtime_ready: false,
             evaluation_runtime_ready: false,
             federation_runtime_ready: false,
+            admin_runtime_ready: false,
         };
 
         for cap in advertise(&gates) {
@@ -556,6 +558,7 @@ mod prop_tests {
                     expiration_runtime_ready: false,
                     evaluation_runtime_ready: false,
                     federation_runtime_ready: false,
+                    admin_runtime_ready: false,
                     contract_phase: phase,
                 }
             })
@@ -636,6 +639,7 @@ fn openai_provider_without_key_drops_semantic_and_hybrid() {
         expiration_runtime_ready: false,
         evaluation_runtime_ready: false,
         federation_runtime_ready: false,
+        admin_runtime_ready: false,
         contract_phase: Phase::V0_1,
     };
     let caps = advertise(&g);
@@ -652,6 +656,79 @@ fn openai_provider_without_key_drops_semantic_and_hybrid() {
         caps.contains(&Capabilities::CairnMcpV1SearchKeyword),
         "keyword must still be advertised; got {caps:?}"
     );
+}
+
+#[test]
+fn admin_capability_absent_when_runtime_not_ready() {
+    // ADMIN_EXTENSION_WIRED is now true (phase 6); advertisement still
+    // requires `admin_runtime_ready` (config opt-in + at-least-one-operator).
+    // Without it, capability stays absent.
+    let gates = CapabilityGates {
+        admin_runtime_ready: false,
+        ..gates(true, false, None)
+    };
+    let caps = advertise(&gates);
+    assert!(
+        !caps
+            .iter()
+            .any(|c| matches!(c, Capabilities::CairnMcpV1ExtensionAdmin)),
+        "admin capability must be absent when admin_runtime_ready = false; got {caps:?}"
+    );
+}
+
+#[test]
+fn admin_capability_advertise_matches_wired_constant() {
+    // With admin_runtime_ready = true, the capability is advertised
+    // iff ADMIN_EXTENSION_WIRED is true. The test is valid in both
+    // phases (dark today; flipped once all surfaces land).
+    let gates = CapabilityGates {
+        admin_runtime_ready: true,
+        ..gates(true, false, None)
+    };
+    let caps = advertise(&gates);
+    let present = caps
+        .iter()
+        .any(|c| matches!(c, Capabilities::CairnMcpV1ExtensionAdmin));
+    assert_eq!(
+        present,
+        wiring::ADMIN_EXTENSION_WIRED,
+        "admin capability presence must track ADMIN_EXTENSION_WIRED; got {caps:?}"
+    );
+}
+
+/// AC#1 extended truth-table: verifies all four runtime-flag combinations
+/// behave correctly relative to the `ADMIN_EXTENSION_WIRED` constant.
+///
+/// When the constant is `false` (phase 1–5): all four combos yield absent.
+/// When the constant is `true` (phase 6.2+): only `(config=true, has_op=true)`
+/// yields present; the other three remain absent. The test is written to be
+/// valid in both worlds so it survives the flip in Task 6.2 without editing.
+#[test]
+fn admin_capability_truth_table() {
+    let cases: &[(bool, bool)] = &[(false, false), (false, true), (true, false), (true, true)];
+
+    for &(config_enabled, has_operator) in cases {
+        let gates = CapabilityGates {
+            admin_runtime_ready: config_enabled && has_operator,
+            ..gates(true, false, None)
+        };
+        let caps = advertise(&gates);
+        let advertised = caps
+            .iter()
+            .any(|c| matches!(c, Capabilities::CairnMcpV1ExtensionAdmin));
+
+        // The capability is present iff all three gates hold simultaneously.
+        let expected = wiring::ADMIN_EXTENSION_WIRED && config_enabled && has_operator;
+        assert_eq!(
+            advertised,
+            expected,
+            "admin capability advertisement mismatch: wired={} config={} has_op={} → \
+             expected={expected} got={advertised}",
+            wiring::ADMIN_EXTENSION_WIRED,
+            config_enabled,
+            has_operator,
+        );
+    }
 }
 
 #[test]

@@ -1,0 +1,54 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cairn.dev/schema/cairn.mcp.v1/verbs/admin_restore.json",
+  "title": "Cairn verb: admin_restore",
+  "x-cairn-contract": "cairn.mcp.v1",
+  "x-cairn-verb-id": "admin_restore",
+  "x-cairn-capability": "cairn.mcp.v1.extension.admin",
+  "x-cairn-auth": "signed_chain",
+  "x-cairn-extension": "cairn.admin.v1",
+  "x-cairn-cli": {
+    "command": "restore-v2",
+    "flags": [
+      { "name": "artifact_path",    "long": "artifact-path",    "value_source": "string",  "cli_exemplar": "/tmp/cairn-snaps/snap-01ABCDEF.cairn-snap.tar" },
+      { "name": "dry_run",          "long": "dry-run",          "value_source": "bool" },
+      { "name": "local_machine_id", "long": "local-machine-id", "value_source": "string",  "cli_exemplar": "MACHINE-A" }
+    ]
+  },
+  "x-cairn-skill-triggers": {
+    "positive_triggers": [
+      "use when the operator wants to restore the vault from a previously created snapshot artifact",
+      "use when the user says 'restore from snapshot', 'apply a cairn backup', or 'roll back the vault'",
+      "use with dry_run=true to validate a snapshot before applying it"
+    ],
+    "negative_triggers": [
+      "do NOT use to create a new snapshot — that belongs to admin_snapshot",
+      "do NOT use to replay individual WAL steps — that belongs to admin_replay_wal"
+    ],
+    "exclusivity_hints": "this is the sole vault-restore surface for the cairn.admin.v1 extension"
+  },
+  "type": "object",
+  "$defs": {
+    "Args": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["artifact_path", "dry_run", "local_machine_id"],
+      "properties": {
+        "artifact_path":    { "type": "string", "minLength": 1 },
+        "dry_run":          { "type": "boolean" },
+        "local_machine_id": { "type": "string", "minLength": 1 }
+      }
+    },
+    "Data": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["restored_records", "tombstones_replayed", "frontier_step", "backup_id"],
+      "properties": {
+        "restored_records":   { "type": "integer", "minimum": 0 },
+        "tombstones_replayed":{ "type": "integer", "minimum": 0 },
+        "frontier_step":      { "type": "string",  "minLength": 1 },
+        "backup_id":          { "type": "string",  "minLength": 1 }
+      }
+    }
+  }
+}

@@ -224,4 +224,6 @@ evaluation:
   enabled: false
   checks: []
   write_report_record: true
+admin:
+  enabled: false
 ```

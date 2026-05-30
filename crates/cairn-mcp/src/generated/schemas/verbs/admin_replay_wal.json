@@ -1,0 +1,120 @@
+{
+  "$defs": {
+    "Args": {
+      "additionalProperties": false,
+      "properties": {
+        "apply": {
+          "type": "boolean"
+        },
+        "from_ord": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "kind": {
+          "enum": [
+            "upsert",
+            "forget_record",
+            "expire",
+            "evolve"
+          ],
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "from_ord",
+        "apply"
+      ],
+      "type": "object"
+    },
+    "Data": {
+      "additionalProperties": false,
+      "properties": {
+        "events": {
+          "items": {
+            "$ref": "#/$defs/StepEvent"
+          },
+          "type": "array"
+        },
+        "steps_applied": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "steps_visited": {
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "steps_visited",
+        "steps_applied",
+        "events"
+      ],
+      "type": "object"
+    },
+    "StepEvent": {
+      "additionalProperties": false,
+      "properties": {
+        "idempotent": {
+          "type": "boolean"
+        },
+        "name": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "ord": {
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "ord",
+        "name",
+        "idempotent"
+      ],
+      "type": "object"
+    }
+  },
+  "$id": "https://cairn.dev/schema/cairn.mcp.v1/verbs/admin_replay_wal.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Cairn verb: admin_replay_wal",
+  "type": "object",
+  "x-cairn-auth": "signed_chain",
+  "x-cairn-capability": "cairn.mcp.v1.extension.admin",
+  "x-cairn-cli": {
+    "command": "replay-wal",
+    "flags": [
+      {
+        "long": "kind",
+        "name": "kind",
+        "value_source": "enum(upsert,forget_record,expire,evolve)"
+      },
+      {
+        "cli_exemplar": "0",
+        "long": "from-ord",
+        "name": "from_ord",
+        "value_source": "integer"
+      },
+      {
+        "long": "apply",
+        "name": "apply",
+        "value_source": "bool"
+      }
+    ]
+  },
+  "x-cairn-contract": "cairn.mcp.v1",
+  "x-cairn-extension": "cairn.admin.v1",
+  "x-cairn-skill-triggers": {
+    "exclusivity_hints": "this is the sole WAL-replay surface for the cairn.admin.v1 extension",
+    "negative_triggers": [
+      "do NOT use to create a snapshot — that belongs to admin_snapshot",
+      "do NOT use to restore from a snapshot — that belongs to admin_restore"
+    ],
+    "positive_triggers": [
+      "use when the operator wants to inspect or replay the WAL step graph for a specific operation kind",
+      "use when the user says 'replay the WAL', 'inspect WAL steps', or 'dry-run WAL replay'",
+      "use with apply=false (dry-run) to audit the WAL step sequence without side effects"
+    ]
+  },
+  "x-cairn-verb-id": "admin_replay_wal"
+}

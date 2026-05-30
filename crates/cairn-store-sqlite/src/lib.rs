@@ -9,6 +9,14 @@
 
 #![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used))]
 
+pub mod admin;
+pub use admin::{
+    FileBackupRegistry, SqliteSnapshotApplier, SqliteSnapshotMetadata, SqliteSnapshotProducer,
+    SqliteSnapshotReader,
+};
+pub mod admin_consent_log;
+pub use admin_consent_log::SqliteConsentLog;
+pub mod admin_state;
 pub mod consent;
 pub mod consent_reader;
 pub mod consent_timeline;
@@ -35,10 +43,13 @@ pub use trace_canvas::{
 };
 pub use trace_window::ConsolidationBacklogEntry;
 pub mod vec_ext;
+pub mod write_gate;
+pub use write_gate::{WriteGateGuard, gate_path, lock_exclusive, lock_shared};
 mod verify;
 pub mod wal;
 pub mod workflow_jobs_reader;
 
+pub use admin_state::SqliteAdminStateStore;
 pub use consent_reader::SqliteConsentJournalReader;
 pub use error::StoreError;
 pub use hot_prefix::SqliteHotPrefixCache;

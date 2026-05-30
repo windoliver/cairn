@@ -447,6 +447,126 @@ cairn accept-share --envelope '{"kind":"revoke","issuer_key_id":"hmn:alice","rev
 cairn revoke-share --link-id LINK_ID
 ```
 
+## `cairn admin_snapshot`
+
+**Use when:**
+- use when the operator wants to create a point-in-time snapshot of the vault database
+- use when the user says 'take a snapshot', 'backup the vault', or 'create a cairn snapshot'
+- use before a destructive migration or restore operation
+
+**Do NOT use when:**
+- do NOT use to restore from a snapshot — that belongs to admin_restore
+- do NOT use to replay WAL steps — that belongs to admin_replay_wal
+
+**Exclusivity:** this is the sole vault-snapshot surface for the cairn.admin.v1 extension
+
+**Example:**
+
+```bash
+cairn snapshot-v2 --out-dir /tmp/cairn-snaps --local-machine-id MACHINE-A --backup-kind snapshot
+```
+
+```bash
+cairn snapshot-v2 --out-dir /tmp/cairn-snaps --local-machine-id MACHINE-A --backup-kind snapshot --label LABEL
+```
+
+## `cairn admin_restore`
+
+**Use when:**
+- use when the operator wants to restore the vault from a previously created snapshot artifact
+- use when the user says 'restore from snapshot', 'apply a cairn backup', or 'roll back the vault'
+- use with dry_run=true to validate a snapshot before applying it
+
+**Do NOT use when:**
+- do NOT use to create a new snapshot — that belongs to admin_snapshot
+- do NOT use to replay individual WAL steps — that belongs to admin_replay_wal
+
+**Exclusivity:** this is the sole vault-restore surface for the cairn.admin.v1 extension
+
+**Example:**
+
+```bash
+cairn restore-v2 --artifact-path /tmp/cairn-snaps/snap-01ABCDEF.cairn-snap.tar --dry-run --local-machine-id MACHINE-A
+```
+
+## `cairn admin_replay_wal`
+
+**Use when:**
+- use when the operator wants to inspect or replay the WAL step graph for a specific operation kind
+- use when the user says 'replay the WAL', 'inspect WAL steps', or 'dry-run WAL replay'
+- use with apply=false (dry-run) to audit the WAL step sequence without side effects
+
+**Do NOT use when:**
+- do NOT use to create a snapshot — that belongs to admin_snapshot
+- do NOT use to restore from a snapshot — that belongs to admin_restore
+
+**Exclusivity:** this is the sole WAL-replay surface for the cairn.admin.v1 extension
+
+**Example:**
+
+```bash
+cairn replay-wal --kind upsert --from-ord 0 --apply
+```
+
+## `cairn admin_connector_enable`
+
+**Use when:**
+- use when the operator wants to re-enable a previously disabled data connector
+- use when the user says 'enable the github connector', 'turn on the linear connector', or 'start connector polling'
+
+**Do NOT use when:**
+- do NOT use to disable a connector — that belongs to admin_connector_disable
+- do NOT use to trigger a one-off backfill — that belongs to admin_connector_backfill
+
+**Exclusivity:** this is the sole connector-enable surface for the cairn.admin.v1 extension
+
+**Example:**
+
+```bash
+cairn connector-enable --name github
+```
+
+## `cairn admin_connector_disable`
+
+**Use when:**
+- use when the operator wants to stop a data connector from polling
+- use when the user says 'disable the github connector', 'pause the linear connector', or 'stop connector polling'
+
+**Do NOT use when:**
+- do NOT use to enable a connector — that belongs to admin_connector_enable
+- do NOT use to trigger a one-off backfill — that belongs to admin_connector_backfill
+
+**Exclusivity:** this is the sole connector-disable surface for the cairn.admin.v1 extension
+
+**Example:**
+
+```bash
+cairn connector-disable --name github
+```
+
+```bash
+cairn connector-disable --name github --reason REASON
+```
+
+## `cairn admin_connector_backfill`
+
+**Use when:**
+- use when the operator wants to backfill historical data for a connector over a specific time window
+- use when the user says 'backfill the github connector', 'import historical data', or 'run a connector backfill'
+- use to recover data after a connector was disabled for a period
+
+**Do NOT use when:**
+- do NOT use to enable or disable a connector — use admin_connector_enable or admin_connector_disable
+- do NOT use for ongoing incremental polling — that is the connector's normal polling loop
+
+**Exclusivity:** this is the sole connector-backfill surface for the cairn.admin.v1 extension
+
+**Example:**
+
+```bash
+cairn connector-backfill --name github --from 2026-01-01T00:00:00Z --to 2026-05-01T00:00:00Z --rate-per-sec 10.0
+```
+
 ## Output format
 
 Every command supports `--json` for machine-readable output. Parse stdout as JSON; treat stderr as a human-readable error message.

@@ -1,0 +1,65 @@
+{
+  "$defs": {
+    "Args": {
+      "additionalProperties": false,
+      "properties": {
+        "backup_kind": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "label": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "local_machine_id": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "out_dir": {
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "out_dir",
+        "local_machine_id",
+        "backup_kind"
+      ],
+      "type": "object"
+    },
+    "Data": {
+      "additionalProperties": false,
+      "properties": {
+        "artifact_path": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "backup_id": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "frontier_step": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "sha256": {
+          "maxLength": 64,
+          "minLength": 64,
+          "type": "string"
+        }
+      },
+      "required": [
+        "backup_id",
+        "artifact_path",
+        "sha256",
+        "frontier_step"
+      ],
+      "type": "object"
+    }
+  },
+  "$id": "https://cairn.dev/schema/cairn.mcp.v1/verbs/admin_snapshot.input.json",
+  "$ref": "#/$defs/Args",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Cairn verb input: admin_snapshot",
+  "x-cairn-contract": "cairn.mcp.v1"
+}

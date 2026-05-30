@@ -1,0 +1,109 @@
+{
+  "$defs": {
+    "Args": {
+      "additionalProperties": false,
+      "properties": {
+        "backup_kind": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "label": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "local_machine_id": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "out_dir": {
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "out_dir",
+        "local_machine_id",
+        "backup_kind"
+      ],
+      "type": "object"
+    },
+    "Data": {
+      "additionalProperties": false,
+      "properties": {
+        "artifact_path": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "backup_id": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "frontier_step": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "sha256": {
+          "maxLength": 64,
+          "minLength": 64,
+          "type": "string"
+        }
+      },
+      "required": [
+        "backup_id",
+        "artifact_path",
+        "sha256",
+        "frontier_step"
+      ],
+      "type": "object"
+    }
+  },
+  "$id": "https://cairn.dev/schema/cairn.mcp.v1/verbs/admin_snapshot.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Cairn verb: admin_snapshot",
+  "type": "object",
+  "x-cairn-auth": "signed_chain",
+  "x-cairn-capability": "cairn.mcp.v1.extension.admin",
+  "x-cairn-cli": {
+    "command": "snapshot-v2",
+    "flags": [
+      {
+        "cli_exemplar": "/tmp/cairn-snaps",
+        "long": "out-dir",
+        "name": "out_dir",
+        "value_source": "string"
+      },
+      {
+        "long": "label",
+        "name": "label",
+        "value_source": "string"
+      },
+      {
+        "cli_exemplar": "MACHINE-A",
+        "long": "local-machine-id",
+        "name": "local_machine_id",
+        "value_source": "string"
+      },
+      {
+        "cli_exemplar": "snapshot",
+        "long": "backup-kind",
+        "name": "backup_kind",
+        "value_source": "string"
+      }
+    ]
+  },
+  "x-cairn-contract": "cairn.mcp.v1",
+  "x-cairn-extension": "cairn.admin.v1",
+  "x-cairn-skill-triggers": {
+    "exclusivity_hints": "this is the sole vault-snapshot surface for the cairn.admin.v1 extension",
+    "negative_triggers": [
+      "do NOT use to restore from a snapshot — that belongs to admin_restore",
+      "do NOT use to replay WAL steps — that belongs to admin_replay_wal"
+    ],
+    "positive_triggers": [
+      "use when the operator wants to create a point-in-time snapshot of the vault database",
+      "use when the user says 'take a snapshot', 'backup the vault', or 'create a cairn snapshot'",
+      "use before a destructive migration or restore operation"
+    ]
+  },
+  "x-cairn-verb-id": "admin_snapshot"
+}

@@ -23,6 +23,9 @@ tokio = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 memchr = { workspace = true }
+# Random secret generation for the stable host fingerprint backing the
+# cross-machine restore guard (host-derived, not vault-derived; review #6.4).
+uuid = { workspace = true }
 
 [dev-dependencies]
 cairn-test-fixtures = { workspace = true }

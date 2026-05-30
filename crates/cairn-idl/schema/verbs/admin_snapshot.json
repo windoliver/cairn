@@ -1,0 +1,56 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cairn.dev/schema/cairn.mcp.v1/verbs/admin_snapshot.json",
+  "title": "Cairn verb: admin_snapshot",
+  "x-cairn-contract": "cairn.mcp.v1",
+  "x-cairn-verb-id": "admin_snapshot",
+  "x-cairn-capability": "cairn.mcp.v1.extension.admin",
+  "x-cairn-auth": "signed_chain",
+  "x-cairn-extension": "cairn.admin.v1",
+  "x-cairn-cli": {
+    "command": "snapshot-v2",
+    "flags": [
+      { "name": "out_dir",          "long": "out-dir",         "value_source": "string",  "cli_exemplar": "/tmp/cairn-snaps" },
+      { "name": "label",            "long": "label",           "value_source": "string" },
+      { "name": "local_machine_id", "long": "local-machine-id","value_source": "string",  "cli_exemplar": "MACHINE-A" },
+      { "name": "backup_kind",      "long": "backup-kind",     "value_source": "string",  "cli_exemplar": "snapshot" }
+    ]
+  },
+  "x-cairn-skill-triggers": {
+    "positive_triggers": [
+      "use when the operator wants to create a point-in-time snapshot of the vault database",
+      "use when the user says 'take a snapshot', 'backup the vault', or 'create a cairn snapshot'",
+      "use before a destructive migration or restore operation"
+    ],
+    "negative_triggers": [
+      "do NOT use to restore from a snapshot — that belongs to admin_restore",
+      "do NOT use to replay WAL steps — that belongs to admin_replay_wal"
+    ],
+    "exclusivity_hints": "this is the sole vault-snapshot surface for the cairn.admin.v1 extension"
+  },
+  "type": "object",
+  "$defs": {
+    "Args": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["out_dir", "local_machine_id", "backup_kind"],
+      "properties": {
+        "out_dir":          { "type": "string", "minLength": 1 },
+        "label":            { "type": "string", "minLength": 1 },
+        "local_machine_id": { "type": "string", "minLength": 1 },
+        "backup_kind":      { "type": "string", "minLength": 1 }
+      }
+    },
+    "Data": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["backup_id", "artifact_path", "sha256", "frontier_step"],
+      "properties": {
+        "backup_id":     { "type": "string", "minLength": 1 },
+        "artifact_path": { "type": "string", "minLength": 1 },
+        "sha256":        { "type": "string", "minLength": 64, "maxLength": 64 },
+        "frontier_step": { "type": "string", "minLength": 1 }
+      }
+    }
+  }
+}

@@ -26,7 +26,9 @@
 //!   [`ConnectorConsentJournal`] / [`ConsentGrant`] / [`ConsentGrantId`] /
 //!   [`ConnectorConsentLookup`].
 
+pub mod admin_state;
 pub mod agent_provider;
+pub mod backfill_spawner;
 pub mod conformance;
 pub mod connector_consent;
 pub mod consent_journal;
@@ -45,6 +47,7 @@ pub mod memory_store;
 pub mod metrics;
 pub mod registry;
 pub mod sensor_ingress;
+pub mod snapshot_artifact;
 pub mod source_resolver;
 pub mod version;
 pub mod workflow_jobs;
@@ -60,6 +63,7 @@ pub use manifest::{ContractKind, PluginManifest};
 pub use registry::{PluginError, PluginName, PluginRegistry};
 pub use version::{ContractVersion, VersionRange};
 
+pub use admin_state::{AdminStateStore, ConnectorStateRow};
 pub use agent_provider::{
     AgentBudgetConsumed, AgentCostBudget, AgentIdentity, AgentOutput, AgentOutputSchema,
     AgentProvider, AgentProviderCapabilities, AgentProviderError, AgentProviderPlugin, AgentRun,
@@ -67,6 +71,7 @@ pub use agent_provider::{
     AgentToolAttempt, AgentToolCall, AgentToolPolicyOutcome, AgentWallClockBudget, CairnVerb,
     evaluate_tool_policy, validate_output,
 };
+pub use backfill_spawner::{BackfillSpawner, BackfillSpec};
 pub use connector_consent::{
     ConnectorConsentJournal, ConnectorConsentLookup, ConsentGrant, ConsentGrantId,
 };
@@ -101,6 +106,10 @@ pub use mcp_server::{MCPServer, MCPServerCapabilities, MCPServerPlugin};
 pub use memory_store::{MemoryStore, MemoryStoreCapabilities, MemoryStorePlugin};
 pub use metrics::{CapturingMetricsSink, MetricsError, MetricsSink, NoopMetricsSink};
 pub use sensor_ingress::{SensorIngress, SensorIngressCapabilities, SensorIngressPlugin};
+pub use snapshot_artifact::{
+    BackupRegistry, ConsentLog, MaterializedArtifact, SnapshotApplier, SnapshotArtifactProducer,
+    SnapshotArtifactReader, SnapshotMetadataProvider,
+};
 pub use source_resolver::{SourceResolver, SourceResolverError};
 pub use workflow_jobs::{DeadLetterRow, WorkflowJobsReader};
 pub use workflow_orchestrator::{
