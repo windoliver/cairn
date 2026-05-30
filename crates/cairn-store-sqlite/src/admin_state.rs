@@ -4,7 +4,7 @@
 //! - `admin_roles` — operator role grants/revocations (migration 0003).
 //! - `connector_state` — connector enable/disable state (migration 0004).
 //!
-//! Follows the same pattern as [`crate::identity`]: owns its own
+//! Follows the same pattern as the `identity` store: owns its own
 //! `parking_lot::Mutex<rusqlite::Connection>`, applies its migrations at open
 //! time via `include_str!`, and exposes sync constructors (`open_in_memory`,
 //! `open`).

@@ -54,14 +54,12 @@ impl SnapshotArtifactReader for SqliteSnapshotReader {
     ///     tar order, including `manifest.json` and `cairn.db`).
     ///
     /// This mirrors the accumulation order used in
-    /// [`SqliteSnapshotProducer::materialize`], so the hashes are
+    /// `SqliteSnapshotProducer::materialize`, so the hashes are
     /// byte-identical to what the producer recorded.
     ///
     /// # Errors
     /// Returns `StoreError` if the file cannot be opened, the tarball is
     /// malformed, or `manifest.json` is absent.
-    ///
-    /// [`SqliteSnapshotProducer::materialize`]: super::producer::SqliteSnapshotProducer::materialize
     fn read_envelope(&self, artifact_path: &Path) -> Result<IntegrityEnvelope, StoreError> {
         let file = std::fs::File::open(artifact_path).map_err(|e| Box::new(e) as StoreError)?;
         let mut archive = tar::Archive::new(file);

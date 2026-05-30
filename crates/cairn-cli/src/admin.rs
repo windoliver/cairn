@@ -16,7 +16,7 @@ use std::path::Path;
 use anyhow::{Context as _, Result};
 
 /// Open the main async store on its own short-lived tokio runtime so
-/// every migration in the chain is applied. The returned [`Ok(())`]
+/// every migration in the chain is applied. A returned `Ok(())`
 /// guarantees that on the next sync [`cairn_store_sqlite::SqliteAdminStateStore::open`]
 /// the admin tables exist AND `schema_migrations` already has rows 70 / 71.
 ///
