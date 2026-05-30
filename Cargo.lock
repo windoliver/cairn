@@ -1062,6 +1062,7 @@ dependencies = [
  "cairn-test-fixtures",
  "chrono",
  "ed25519-dalek",
+ "fs2",
  "indexmap",
  "insta",
  "parking_lot",

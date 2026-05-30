@@ -413,6 +413,21 @@ fn dispatch_restore(args_value: serde_json::Value, vault_root: &Path) -> CallToo
         local_machine_id: machine_id,
     };
 
+    // Hold the vault write gate EXCLUSIVE across the entire restore (frontier
+    // capture → purge → swap). Concurrent forgets take the gate SHARED, so this
+    // quiesces them for the duration — no forget can commit into the DB that
+    // swap_in is about to discard (round-7 review #2). Held until end of fn.
+    let _write_gate =
+        match cairn_store_sqlite::lock_exclusive(&cairn_store_sqlite::gate_path(vault_root)) {
+            Ok(g) => g,
+            Err(e) => {
+                return aborted_internal_admin(
+                    ResponseVerb::AdminRestore,
+                    &format!("acquire vault write gate: {e}"),
+                );
+            }
+        };
+
     match cairn_core::verbs::admin::restore::run(
         &ctx, &req, &admin, &meta, &reader, &applier, &consent, &registry,
     ) {

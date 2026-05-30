@@ -33,10 +33,29 @@ pub struct ConnectorStateResponse {
     pub row: ConnectorStateRow,
 }
 
+/// Sanity-check a connector name before writing `connector_state`.
+///
+/// This rejects empty/whitespace names. It does NOT (and cannot here) verify
+/// that `name` is a *registered* connector — catching a typo of a real
+/// connector name (the reviewer's "disable gihub silently succeeds" concern,
+/// round-7 review #4) requires the live `ConnectorRegistry`, which the verb
+/// layer does not hold and which is not yet wired into the CLI/MCP admin path
+/// (connectors are not productionized). Registry-backed validation is a
+/// follow-up; tracked in the PR description.
+fn validate_connector_name(name: &str) -> Result<(), AdminError> {
+    if name.trim().is_empty() {
+        return Err(AdminError::UnknownConnector {
+            name: format!("{name:?} (empty or whitespace)"),
+        });
+    }
+    Ok(())
+}
+
 /// Mark `name` as enabled in the connector state table.
 ///
 /// # Errors
 /// - `AdminError::NotAuthorized` — caller lacks operator role.
+/// - `AdminError::UnknownConnector` — `name` is empty/whitespace.
 /// - `AdminError::Store(_)` — admin store write failure.
 pub fn enable(
     ctx: &AdminContext,
@@ -44,6 +63,7 @@ pub fn enable(
     admin: &dyn AdminStateStore,
 ) -> Result<ConnectorStateResponse, AdminError> {
     super::guard::require_role(ctx, admin, AdminRole::Operator)?;
+    validate_connector_name(&req.name)?;
     let row = admin
         .set_connector_enabled(&req.name, true, &ctx.actor, None)
         .map_err(AdminError::Store)?;
@@ -61,6 +81,7 @@ pub fn disable(
     admin: &dyn AdminStateStore,
 ) -> Result<ConnectorStateResponse, AdminError> {
     super::guard::require_role(ctx, admin, AdminRole::Operator)?;
+    validate_connector_name(&req.name)?;
     let row = admin
         .set_connector_enabled(&req.name, false, &ctx.actor, req.reason.as_deref())
         .map_err(AdminError::Store)?;
@@ -207,6 +228,41 @@ mod tests {
         )
         .unwrap_err();
         assert!(matches!(err, AdminError::NotAuthorized { .. }));
+    }
+
+    #[test]
+    fn enable_and_disable_reject_empty_connector_name() {
+        // Round-7 review #4: an empty/whitespace name is rejected before any
+        // connector_state write (so it cannot silently "succeed").
+        let admin = StubAdmin::new(true);
+        let err = enable(
+            &op_ctx(),
+            &ConnectorEnableRequest { name: "   ".into() },
+            &admin,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, AdminError::UnknownConnector { .. }),
+            "expected UnknownConnector for empty enable name, got {err:?}"
+        );
+        assert!(
+            admin.last_set.lock().expect("test mutex").is_none(),
+            "no connector_state write on an invalid name"
+        );
+
+        let err = disable(
+            &op_ctx(),
+            &ConnectorDisableRequest {
+                name: String::new(),
+                reason: None,
+            },
+            &admin,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, AdminError::UnknownConnector { .. }),
+            "expected UnknownConnector for empty disable name, got {err:?}"
+        );
     }
 }
 

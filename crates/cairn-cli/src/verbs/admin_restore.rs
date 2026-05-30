@@ -47,6 +47,15 @@ pub fn run(sub: &ArgMatches, vault_root: &Path) -> ExitCode {
                 // live consent journal.
                 use cairn_core::contract::snapshot_artifact::ConsentLog as _;
                 use cairn_store_sqlite::SqliteConsentLog;
+
+                // Hold the vault write gate EXCLUSIVE across capture→copy→purge.
+                // Concurrent forgets take it SHARED, so this quiesces them for
+                // the duration — a forget cannot be lost when the copy
+                // overwrites the live db (round-7 review #3). Released at the
+                // end of this closure.
+                let _write_gate =
+                    cairn_store_sqlite::lock_exclusive(&cairn_store_sqlite::gate_path(vault_root))
+                        .map_err(|e| anyhow::anyhow!("acquire vault write gate: {e}"))?;
                 let live_db = vault_root.join(".cairn").join("cairn.db");
                 let restored_db = into.join(".cairn").join("cairn.db");
                 let consent = SqliteConsentLog::new(live_db);

@@ -30,6 +30,9 @@ tar = { workspace = true }
 # Runtime temp dir for the snapshot producer's WAL-safe `VACUUM INTO`
 # destination (admin/producer.rs). Not test-only.
 tempfile = { workspace = true }
+# Advisory cross-process file lock for the vault write gate (write_gate.rs):
+# restore takes it exclusive, forget takes it shared (review #6.2).
+fs2 = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["time", "rt"] }
 tokio-util = { workspace = true }

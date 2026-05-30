@@ -43,6 +43,8 @@ pub use trace_canvas::{
 };
 pub use trace_window::ConsolidationBacklogEntry;
 pub mod vec_ext;
+pub mod write_gate;
+pub use write_gate::{WriteGateGuard, gate_path, lock_exclusive, lock_shared};
 mod verify;
 pub mod wal;
 pub mod workflow_jobs_reader;
