@@ -1,0 +1,32 @@
+{
+  "schema": "cairn-pack/v1",
+  "pack_id": "{{pack_id}}",
+  "name": "{{pack_id}}",
+  "version": "{{version}}",
+  "harness": "{{harness}}",
+  "cairn_mcp_compat": ">=1.0.0",
+  "description": "Starter Cairn skill-pack for {{display_name}}.",
+  "requires_capabilities": [
+    "cairn.mcp.v1.search.keyword",
+    "cairn.mcp.v1.retrieve.record"
+  ],
+  "subagents": [
+    {
+      "id": "{{subagent_id}}",
+      "path": "agents/{{subagent_id}}.md",
+      "uses_mcp_tools": ["assemble_hot", "retrieve", "search"]
+    }
+  ],
+  "commands": [
+    {
+      "id": "{{command_id}}",
+      "path": "commands/{{command_id}}.md",
+      "kind": "verb-direct",
+      "verb": "assemble_hot"
+    }
+  ],
+  "hooks": {
+    "SessionStart": { "command": "cairn hook SessionStart" }
+  },
+  "manual_fragment": "{{manual_fragment}}"
+}

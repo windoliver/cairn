@@ -959,6 +959,7 @@ async fn assemble_hot_replay(store: &SqliteMemoryStore) -> Result<Value, ReplayE
         pinned_candidates: &pinned,
         project_candidates: &projects,
         playbook_candidates: &playbooks,
+        skill_graph_snapshot: None,
         rolling_summary_candidates: &summaries,
         user_signal_candidates: &user_signals,
         now,

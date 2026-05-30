@@ -58,12 +58,16 @@ impl WebhookRequest {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SignatureId(pub String);
 
-/// Verify an HMAC-SHA256 signature whose hex form is carried in `header`.
+/// Verify an HMAC-SHA256 signature whose hex form is carried in `header`,
+/// optionally stripping a well-known `prefix` before hex-decoding.
 ///
-/// All four rejection paths (missing header, bad hex, MAC keying failure,
-/// MAC mismatch) return [`ConnectorError::SignatureMismatch`] — the caller
-/// learns only that verification failed, never *why*, so timing and error
-/// messages cannot assist an attacker.
+/// This is the low-level workhorse called by both [`verify_hmac_sha256`] (no
+/// prefix) and connectors that need prefix stripping (e.g. GitHub's
+/// `sha256=<hex>` format).
+///
+/// All rejection paths return [`ConnectorError::SignatureMismatch`] — the
+/// caller learns only that verification failed, never *why*, so timing and
+/// error messages cannot assist an attacker.
 ///
 /// The MAC comparison uses [`subtle::ConstantTimeEq`] to prevent
 /// timing-side-channel leaks.
@@ -71,15 +75,22 @@ pub struct SignatureId(pub String);
 /// # Errors
 ///
 /// Returns [`ConnectorError::SignatureMismatch`] if the signature is absent,
-/// unparseable, or does not match.
-pub fn verify_hmac_sha256(
+/// unparseable after prefix removal, or does not match.
+pub fn verify_hmac_sha256_prefixed(
     req: &WebhookRequest,
     header: &str,
+    prefix: &str,
     secret: &[u8],
 ) -> Result<SignatureId, ConnectorError> {
     // Rejection path 1: missing header.
-    let sig_hex = req
+    let raw = req
         .header(header)
+        .ok_or(ConnectorError::SignatureMismatch)?;
+
+    // Strip the declared prefix (e.g. "sha256=") before hex-decoding.
+    // If the prefix is empty this is a no-op.
+    let sig_hex = raw
+        .strip_prefix(prefix)
         .ok_or(ConnectorError::SignatureMismatch)?;
 
     // Rejection path 2: bad hex.
@@ -121,6 +132,29 @@ pub fn verify_hmac_sha256(
     } else {
         Err(ConnectorError::SignatureMismatch)
     }
+}
+
+/// Verify an HMAC-SHA256 signature whose hex form is carried in `header`.
+///
+/// All four rejection paths (missing header, bad hex, MAC keying failure,
+/// MAC mismatch) return [`ConnectorError::SignatureMismatch`] — the caller
+/// learns only that verification failed, never *why*, so timing and error
+/// messages cannot assist an attacker.
+///
+/// The MAC comparison uses [`subtle::ConstantTimeEq`] to prevent
+/// timing-side-channel leaks.
+///
+/// # Errors
+///
+/// Returns [`ConnectorError::SignatureMismatch`] if the signature is absent,
+/// unparseable, or does not match.
+pub fn verify_hmac_sha256(
+    req: &WebhookRequest,
+    header: &str,
+    secret: &[u8],
+) -> Result<SignatureId, ConnectorError> {
+    // Delegate to the prefixed variant with an empty prefix (no stripping).
+    verify_hmac_sha256_prefixed(req, header, "", secret)
 }
 
 /// Produce the canonical HMAC-SHA256 hex signature for `body` under `secret`.
@@ -242,5 +276,49 @@ mod tests {
         // Since `hex_hmac_sha256` already returns lowercase hex, `expected_hex`
         // equals the canonical form — so the assertion holds after the Finding Y fix.
         assert_eq!(id, expected_hex);
+    }
+
+    /// GitHub sends `X-Hub-Signature-256: sha256=<hex>`.
+    /// Verifying with `signature_prefix = "sha256="` must accept this format.
+    #[test]
+    fn verifies_prefixed_signature_sha256_format() {
+        let secret = b"github-secret";
+        let body = b"{\"event\":\"push\"}";
+        let hex = hex_hmac_sha256(secret, body);
+        let header_value = format!("sha256={hex}");
+        let req = WebhookRequest {
+            connector: "github".into(),
+            body: body.to_vec(),
+            headers: vec![("X-Hub-Signature-256".into(), header_value)],
+        };
+        // Must verify when the correct prefix is supplied.
+        let res = verify_hmac_sha256_prefixed(&req, "X-Hub-Signature-256", "sha256=", secret);
+        assert!(res.is_ok(), "expected Ok but got {res:?}");
+        // Must REJECT the same header when no prefix is expected (because the
+        // hex decoder would see "sha256=…" which is not valid hex).
+        let res_no_prefix = verify_hmac_sha256(&req, "X-Hub-Signature-256", secret);
+        assert!(
+            matches!(res_no_prefix, Err(crate::ConnectorError::SignatureMismatch)),
+            "expected SignatureMismatch without prefix stripping, got {res_no_prefix:?}"
+        );
+    }
+
+    /// A header without the declared prefix must be rejected.
+    #[test]
+    fn rejects_missing_prefix() {
+        let secret = b"s";
+        let body = b"{}";
+        let hex = hex_hmac_sha256(secret, body);
+        // Header has no "sha256=" prefix — must be rejected when prefix is declared.
+        let req = WebhookRequest {
+            connector: "fixture".into(),
+            body: body.to_vec(),
+            headers: vec![("X-Sig".into(), hex)],
+        };
+        let res = verify_hmac_sha256_prefixed(&req, "X-Sig", "sha256=", secret);
+        assert!(
+            matches!(res, Err(crate::ConnectorError::SignatureMismatch)),
+            "expected SignatureMismatch, got {res:?}"
+        );
     }
 }

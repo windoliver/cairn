@@ -5,6 +5,9 @@ use cairn_core::contract::conformance::{
     CaseOutcome, CaseStatus, Tier, run_conformance_for_plugin,
 };
 use cairn_core::contract::registry::PluginRegistry;
+use std::path::Path;
+
+use crate::packs::source::{FsPackSource, PackSource};
 
 /// Aggregated outcome of a verify run.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -121,7 +124,88 @@ pub fn run(registry: &PluginRegistry) -> VerifyReport {
         });
     }
 
+    // Pack conformance: run the bundled pack-verify suite and surface each
+    // pack as a synthetic PluginReport with contract="pack".  This keeps
+    // VerifyReport's shape stable while making `cairn plugins verify`
+    // exercise the full pack install pipeline.
+    for pack_id in crate::packs::verify::bundled_pack_ids() {
+        let pack_outcomes = crate::packs::verify::run_pack_conformance(pack_id);
+        let mut pack_report = report_from_pack_outcomes(pack_id.to_string(), pack_outcomes);
+        summary.ok += pack_report.summary.ok;
+        summary.pending += pack_report.summary.pending;
+        summary.failed += pack_report.summary.failed;
+        plugins.append(&mut pack_report.plugins);
+    }
+
     VerifyReport { plugins, summary }
+}
+
+/// Verify an external cairn-pack/v1 directory as a single synthetic plugin report.
+#[must_use]
+pub fn run_pack_path(path: &Path) -> VerifyReport {
+    let outcomes = crate::packs::verify::run_pack_path_conformance(path);
+    report_from_pack_outcomes(pack_name_from_path(path), outcomes)
+}
+
+/// Best-effort pack name extraction for user-facing reports.
+#[must_use]
+pub fn pack_name_from_path(path: &Path) -> String {
+    let source = FsPackSource::new(path.to_path_buf());
+    source
+        .read_file("pack.json")
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+        .and_then(|json| {
+            json.get("pack_id")
+                .and_then(serde_json::Value::as_str)
+                .or_else(|| json.get("name").and_then(serde_json::Value::as_str))
+                .map(ToOwned::to_owned)
+        })
+        .or_else(|| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .map(ToOwned::to_owned)
+        })
+        .unwrap_or_else(|| path.display().to_string())
+}
+
+/// Convert pack verifier outcomes into the stable `plugins verify` report shape.
+#[must_use]
+pub fn report_from_pack_outcomes(
+    name: String,
+    outcomes: Vec<crate::packs::verify::CaseOutcome>,
+) -> VerifyReport {
+    let mut summary = Summary::default();
+    let mut cases = Vec::with_capacity(outcomes.len());
+    for o in outcomes {
+        let tier = match o.tier {
+            crate::packs::verify::Tier::One => Tier::One,
+            crate::packs::verify::Tier::Two | crate::packs::verify::Tier::Three => Tier::Two,
+        };
+        let status = match o.status {
+            Ok(()) => {
+                summary.ok += 1;
+                CaseStatus::Ok
+            }
+            Err(reason) => {
+                summary.failed += 1;
+                CaseStatus::Failed { message: reason }
+            }
+        };
+        cases.push(CaseOutcome {
+            id: o.id,
+            tier,
+            status,
+        });
+    }
+    VerifyReport {
+        plugins: vec![PluginReport {
+            name,
+            contract: "pack".to_string(),
+            cases,
+        }],
+        summary,
+    }
 }
 
 /// Exit code for the given report under the requested strictness.
@@ -230,16 +314,29 @@ mod tests {
     use crate::plugins::host::register_all_for_verify;
 
     #[test]
-    fn run_reports_eight_plugins() {
+    fn run_reports_eight_plugins_plus_pack() {
         let reg = register_all_for_verify().expect("registers");
         let report = run(&reg);
-        assert_eq!(report.plugins.len(), 8);
+        // 8 bundled plugins + 1 synthetic "cairn-claude-code" pack report.
+        assert_eq!(report.plugins.len(), 9);
         assert_eq!(report.summary.failed, 0, "no failures expected");
         // 8 plugins × 4 tier-1 cases (manifest_matches_host,
         // arc_pointer_stable, capability_self_consistency_floor,
-        // manifest_features_match_capabilities) = 32 ok minimum.
+        // manifest_features_match_capabilities) = 32 ok minimum, plus
+        // pack conformance cases (all ok).
         assert!(report.summary.ok >= 32);
         assert!(report.summary.pending >= 4, "tier-2 stubs are pending");
+        // Pack report is present and clean.
+        let pack = report
+            .plugins
+            .iter()
+            .find(|p| p.name == "cairn-claude-code")
+            .expect("pack report present");
+        assert_eq!(pack.contract, "pack");
+        assert!(
+            pack.cases.iter().all(|c| c.status == CaseStatus::Ok),
+            "all pack conformance cases must pass"
+        );
     }
 
     #[test]
@@ -277,7 +374,12 @@ mod tests {
     fn empty_registry_fails_closed() {
         let reg = cairn_core::contract::registry::PluginRegistry::new();
         let report = run(&reg);
-        assert_eq!(report.plugins.len(), 1, "synthetic registry-empty plugin");
+        // 1 synthetic registry-empty plugin + 1 pack report (all-ok cases).
+        assert_eq!(
+            report.plugins.len(),
+            2,
+            "synthetic registry-empty plugin + pack"
+        );
         assert!(report.summary.failed >= 1);
         assert_eq!(exit_code(&report, false), 69);
         assert_eq!(exit_code(&report, true), 69);
@@ -367,9 +469,14 @@ mod tests {
             .expect("registers");
 
         let report = run(&reg);
-        assert_eq!(report.plugins.len(), 1);
-        assert_eq!(report.plugins[0].name, "bare-store");
-        let case = &report.plugins[0].cases[0];
+        // 1 typed-registration-without-manifest plugin + 1 pack report.
+        assert_eq!(report.plugins.len(), 2);
+        let bare = report
+            .plugins
+            .iter()
+            .find(|p| p.name == "bare-store")
+            .expect("bare-store plugin present");
+        let case = &bare.cases[0];
         assert_eq!(case.id, "manifest_present_for_typed_registration");
         assert!(matches!(case.status, CaseStatus::Failed { .. }));
         assert_eq!(exit_code(&report, false), 69);
@@ -537,7 +644,8 @@ patch = 0
         let report = run(&reg);
         let json = render_json(&report);
         let v: serde_json::Value = serde_json::from_str(&json).expect("valid json");
-        assert_eq!(v["plugins"].as_array().unwrap().len(), 8);
+        // 8 bundled plugins + 1 synthetic pack report.
+        assert_eq!(v["plugins"].as_array().unwrap().len(), 9);
         assert_eq!(v["summary"]["failed"], 0);
     }
 }

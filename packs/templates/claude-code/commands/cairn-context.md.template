@@ -1,0 +1,9 @@
+# /{{command_id}}
+
+Run:
+
+```bash
+cairn assemble_hot --json
+```
+
+Return the JSON envelope unchanged.

@@ -99,6 +99,16 @@ pub struct ScoreExplain {
     pub rrf_score: f64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub semantic_rank: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skill_graph: Option<SkillGraphExplain>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SkillGraphExplain {
+    pub diagnostics: Vec<String>,
+    pub prerequisites: Vec<String>,
+    pub skill_id: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]

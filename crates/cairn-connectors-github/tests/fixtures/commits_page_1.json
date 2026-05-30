@@ -1,0 +1,22 @@
+[
+  {
+    "sha": "aaa111",
+    "commit": {
+      "author": {"name": "Alice", "email": "alice@example.com", "date": "2026-05-24T08:00:00Z"},
+      "committer": {"name": "Alice", "email": "alice@example.com", "date": "2026-05-24T08:00:00Z"},
+      "message": "feat: add thing"
+    },
+    "author": {"login": "alice"},
+    "html_url": "https://github.com/o/r/commit/aaa111"
+  },
+  {
+    "sha": "bbb222",
+    "commit": {
+      "author": {"name": "Bob", "email": "bob@example.com", "date": "2026-05-24T09:00:00Z"},
+      "committer": {"name": "Bob", "email": "bob@example.com", "date": "2026-05-24T09:00:00Z"},
+      "message": "fix: bug"
+    },
+    "author": {"login": "bob"},
+    "html_url": "https://github.com/o/r/commit/bbb222"
+  }
+]

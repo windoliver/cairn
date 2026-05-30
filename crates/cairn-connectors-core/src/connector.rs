@@ -58,12 +58,49 @@ pub struct PollContext {
     pub cancel: tokio_util::sync::CancellationToken,
 }
 
+impl PollContext {
+    /// Construct a [`PollContext`].
+    ///
+    /// `#[non_exhaustive]` blocks struct-literal construction from outside the
+    /// substrate crate. Adapter integration tests use this constructor instead.
+    #[must_use]
+    pub fn new(
+        credentials: Arc<CredentialHandle>,
+        last_cursor: Option<String>,
+        budget_remaining_items: u32,
+        cancel: tokio_util::sync::CancellationToken,
+    ) -> Self {
+        Self {
+            credentials,
+            last_cursor,
+            budget_remaining_items,
+            cancel,
+        }
+    }
+}
+
 /// Per-call context handed to [`Connector::ingest_webhook`].
+#[non_exhaustive]
 pub struct WebhookContext {
     /// Credentials for the connector's OAuth scope (placeholder until T9).
     pub credentials: Arc<CredentialHandle>,
     /// How many items remain in the per-scope budget for this call.
     pub budget_remaining_items: u32,
+}
+
+impl WebhookContext {
+    /// Construct a [`WebhookContext`].
+    ///
+    /// Provided for consistency with [`PollContext::new`]; adapter integration
+    /// tests that need to construct contexts from outside the substrate crate
+    /// should use this constructor.
+    #[must_use]
+    pub fn new(credentials: Arc<CredentialHandle>, budget_remaining_items: u32) -> Self {
+        Self {
+            credentials,
+            budget_remaining_items,
+        }
+    }
 }
 
 /// Result of one [`Connector::poll`] invocation.

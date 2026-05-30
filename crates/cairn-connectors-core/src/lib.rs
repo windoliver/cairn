@@ -48,3 +48,8 @@ pub use rate_limit::{ByteRateLimit, RateLimit};
 pub use redact::{Redacted, RedactionPipeline};
 pub use registry::ConnectorRegistry;
 pub use webhook::{WebhookRequest, WebhookRouter};
+
+// Re-export commonly-used cairn-core types so adapter crates don't need
+// a direct cairn-core dependency.
+pub use cairn_core::contract::version::{ContractVersion, VersionRange};
+pub use cairn_core::domain::Identity;

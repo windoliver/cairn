@@ -21,6 +21,9 @@ frontend/**/dist/
 # trees from running the CLI / tests inside the workspace; ignore them
 # all to keep DB/WAL/SHM artifacts out of commits.
 .cairn/
+# Exception: fixture vaults under packs/ need their .cairn/ trees tracked.
+!packs/**/fixtures/**/.cairn/
+!packs/**/fixtures/**/.cairn/**
 
 # Vault scaffold artifacts that the CLI drops into CWD when run outside
 # a real vault (e.g. test runs that resolve CWD as the vault root).

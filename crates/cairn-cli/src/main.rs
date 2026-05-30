@@ -149,6 +149,7 @@ fn subcommand_needs_vault_guard(subcommand: Option<(&str, &ArgMatches)>) -> bool
             | "screen"
             | "sensor"
             | "repair"
+            | "skill"
             | "skillpack"
     )
 }
@@ -1213,6 +1214,7 @@ fn run_bootstrap(matches: &ArgMatches) -> ExitCode {
 fn run_skill(matches: &ArgMatches) -> ExitCode {
     match matches.subcommand() {
         Some(("install", sub)) => run_skill_install(sub),
+        Some(("new", sub)) => run_skill_new(sub),
         _ => unreachable!(
             "clap subcommand_required(true) on skill ensures a subcommand is always present"
         ),
@@ -1666,6 +1668,45 @@ fn run_skill_install(matches: &ArgMatches) -> ExitCode {
     }
 }
 
+fn run_skill_new(matches: &ArgMatches) -> ExitCode {
+    let name = matches
+        .get_one::<String>("name")
+        .expect("invariant: skill new requires NAME")
+        .clone();
+    let scaffold_harness = matches
+        .get_one::<cairn_cli::skill::ScaffoldHarness>("harness")
+        .expect("invariant: skill new requires --harness");
+    let harness = scaffold_harness.into_pack_harness();
+    let output_dir = matches
+        .get_one::<PathBuf>("output")
+        .cloned()
+        .unwrap_or_else(|| PathBuf::from(&name));
+    let opts = cairn_cli::packs::template::ScaffoldOpts {
+        name,
+        harness,
+        output_dir,
+    };
+
+    match cairn_cli::skill::scaffold(&opts) {
+        Ok(receipt) => {
+            if matches.get_flag("json") {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&receipt)
+                        .expect("invariant: ScaffoldReceipt is always serializable")
+                );
+            } else {
+                println!("{}", cairn_cli::skill::render_scaffold_human(&receipt));
+            }
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("cairn skill new: {e:#}");
+            ExitCode::from(74)
+        }
+    }
+}
+
 fn agent_default_harness(agent: cairn_cli::skill::Agent) -> cairn_cli::skill::Harness {
     match agent {
         cairn_cli::skill::Agent::ClaudeCode => cairn_cli::skill::Harness::ClaudeCode,
@@ -1676,6 +1717,22 @@ fn agent_default_harness(agent: cairn_cli::skill::Agent) -> cairn_cli::skill::Ha
 }
 
 fn run_plugins(matches: &ArgMatches) -> ExitCode {
+    if let Some(("verify", sub)) = matches.subcommand()
+        && let Some(path) = sub.get_one::<std::path::PathBuf>("pack-path")
+    {
+        let strict = sub.get_flag("strict");
+        let json = sub.get_flag("json");
+        let report = plugins::verify::run_pack_path(path);
+        let text = if json {
+            plugins::verify::render_json(&report)
+        } else {
+            plugins::verify::render_human(&report)
+        };
+        let mut stdout = std::io::stdout().lock();
+        let _ = writeln!(stdout, "{}", text.trim_end_matches('\n'));
+        return ExitCode::from(plugins::verify::exit_code(&report, strict));
+    }
+
     let registry_result = if matches.subcommand_name() == Some("verify") {
         plugins::host::register_all_for_verify()
     } else {

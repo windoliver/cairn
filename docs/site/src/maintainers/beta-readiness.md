@@ -14,7 +14,11 @@ scripts/beta-readiness.sh --quick
 scripts/beta-readiness.sh --full
 ```
 
-The script honors `CAIRN_BIN`, `CARGO_TARGET_DIR`, and `RUST_LOG`. Gates 9-15
+For v1.0 GA, beta readiness is a prerequisite, not the final sign-off. Use the
+[v1.0 production readiness](v1-production-readiness.md) runbook for the
+three-harness acceptance matrix and release evidence block.
+
+The script honors `CAIRN_BIN`, `CARGO_TARGET_DIR`, and `RUST_LOG`. Gates 9-16
 are manual and listed at the end of the script output.
 
 ## Gate categories
@@ -193,7 +197,32 @@ issue and follow the procedure in
 See [ADR 0004](../../../design/decisions/0004-mcp-v1-semver-freeze.md)
 for the authoritative freeze rules.
 
-### 11. Migration guide review (manual)
+### 11. Release channel policy frozen (manual)
+
+Verify the release-channel policy ADR is present and accepted, and
+the brief subsection points at it.
+
+```bash
+test -f docs/design/decisions/0005-release-channels.md && \
+  grep -q '^- \*\*Status:\*\* Accepted' docs/design/decisions/0005-release-channels.md && \
+  grep -q '^## 16\.b Release Channels and Updates' docs/design/design-brief.md && \
+  echo "ok: release channel policy frozen"
+```
+
+**Pass:** prints `ok: release channel policy frozen` and exits 0.
+**Failure:** ADR file missing, ADR status is not `Accepted`, or brief
+§16.b anchor is missing. Authoring drift; fix the missing piece.
+
+At v1.0 cutover also confirm the per-channel signing secrets are
+loaded into CI (Apple Developer ID, Authenticode EV cert, GPG
+keyring, Cosign OIDC permission). The implementation issue under
+parent epic #32 owns the secret-loading workflow; this gate only
+verifies the policy doc is in place.
+
+See [ADR 0005](../../../design/decisions/0005-release-channels.md)
+for the authoritative channel + signing + privacy rules.
+
+### 12. Migration guide review (manual)
 
 Open the per-pair migration guide for the target phase
 ([usage/migration/](../usage/migration/index.md)). Verify all seven sections
@@ -206,7 +235,7 @@ the runtime now advertises.
 **Failure:** a capability advertised by `cairn status` has no migration
 content. Fill the section.
 
-### 12. Known limitations (manual)
+### 13. Known limitations (manual)
 
 Review [status.md](../status.md) "Stubbed or pending" against the current
 capability matrix. Anything still stubbed must be either:
@@ -214,7 +243,7 @@ capability matrix. Anything still stubbed must be either:
 - removed from the stubbed list (because it now ships), or
 - explicitly called out in the release notes as a known limitation.
 
-### 13. Cassette replay (manual)
+### 14. Cassette replay (manual)
 
 ```bash
 cargo run -p cairn-bench --release --locked -- coherence run --gate beta
@@ -223,7 +252,7 @@ cargo run -p cairn-bench --release --locked -- coherence run --gate beta
 **Pass:** all replay cassettes from #136 pass under the beta gate; all five
 coherence metrics (per #137) meet their floors.
 
-### 14. Privacy posture (manual)
+### 15. Privacy posture (manual)
 
 Exercise the consent + forget round-trip on a real session:
 
@@ -237,7 +266,7 @@ cairn search "test memory" --json | jq '.hits | length'   # 0
 Spot-check `.cairn/consent.log` for the `delete` entry. Verify the presidio
 scrub pass redacts at least one PII pattern in a known-PII fixture.
 
-### 15. Release notes draft (manual)
+### 16. Release notes draft (manual)
 
 Populate the per-phase release notes template. Cross-link every capability
 delta to the matching row in the [migration guide](../usage/migration/index.md).
@@ -277,11 +306,12 @@ Copy this block into the release issue:
 - [ ] Gate 8: package dry-run
 - [ ] Gate 9: capability sync (manual)
 - [ ] Gate 10: contract freeze verified (manual)
-- [ ] Gate 11: migration guide review (manual)
-- [ ] Gate 12: known limitations (manual)
-- [ ] Gate 13: cassette replay (manual)
-- [ ] Gate 14: privacy posture (manual)
-- [ ] Gate 15: release notes draft (manual)
+- [ ] Gate 11: release channel policy frozen (manual)
+- [ ] Gate 12: migration guide review (manual)
+- [ ] Gate 13: known limitations (manual)
+- [ ] Gate 14: cassette replay (manual)
+- [ ] Gate 15: privacy posture (manual)
+- [ ] Gate 16: release notes draft (manual)
 
 Reviewed by: <maintainer>
 Date: <YYYY-MM-DD>

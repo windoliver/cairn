@@ -4,6 +4,7 @@
     reason = "CLI helpers return complete response envelopes for direct JSON emission"
 )]
 
+use std::collections::BTreeSet;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -40,6 +41,7 @@ const DEFAULT_TENANT: &str = "default";
 const ASSEMBLE_ENTITY: &str = "ingest";
 const TRACE_CANVAS_DEFAULT_BUDGET_NUMERATOR: u64 = 1;
 const TRACE_CANVAS_DEFAULT_BUDGET_DENOMINATOR: u64 = 5;
+const PLAYBOOK_GRAPH_PAGE_LIMIT: usize = 1000;
 
 /// In-process fallback cache used when `SqliteHotPrefixCache::open`
 /// fails (e.g., transient `SQLite` error during runtime). Always misses
@@ -475,14 +477,28 @@ async fn load_hot_bodies(
                 if remaining == 0 {
                     String::new()
                 } else {
-                    let mut records =
-                        load_records_for_kinds(store, &[MemoryKind::Playbook], auth, None, 16)
-                            .await?
-                            .records;
-                    records.sort_by(|a, b| b.updated_at.as_str().cmp(a.updated_at.as_str()));
-                    records.truncate(1);
-                    loaded_records.extend(records.iter().map(LoadedRecordTrace::from));
-                    render_records_section("Active Playbook", &records, remaining)
+                    let records = load_playbook_records_for_graph(store, auth).await?;
+                    let skill_graph_snapshot = active_playbook_skill_snapshot(vault_root);
+                    let auth_vis = effective_explain_visibility(auth);
+                    let segment = select_active_playbook_segment(
+                        &records,
+                        auth.scope.clone(),
+                        &auth_vis,
+                        remaining,
+                        skill_graph_snapshot.as_ref(),
+                    );
+                    loaded_records.extend(
+                        records
+                            .iter()
+                            .filter(|record| {
+                                segment
+                                    .included
+                                    .iter()
+                                    .any(|trace| trace.record_id == record.id)
+                            })
+                            .map(LoadedRecordTrace::from),
+                    );
+                    segment.body
                 }
             }
             HotMemoryRecipeStep::RecentUserSignal => {
@@ -594,9 +610,8 @@ async fn build_explain_debug(
     let project_records = load_records_for_kinds(store, &[MemoryKind::Project], auth, None, 64)
         .await?
         .records;
-    let playbook_records = load_records_for_kinds(store, &[MemoryKind::Playbook], auth, None, 64)
-        .await?
-        .records;
+    let playbook_records = load_playbook_records_for_graph(store, auth).await?;
+    let skill_graph_snapshot = active_playbook_skill_snapshot(vault_root);
     let signal_records =
         load_records_for_kinds(store, &[MemoryKind::UserSignal], auth, session_id, 64)
             .await?
@@ -660,6 +675,7 @@ async fn build_explain_debug(
         now,
         scope: auth.scope.clone(),
         authorized_visibility: &auth_vis,
+        skill_graph_snapshot: skill_graph_snapshot.as_ref(),
         include_debug: true,
     };
 
@@ -855,6 +871,63 @@ async fn load_records_for_kind_session(
     Ok(out)
 }
 
+async fn load_playbook_records_for_graph(
+    store: &cairn_store_sqlite::SqliteMemoryStore,
+    auth: &ReadAuthorization,
+) -> Result<Vec<MemoryRecord>, Response> {
+    let mut out = Vec::new();
+    let mut seen = BTreeSet::new();
+    let base_scope = auth.scope.clone();
+
+    for record in list_all_records_for_visibility(
+        store,
+        MemoryKind::Playbook,
+        base_scope.clone(),
+        MemoryVisibility::Project,
+        auth,
+        None,
+    )
+    .await?
+    {
+        if seen.insert(record.id.as_str().to_owned()) {
+            out.push(record);
+        }
+    }
+
+    if let Some(private_scope) = principal_scoped_query(base_scope, &auth.issuer) {
+        for record in list_all_records_for_visibility(
+            store,
+            MemoryKind::Playbook,
+            private_scope,
+            MemoryVisibility::Private,
+            auth,
+            None,
+        )
+        .await?
+        {
+            if seen.insert(record.id.as_str().to_owned()) {
+                out.push(record);
+            }
+        }
+    }
+
+    Ok(out)
+}
+
+fn active_playbook_skill_snapshot(
+    vault_root: &Path,
+) -> Option<cairn_core::pipeline::skillify::SkillLintSnapshot> {
+    let mut snapshot = crate::verbs::lint::build_skill_lint_snapshot(vault_root).ok()?;
+    snapshot.skills.retain(|skill| {
+        matches!(
+            Path::new(&skill.path).components().next(),
+            Some(std::path::Component::Normal(part))
+                if part == std::ffi::OsStr::new("skills")
+        )
+    });
+    Some(snapshot)
+}
+
 fn tree_policy_detail(path_sessions: usize, siblings: usize, merges: usize) -> String {
     format!("path_sessions={path_sessions} siblings={siblings} merges={merges}")
 }
@@ -905,6 +978,53 @@ async fn list_records_for_visibility(
         .into_iter()
         .filter(|record| record_visible_to_authorization(record, auth, session_id))
         .collect())
+}
+
+async fn list_all_records_for_visibility(
+    store: &cairn_store_sqlite::SqliteMemoryStore,
+    kind: MemoryKind,
+    scope: ScopeTuple,
+    visibility: MemoryVisibility,
+    auth: &ReadAuthorization,
+    session_id: Option<&str>,
+) -> Result<Vec<MemoryRecord>, Response> {
+    if visibility > effective_read_visibility(auth.max_visibility) {
+        return Ok(Vec::new());
+    }
+    let decision = auth
+        .rebac
+        .evaluate(cairn_core::rebac::RebacAction::Read, &scope, visibility);
+    if !decision.allowed() {
+        return Ok(Vec::new());
+    }
+
+    let mut out = Vec::new();
+    let mut cursor = None;
+    loop {
+        let page = store
+            .list(&ListArgs {
+                kind: Some(kind),
+                scope: Some(scope.clone()),
+                visibility_allowlist: vec![visibility],
+                limit: PLAYBOOK_GRAPH_PAGE_LIMIT,
+                cursor: cursor.clone(),
+                ..ListArgs::default()
+            })
+            .await
+            .map_err(|e| {
+                internal_error_response(ResponseVerb::AssembleHot, &format!("store list: {e}"))
+            })?;
+        out.extend(
+            page.records
+                .into_iter()
+                .filter(|record| record_visible_to_authorization(record, auth, session_id)),
+        );
+        let Some(next_cursor) = page.next_cursor else {
+            break;
+        };
+        cursor = Some(next_cursor);
+    }
+    Ok(out)
 }
 
 fn principal_scoped_query(mut scope: ScopeTuple, issuer: &Identity) -> Option<ScopeTuple> {
@@ -994,6 +1114,45 @@ fn render_records_section(title: &str, records: &[MemoryRecord], budget: u64) ->
         push_capped(&mut out, "\n", budget);
     }
     out
+}
+
+fn select_active_playbook_segment(
+    records: &[MemoryRecord],
+    scope: ScopeTuple,
+    authorized_visibility: &[MemoryVisibility],
+    budget: u64,
+    skill_graph_snapshot: Option<&cairn_core::pipeline::skillify::SkillLintSnapshot>,
+) -> cairn_core::verbs::assemble_hot::LoadedSegment {
+    let playbook_refs: Vec<&MemoryRecord> = records.iter().collect();
+    let inputs = cairn_core::verbs::assemble_hot::HotMemoryInputs {
+        purpose_md: "",
+        index_md: "",
+        pinned_candidates: &[],
+        project_candidates: &[],
+        playbook_candidates: &playbook_refs,
+        rolling_summary_candidates: &[],
+        user_signal_candidates: &[],
+        now: current_hot_memory_timestamp(),
+        scope,
+        authorized_visibility,
+        skill_graph_snapshot,
+        include_debug: false,
+    };
+    cairn_core::verbs::assemble_hot::sources::playbook::select_with_budget(&inputs, Some(budget))
+}
+
+fn current_hot_memory_timestamp() -> cairn_core::domain::Rfc3339Timestamp {
+    let now_secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    #[allow(
+        clippy::cast_possible_wrap,
+        reason = "unix seconds fit in i64 for all practical dates"
+    )]
+    let secs_i64 = now_secs as i64;
+    cairn_core::domain::Rfc3339Timestamp::from_unix_secs(secs_i64).unwrap_or_else(|_| {
+        cairn_core::domain::Rfc3339Timestamp::parse("1970-01-01T00:00:00Z").expect("epoch literal")
+    })
 }
 
 async fn load_trace_canvas_section(

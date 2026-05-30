@@ -10,6 +10,7 @@
 
 use assert_cmd::Command;
 use cairn_test_fixtures::{RecordSpec, build_hybrid_test_vault};
+use predicates::prelude::*;
 use serde_json::Value;
 
 /// Normalize volatile fields so the snapshot asserts wire shape, ordering, and
@@ -192,5 +193,64 @@ async fn keyword_explain_includes_policy_trace_and_dedup_exclusions() {
         excluded[0]["target_id"].as_str().is_some(),
         "exclusion carries a target id"
     );
+    drop(dir);
+}
+
+#[tokio::test]
+async fn search_explain_includes_skill_graph_closure() {
+    use cairn_core::contract::memory_store::MemoryStore as _;
+    use cairn_core::domain::record::tests_export::sample_record;
+    use cairn_core::domain::taxonomy::MemoryKind;
+    use cairn_core::domain::{RecordId, TargetId};
+
+    let vault = build_hybrid_test_vault(&[]).await;
+
+    std::fs::create_dir_all(vault.root.join("skills")).expect("skills");
+    std::fs::write(
+        vault.root.join("skills/skill_test.md"),
+        "---\nskill_id: run-tests\nlane: test.run\ntriggers: [\"run tests\"]\nfiles_to: wiki/summaries/\nprovides: [\"cap.test\"]\n---\nRun tests.\n",
+    )
+    .expect("prereq skill");
+    std::fs::write(
+        vault.root.join("skills/skill_ship.md"),
+        "---\nskill_id: ship-pr\nlane: ship.pr\ntriggers: [\"ship pr\"]\nfiles_to: wiki/summaries/\nrequires: [\"cap.test\"]\nprovides: [\"cap.ship\"]\n---\nShip PR.\n",
+    )
+    .expect("leaf skill");
+
+    let mut playbook = sample_record();
+    playbook.id = RecordId::parse("01HQZX9F5N0000000000000001").expect("id");
+    playbook.target_id = TargetId::parse("01HQZX9F5N0000000000000001").expect("target");
+    playbook.kind = MemoryKind::Playbook;
+    playbook.body = "ship pr playbook\nuse this when shipping a pull request".to_owned();
+    playbook
+        .extra_frontmatter
+        .insert("skill_id".to_owned(), serde_json::json!("ship-pr"));
+    playbook
+        .extra_frontmatter
+        .insert("lane".to_owned(), serde_json::json!("ship.pr"));
+    vault
+        .store
+        .upsert(&playbook)
+        .await
+        .expect("upsert playbook");
+    let root = vault.root.clone();
+    let dir = vault.dir;
+    drop(vault.store);
+    drop(vault.embedder);
+
+    let mut cmd = Command::cargo_bin("cairn").expect("bin");
+    cmd.arg("--vault")
+        .arg(&root)
+        .arg("search")
+        .arg("--mode")
+        .arg("keyword")
+        .arg("--explain")
+        .arg("--json")
+        .arg("ship pr");
+
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains("\"skill_graph\""))
+        .stdout(predicate::str::contains("run-tests"));
     drop(dir);
 }

@@ -5,6 +5,7 @@
 pub mod artifact;
 pub mod candidate;
 pub mod gate;
+pub mod graph;
 pub mod lint;
 pub mod pack;
 pub mod spec;
@@ -16,6 +17,9 @@ pub use candidate::{
     SkillifySource, SkillifyStatus, SkillifyTrigger,
 };
 pub use gate::{SkillifyGate, SkillifyGateReport, SkillifyGateStatus};
+pub use graph::{
+    SkillGraphClosure, SkillGraphExplain, SkillGraphIssue, SkillGraphIssueKind, SkillGraphResolver,
+};
 pub use lint::{
     SkillLintIssue, SkillLintIssueKind, SkillLintSkill, SkillLintSnapshot, lint_skill_snapshot,
 };

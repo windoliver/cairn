@@ -827,6 +827,7 @@ fn envelope_from_outcome(
                 rrf_score: e.rrf_score,
                 cosine: e.cosine,
                 final_score: e.final_score,
+                skill_graph: None,
             })
             .collect()
     });

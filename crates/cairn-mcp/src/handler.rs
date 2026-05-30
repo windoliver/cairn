@@ -34,12 +34,15 @@ use cairn_core::domain::{
 use cairn_core::generated::envelope::{ResponseData, ResponseVerb};
 use cairn_core::generated::verbs::assemble_hot::{AssembleHotArgs, HotMemoryDebug};
 use cairn_core::mcp_auth::{McpAuthContext, McpGraphAvailability, McpTransport};
+use cairn_core::pipeline::skillify::{SkillLintSkill, SkillLintSnapshot};
 
 use cairn_store_sqlite::SqliteMemoryStore;
 use cairn_store_sqlite::entity_graph::queries::GraphQueries;
 use tracing::Instrument;
 
 use crate::generated::TOOLS;
+
+const PLAYBOOK_GRAPH_PAGE_LIMIT: usize = 1000;
 
 fn status_health(
     vault_root: Option<&Path>,
@@ -1285,17 +1288,10 @@ async fn load_hot_bodies_for_mcp(
                 render_records_section("Project Memory", &records, remaining)
             }
             cairn_core::config::HotMemoryRecipeStep::ActivePlaybook => {
-                let mut records = load_records_for_kinds(
-                    store,
-                    allowed_scopes,
-                    &[MemoryKind::Playbook],
-                    None,
-                    16,
-                )
-                .await?;
-                records.sort_by(|a, b| b.updated_at.as_str().cmp(a.updated_at.as_str()));
-                records.truncate(1);
-                render_records_section("Active Playbook", &records, remaining)
+                let records = load_playbook_records_for_graph(store, allowed_scopes).await?;
+                let skill_graph_snapshot = build_active_playbook_skill_snapshot(vault_root);
+                select_active_playbook_segment(&records, remaining, skill_graph_snapshot.as_ref())
+                    .body
             }
             cairn_core::config::HotMemoryRecipeStep::RecentUserSignal => {
                 let mut records = load_records_for_kinds(
@@ -1346,8 +1342,8 @@ async fn build_mcp_explain_debug(
     .await?;
     let project_records =
         load_records_for_kinds(store, allowed_scopes, &[MemoryKind::Project], None, 64).await?;
-    let playbook_records =
-        load_records_for_kinds(store, allowed_scopes, &[MemoryKind::Playbook], None, 64).await?;
+    let playbook_records = load_playbook_records_for_graph(store, allowed_scopes).await?;
+    let skill_graph_snapshot = build_active_playbook_skill_snapshot(vault_root);
     let signal_records = load_records_for_kinds(
         store,
         allowed_scopes,
@@ -1381,6 +1377,7 @@ async fn build_mcp_explain_debug(
         now: now_timestamp(),
         scope: principal.clone(),
         authorized_visibility: &authorized_visibility,
+        skill_graph_snapshot: skill_graph_snapshot.as_ref(),
         include_debug: true,
     };
 
@@ -1450,6 +1447,71 @@ async fn load_records_for_kinds(
         }
     }
 
+    Ok(out)
+}
+
+async fn load_playbook_records_for_graph(
+    store: &SqliteMemoryStore,
+    allowed_scopes: &[ScopeTuple],
+) -> Result<Vec<MemoryRecord>, cairn_core::generated::envelope::Response> {
+    let mut out = Vec::new();
+    let mut seen = BTreeSet::new();
+
+    for scope in allowed_scopes {
+        for visibility in [
+            MemoryVisibility::Private,
+            MemoryVisibility::Session,
+            MemoryVisibility::Project,
+        ] {
+            for record in list_all_records_for_visibility(
+                store,
+                scope.clone(),
+                MemoryKind::Playbook,
+                visibility,
+            )
+            .await?
+            {
+                if seen.insert(record.id.as_str().to_owned()) {
+                    out.push(record);
+                }
+            }
+        }
+    }
+
+    Ok(out)
+}
+
+async fn list_all_records_for_visibility(
+    store: &SqliteMemoryStore,
+    scope: ScopeTuple,
+    kind: MemoryKind,
+    visibility: MemoryVisibility,
+) -> Result<Vec<MemoryRecord>, cairn_core::generated::envelope::Response> {
+    let mut out = Vec::new();
+    let mut cursor = None;
+    loop {
+        let page = store
+            .list(&ListArgs {
+                kind: Some(kind),
+                scope: Some(scope.clone()),
+                visibility_allowlist: vec![visibility],
+                limit: PLAYBOOK_GRAPH_PAGE_LIMIT,
+                cursor: cursor.clone(),
+                ..ListArgs::default()
+            })
+            .await
+            .map_err(|e| {
+                crate::verb_envelope::aborted_internal(
+                    ResponseVerb::AssembleHot,
+                    &format!("store list: {e}"),
+                )
+            })?;
+        out.extend(page.records);
+        let Some(next_cursor) = page.next_cursor else {
+            break;
+        };
+        cursor = Some(next_cursor);
+    }
     Ok(out)
 }
 
@@ -1541,6 +1603,149 @@ fn render_records_section(title: &str, records: &[MemoryRecord], budget: u64) ->
         push_capped(&mut out, "\n", budget);
     }
     out
+}
+
+fn select_active_playbook_segment(
+    records: &[MemoryRecord],
+    budget: u64,
+    skill_graph_snapshot: Option<&SkillLintSnapshot>,
+) -> cairn_core::verbs::assemble_hot::LoadedSegment {
+    let playbook_refs: Vec<&MemoryRecord> = records.iter().collect();
+    let authorized_visibility = [
+        MemoryVisibility::Private,
+        MemoryVisibility::Session,
+        MemoryVisibility::Project,
+    ];
+    let inputs = cairn_core::verbs::assemble_hot::HotMemoryInputs {
+        purpose_md: "",
+        index_md: "",
+        pinned_candidates: &[],
+        project_candidates: &[],
+        playbook_candidates: &playbook_refs,
+        rolling_summary_candidates: &[],
+        user_signal_candidates: &[],
+        now: now_timestamp(),
+        scope: ScopeTuple::default(),
+        authorized_visibility: &authorized_visibility,
+        skill_graph_snapshot,
+        include_debug: false,
+    };
+    cairn_core::verbs::assemble_hot::sources::playbook::select_with_budget(&inputs, Some(budget))
+}
+
+fn build_active_playbook_skill_snapshot(vault_root: &Path) -> Option<SkillLintSnapshot> {
+    let skills_dir = vault_root.join("skills");
+    let mut skills = Vec::new();
+    for entry in std::fs::read_dir(skills_dir).ok()? {
+        let Ok(entry) = entry else {
+            continue;
+        };
+        let path = entry.path();
+        if path.extension().and_then(std::ffi::OsStr::to_str) != Some("md") {
+            continue;
+        }
+        if let Some(skill) = read_active_playbook_skill(vault_root, &path) {
+            skills.push(skill);
+        }
+    }
+    Some(SkillLintSnapshot { skills })
+}
+
+fn read_active_playbook_skill(vault_root: &Path, path: &Path) -> Option<SkillLintSkill> {
+    let body = std::fs::read_to_string(path).ok()?;
+    let frontmatter = active_playbook_skill_frontmatter(&body)?;
+    let skill_id = active_playbook_yaml_scalar(frontmatter, "skill_id")
+        .or_else(|| active_playbook_yaml_scalar(frontmatter, "name"))
+        .unwrap_or_else(|| {
+            path.file_stem()
+                .and_then(std::ffi::OsStr::to_str)
+                .unwrap_or("unknown")
+                .to_owned()
+        });
+    let path = relative_skill_path(vault_root, path);
+    Some(SkillLintSkill {
+        skill_id,
+        lane: active_playbook_yaml_scalar(frontmatter, "lane").unwrap_or_default(),
+        path: path.clone(),
+        uses: active_playbook_yaml_scalar(frontmatter, "uses"),
+        resolver_triggers: active_playbook_yaml_string_list(frontmatter, "triggers"),
+        files_to: active_playbook_yaml_scalar(frontmatter, "files_to"),
+        gate_report_passed: true,
+        rollback_version_count: 1,
+        existing_paths: vec![path],
+        requires: active_playbook_yaml_string_list(frontmatter, "requires"),
+        provides: active_playbook_yaml_string_list(frontmatter, "provides"),
+        conflicts: active_playbook_yaml_string_list(frontmatter, "conflicts"),
+    })
+}
+
+fn active_playbook_skill_frontmatter(body: &str) -> Option<&str> {
+    let rest = body
+        .strip_prefix("---\n")
+        .or_else(|| body.strip_prefix("---\r\n"))?;
+    let end = rest.find("\n---")?;
+    Some(&rest[..end])
+}
+
+fn active_playbook_yaml_scalar(frontmatter: &str, key: &str) -> Option<String> {
+    frontmatter.lines().find_map(|line| {
+        let trimmed = line.trim_start();
+        let rest = trimmed.strip_prefix(&format!("{key}:"))?;
+        let value = rest.trim().trim_matches('"').trim_matches('\'');
+        (!value.is_empty() && !value.starts_with('[')).then(|| value.to_owned())
+    })
+}
+
+fn active_playbook_yaml_string_list(frontmatter: &str, key: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let lines: Vec<&str> = frontmatter.lines().collect();
+    let mut i = 0;
+    while i < lines.len() {
+        if let Some(rest) = lines[i].strip_prefix(&format!("{key}:")) {
+            let inline = rest.trim();
+            if !inline.is_empty() {
+                if let Some(items) = inline.strip_prefix('[').and_then(|s| s.strip_suffix(']')) {
+                    for item in items.split(',') {
+                        let value = item.trim().trim_matches('"').trim_matches('\'');
+                        if !value.is_empty() {
+                            out.push(value.to_owned());
+                        }
+                    }
+                } else {
+                    let value = inline.trim_matches('"').trim_matches('\'');
+                    if !value.is_empty() {
+                        out.push(value.to_owned());
+                    }
+                }
+                return out;
+            }
+            let mut j = i + 1;
+            while j < lines.len() {
+                let next = lines[j];
+                if let Some(item) = next.trim_start().strip_prefix("- ") {
+                    let value = item.trim().trim_matches('"').trim_matches('\'');
+                    if !value.is_empty() {
+                        out.push(value.to_owned());
+                    }
+                    j += 1;
+                } else if next.trim().is_empty() {
+                    j += 1;
+                } else {
+                    break;
+                }
+            }
+            return out;
+        }
+        i += 1;
+    }
+    out
+}
+
+fn relative_skill_path(vault_root: &Path, path: &Path) -> String {
+    path.strip_prefix(vault_root)
+        .unwrap_or(path)
+        .to_string_lossy()
+        .into_owned()
 }
 
 fn push_capped(out: &mut String, text: &str, budget: u64) {
@@ -1723,6 +1928,7 @@ fn search_outcome_to_result(
                 rrf_score: finite_or_zero(e.rrf_score),
                 cosine: finite_option(e.cosine),
                 final_score: finite_or_zero(e.final_score),
+                skill_graph: None,
             })
             .collect()
     });

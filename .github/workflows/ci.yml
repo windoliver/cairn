@@ -85,9 +85,10 @@ jobs:
           cache-bin: "false"
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Install cargo-nextest
-        uses: taiki-e/install-action@787505cde8a44ea468a00478fe52baf23b15bccd # v2.75.21
-        with:
-          tool: cargo-nextest
+        # Avoid taiki-e/install-action@v2.75.21's BASH_FUNC_ guard which
+        # currently false-positives on the GitHub-hosted runner image. Same
+        # workaround as supply-chain.yml (cargo-machete).
+        run: cargo install cargo-nextest --locked --version 0.9.136
       - name: cargo nextest run --workspace
         # macOS runners can leave the `cargo` shim resolving through
         # rustup-init after install-action updates ~/.cargo/bin. Call the
@@ -473,9 +474,10 @@ jobs:
           cache-bin: "false"
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Install cargo-nextest
-        uses: taiki-e/install-action@787505cde8a44ea468a00478fe52baf23b15bccd # v2.75.21
-        with:
-          tool: cargo-nextest
+        # Avoid taiki-e/install-action@v2.75.21's BASH_FUNC_ guard which
+        # currently false-positives on the GitHub-hosted runner image. Same
+        # workaround as supply-chain.yml (cargo-machete).
+        run: cargo install cargo-nextest --locked --version 0.9.136
       - name: cairn-codegen --check (IDL → generated)
         run: cargo run -p cairn-idl --bin cairn-codegen --locked -- --check
       - name: cairn-docgen --check (IDL → docs)

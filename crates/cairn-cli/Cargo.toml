@@ -73,6 +73,9 @@ rand_core = { workspace = true }
 whoami = { workspace = true }
 chrono = { workspace = true }
 tracing = { workspace = true }
+include_dir = { workspace = true }
+semver = { workspace = true }
+nix = { workspace = true }
 
 [dev-dependencies]
 cairn-sdk = { workspace = true }

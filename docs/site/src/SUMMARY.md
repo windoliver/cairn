@@ -13,6 +13,7 @@
 # Usage
 
 - [Installation](usage/installation.md)
+- [Updates](usage/updates.md)
 - [CLI](usage/cli.md)
 - [Backup Registry](usage/backup.md)
 - [Configuration](usage/config.md)
@@ -82,3 +83,5 @@
 - [CI](maintainers/ci.md)
 - [Beta Readiness](maintainers/beta-readiness.md)
 - [MCP Semver Policy](maintainers/mcp-semver-policy.md)
+- [Release Channels](maintainers/release-channels.md)
+- [v1.0 Production Readiness](maintainers/v1-production-readiness.md)

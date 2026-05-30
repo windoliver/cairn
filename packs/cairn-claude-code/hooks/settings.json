@@ -1,0 +1,20 @@
+{
+  "_pack": "cairn-claude-code@0.1.0",
+  "hooks": {
+    "SessionStart": [
+      { "matcher": "*", "hooks": [{ "type": "command", "command": "cairn hook SessionStart --vault-path {{PROJECT_DIR_SHELL}}" }] }
+    ],
+    "UserPromptSubmit": [
+      { "matcher": "*", "hooks": [{ "type": "command", "command": "cairn hook UserPromptSubmit --vault-path {{PROJECT_DIR_SHELL}}" }] }
+    ],
+    "PreToolUse": [
+      { "matcher": "*", "hooks": [{ "type": "command", "command": "cairn hook PreToolUse --vault-path {{PROJECT_DIR_SHELL}}" }] }
+    ],
+    "PostToolUse": [
+      { "matcher": "*", "hooks": [{ "type": "command", "command": "cairn hook PostToolUse --vault-path {{PROJECT_DIR_SHELL}}" }] }
+    ],
+    "Stop": [
+      { "matcher": "*", "hooks": [{ "type": "command", "command": "cairn hook Stop --vault-path {{PROJECT_DIR_SHELL}}" }] }
+    ]
+  }
+}

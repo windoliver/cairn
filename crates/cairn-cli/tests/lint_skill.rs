@@ -77,6 +77,120 @@ async fn lint_skill_reports_missing_script() {
 }
 
 #[tokio::test]
+async fn lint_skill_reports_missing_requires_reference() {
+    let vault = build_hybrid_test_vault(&[]).await;
+
+    std::fs::create_dir_all(vault.root.join("skills")).expect("skills");
+    std::fs::create_dir_all(vault.root.join("skills/scripts")).expect("scripts");
+    std::fs::create_dir_all(vault.root.join(".cairn/resolver/skills")).expect("resolver");
+    std::fs::create_dir_all(
+        vault
+            .root
+            .join(".cairn/evolution/skillify/skc_graph/versions/v1"),
+    )
+    .expect("versions");
+    std::fs::write(
+        vault.root.join("skills/scripts/deploy.sh"),
+        "#!/usr/bin/env bash\nexit 0\n",
+    )
+    .expect("script");
+    std::fs::write(
+        vault.root.join("skills/skill_deploy.md"),
+        "---\nskill_id: deploy\nversion: 1\nlane: deploy.hotfix\ntriggers: [\"deploy hotfix\"]\nuses: skills/scripts/deploy.sh\nfiles_to: wiki/summaries/\ncandidate_id: skc_graph\nstatus: live\nrequires: [\"cap.shell\"]\nprovides: [\"cap.deploy\"]\nconflicts: []\n---\nDeploy.\n",
+    )
+    .expect("skill");
+    std::fs::write(
+        vault.root.join(".cairn/resolver/skills/deploy.json"),
+        r#"{"skill_id":"deploy","triggers":["deploy hotfix"]}"#,
+    )
+    .expect("resolver");
+    std::fs::write(
+        vault
+            .root
+            .join(".cairn/evolution/skillify/skc_graph/gate-report.json"),
+        passed_gate_report("skc_graph"),
+    )
+    .expect("gate");
+    std::fs::write(
+        vault
+            .root
+            .join(".cairn/evolution/skillify/skc_graph/versions/v1/manifest.json"),
+        "{}",
+    )
+    .expect("manifest");
+
+    let mut cmd = Command::cargo_bin("cairn").expect("bin");
+    cmd.arg("--vault")
+        .arg(&vault.root)
+        .arg("lint")
+        .arg("--json")
+        .arg("--skill");
+
+    cmd.assert()
+        .failure()
+        .stdout(predicate::str::contains("skill_missing_artifact"))
+        .stdout(predicate::str::contains("requires `cap.shell`"));
+}
+
+#[tokio::test]
+async fn lint_skill_ignores_nested_graph_metadata() {
+    let vault = build_hybrid_test_vault(&[]).await;
+
+    std::fs::create_dir_all(vault.root.join("skills")).expect("skills");
+    std::fs::create_dir_all(vault.root.join("skills/scripts")).expect("scripts");
+    std::fs::create_dir_all(vault.root.join(".cairn/resolver/skills")).expect("resolver");
+    std::fs::create_dir_all(
+        vault
+            .root
+            .join(".cairn/evolution/skillify/skc_nested/versions/v1"),
+    )
+    .expect("versions");
+    std::fs::write(
+        vault.root.join("skills/scripts/deploy.sh"),
+        "#!/usr/bin/env bash\nexit 0\n",
+    )
+    .expect("script");
+    std::fs::write(
+        vault.root.join("skills/skill_deploy.md"),
+        "---\nskill_id: deploy\nversion: 1\nlane: deploy.hotfix\ntriggers: [\"deploy hotfix\"]\nuses: skills/scripts/deploy.sh\nfiles_to: wiki/summaries/\ncandidate_id: skc_nested\nstatus: live\nmetadata:\n  requires:\n    - cap.shell\n  provides: [\"cap.deploy\"]\n  conflicts: [\"rollback.force\"]\n---\nDeploy.\n",
+    )
+    .expect("skill");
+    std::fs::write(
+        vault.root.join(".cairn/resolver/skills/deploy.json"),
+        r#"{"skill_id":"deploy","triggers":["deploy hotfix"]}"#,
+    )
+    .expect("resolver");
+    std::fs::write(
+        vault
+            .root
+            .join(".cairn/evolution/skillify/skc_nested/gate-report.json"),
+        passed_gate_report("skc_nested"),
+    )
+    .expect("gate");
+    std::fs::write(
+        vault
+            .root
+            .join(".cairn/evolution/skillify/skc_nested/versions/v1/manifest.json"),
+        "{}",
+    )
+    .expect("manifest");
+
+    let mut cmd = Command::cargo_bin("cairn").expect("bin");
+    cmd.arg("--vault")
+        .arg(&vault.root)
+        .arg("lint")
+        .arg("--json")
+        .arg("--skill");
+
+    let output = cmd.assert().failure().get_output().stdout.clone();
+    let stdout = String::from_utf8_lossy(&output);
+    assert!(
+        !stdout.contains("requires `cap.shell`"),
+        "nested graph metadata must not be parsed as top-level: {stdout}"
+    );
+}
+
+#[tokio::test]
 async fn lint_skill_scans_candidate_bundles() {
     let vault = build_hybrid_test_vault(&[]).await;
     let candidate_root = vault.root.join(".cairn/evolution/skillify/skc_candidate");

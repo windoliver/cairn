@@ -1,0 +1,42 @@
+[connector]
+name              = "github"
+contract          = "Connector"
+contract_version  = "0.1.0"
+sensor_identity   = "snr:local:connector:github:v1"
+
+[capabilities]
+poll     = true
+webhook  = true
+backfill = true
+
+[oauth]
+required_scopes = ["repo", "read:org"]
+token_lifetime  = "1h"
+refresh         = true
+
+[budget]
+max_items_per_hour = 1000
+max_bytes_per_day  = "50MiB"
+
+[labels]
+allowed = ["source:github", "kind:issue", "kind:pr", "kind:commit"]
+
+[[scopes.declared]]
+kind    = "project"
+pattern = "*"
+
+[webhook]
+"signature.algorithm" = "hmac-sha256"
+"signature.header"    = "X-Hub-Signature-256"
+"signature.prefix"    = "sha256="
+allowed_mimes         = ["application/json"]
+delivery_id_header    = "X-GitHub-Delivery"
+
+[poll]
+cursor_kind      = "opaque-string"
+min_interval     = "60s"
+default_interval = "5m"
+
+[payload]
+max_bytes = "512KiB"
+max_depth = 32

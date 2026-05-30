@@ -50,7 +50,7 @@ use crate::error::ConnectorError;
 use crate::event::ConnectorPayload;
 use crate::rate_limit::{ByteRateLimit, RateLimit};
 use crate::redact::RedactionPipeline;
-use crate::webhook::{WebhookRequest, verify_hmac_sha256};
+use crate::webhook::{WebhookRequest, verify_hmac_sha256_prefixed};
 
 // ---------------------------------------------------------------------------
 // Internal state types (not part of the public API)
@@ -179,6 +179,10 @@ struct WebhookEntryState {
     /// HTTP header name that carries the HMAC-SHA256 signature, from
     /// `manifest.webhook.signature_header`.
     signature_header: String,
+    /// Optional literal prefix to strip from the signature header value before
+    /// hex-decoding, from `manifest.webhook.signature_prefix`.
+    /// Empty string means no stripping (equivalent to `None`).
+    signature_prefix: String,
     /// Shared per-connector event-id index (Finding Z). Cloned from the
     /// corresponding `Entry` fields so poll and webhook paths share state.
     event_id_index: Arc<StdMutex<HashMap<String, String>>>,
@@ -828,6 +832,13 @@ impl ConnectorRegistry {
                     byte_limit: Arc::clone(&entry.byte_limit),
                     max_body_bytes: entry.connector.manifest().payload.max_bytes_parsed,
                     signature_header: entry.connector.manifest().webhook.signature_header.clone(),
+                    signature_prefix: entry
+                        .connector
+                        .manifest()
+                        .webhook
+                        .signature_prefix
+                        .clone()
+                        .unwrap_or_default(),
                     event_id_index: Arc::clone(&entry.event_id_index),
                     event_id_order: Arc::clone(&entry.event_id_order),
                 },
@@ -1869,13 +1880,19 @@ async fn handle_webhook(
     };
 
     // Verify HMAC-SHA256 (Finding G §4). Single rejection reason per spec.
+    // Pass the manifest-declared signature prefix (e.g. "sha256=" for GitHub)
+    // so the substrate strips it before hex-decoding.
     let webhook_req = WebhookRequest {
         connector: connector_name.clone(),
         body: body_bytes.to_vec(),
         headers: raw_headers,
     };
-    let Ok(sig_id) = verify_hmac_sha256(&webhook_req, &entry.signature_header, credential.bytes())
-    else {
+    let Ok(sig_id) = verify_hmac_sha256_prefixed(
+        &webhook_req,
+        &entry.signature_header,
+        &entry.signature_prefix,
+        credential.bytes(),
+    ) else {
         return resp(StatusCode::UNAUTHORIZED, "signature mismatch");
     };
 
