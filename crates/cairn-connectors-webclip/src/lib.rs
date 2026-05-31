@@ -18,6 +18,7 @@
 pub const MANIFEST_TOML: &str = include_str!("../connector.toml");
 
 mod error;
+mod event_id;
 
 pub use error::WebClipError;
 
