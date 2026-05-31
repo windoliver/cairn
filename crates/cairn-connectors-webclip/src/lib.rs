@@ -17,6 +17,7 @@
 /// constructing a `ConsentGrant` for the registry end-to-end test.
 pub const MANIFEST_TOML: &str = include_str!("../connector.toml");
 
+mod clip;
 mod error;
 mod event_id;
 
