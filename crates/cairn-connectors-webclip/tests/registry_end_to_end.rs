@@ -1,4 +1,4 @@
-//! End-to-end: signed clip -> real ConnectorRegistry webhook router -> PipelineEmit.
+//! End-to-end: signed clip -> real `ConnectorRegistry` webhook router -> `PipelineEmit`.
 //!
 //! Proves the adapter's event passes the substrate's full gate (HMAC verify ->
 //! consent -> label -> scope -> redaction -> spool -> emit) with the real
@@ -37,7 +37,7 @@ impl PipelineEmit for Capturer {
     }
 }
 
-/// Build a grant whose manifest_hash matches the compiled-in connector.toml.
+/// Build a grant whose `manifest_hash` matches the compiled-in connector.toml.
 fn webclip_grant() -> ConsentGrant {
     let manifest_hash = ConnectorManifest::parse_toml(MANIFEST_TOML)
         .expect("webclip manifest valid")
