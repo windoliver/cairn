@@ -25,6 +25,11 @@ mod event_id;
 pub use connector::WebClipConnector;
 pub use error::WebClipError;
 
+/// Test-only helpers exposed for integration tests. Cfg-gated; not part of the
+/// production API.
+#[cfg(any(test, feature = "testkit"))]
+pub mod testkit;
+
 #[cfg(test)]
 mod manifest_tests {
     use super::MANIFEST_TOML;
