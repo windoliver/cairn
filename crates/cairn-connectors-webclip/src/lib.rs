@@ -17,6 +17,10 @@
 /// constructing a `ConsentGrant` for the registry end-to-end test.
 pub const MANIFEST_TOML: &str = include_str!("../connector.toml");
 
+mod error;
+
+pub use error::WebClipError;
+
 #[cfg(test)]
 mod manifest_tests {
     use super::MANIFEST_TOML;
