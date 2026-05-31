@@ -1,0 +1,47 @@
+[connector]
+name              = "webclip"
+contract          = "Connector"
+contract_version  = "0.1.0"
+sensor_identity   = "snr:local:connector:webclip:v1"
+
+[capabilities]
+poll     = false
+webhook  = true
+backfill = false
+
+# Inert: the web clipper authenticates via the per-connector HMAC webhook
+# secret (CredentialStore key "connector/webclip/webhook_secret"), not OAuth.
+# The block is required by the manifest schema; the values are unused.
+[oauth]
+required_scopes = []
+token_lifetime  = "0s"
+refresh         = false
+
+[budget]
+max_items_per_hour = 600
+max_bytes_per_day  = "100MiB"
+
+[labels]
+allowed = ["source:web", "kind:clip"]
+
+[[scopes.declared]]
+kind    = "domain"
+pattern = "*"
+
+[webhook]
+"signature.algorithm" = "hmac-sha256"
+"signature.header"    = "X-Cairn-Signature-256"
+"signature.prefix"    = "sha256="
+allowed_mimes         = ["application/json", "text/markdown", "text/plain"]
+delivery_id_header    = "X-Cairn-Delivery"
+
+# Inert: poll = false means the registry never spawns a poll task. The block
+# is required by the manifest schema; the values are placeholders.
+[poll]
+cursor_kind      = "opaque-string"
+min_interval     = "60s"
+default_interval = "5m"
+
+[payload]
+max_bytes = "1MiB"
+max_depth = 16
