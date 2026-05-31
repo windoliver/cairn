@@ -5,10 +5,6 @@
 //! - `text/markdown` | `text/plain` -> raw body + `X-Cairn-Clip-*` headers ->
 //!   `ConnectorPayload::Text`.
 
-// Items in this module will be consumed by `WebClipConnector::ingest_webhook`
-// in Task 5; they are crate-private and unused at the library level until then.
-#![allow(dead_code)]
-
 use std::collections::BTreeSet;
 
 use cairn_connectors_core::{

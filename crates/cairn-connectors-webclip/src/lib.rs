@@ -18,9 +18,11 @@
 pub const MANIFEST_TOML: &str = include_str!("../connector.toml");
 
 mod clip;
+mod connector;
 mod error;
 mod event_id;
 
+pub use connector::WebClipConnector;
 pub use error::WebClipError;
 
 #[cfg(test)]
