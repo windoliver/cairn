@@ -22,6 +22,69 @@ use cairn_workflows::{
     SqliteJobStore, SystemClock, default_golden_checks,
 };
 
+/// [`cairn_mcp::MutatingVerbHost`] implementation backed by the CLI's
+/// signed verb runtime.
+///
+/// Routes the MCP `ingest`, `capture_trace`, and `forget` tools through the
+/// exact functions the CLI verbs dispatch to — identity provisioning,
+/// server challenge, signed-intent verification, and WAL admission included
+/// (brief §5.6; CLAUDE.md §4 invariants 3 and 5). Each call opens its own
+/// verb context against the vault, mirroring a short-lived CLI invocation;
+/// `SQLite` WAL mode lets those connections co-exist with the long-lived
+/// MCP store connection.
+///
+/// Only the arg shapes the wire accepts are honored: `ingest` is body-only
+/// (file/folder/url/jsonl/recording resolvers are CLI-side and reject with
+/// `MalformedCapture`), and `forget` flush-plan modes fail closed.
+pub struct CliMutationHost {
+    vault_root: std::path::PathBuf,
+    config: CairnConfig,
+}
+
+impl CliMutationHost {
+    /// Create a host bound to a resolved vault root and loaded config.
+    #[must_use]
+    pub fn new(vault_root: std::path::PathBuf, config: CairnConfig) -> Self {
+        Self { vault_root, config }
+    }
+}
+
+#[async_trait::async_trait]
+impl cairn_mcp::MutatingVerbHost for CliMutationHost {
+    async fn ingest(
+        &self,
+        args: cairn_core::generated::verbs::ingest::IngestArgs,
+    ) -> cairn_core::generated::envelope::Response {
+        crate::verbs::ingest::ingest_body_response(
+            args,
+            self.vault_root.clone(),
+            self.config.clone(),
+        )
+        .await
+        .response
+    }
+
+    async fn capture_trace(
+        &self,
+        args: cairn_core::generated::verbs::capture_trace::CaptureTraceArgs,
+    ) -> cairn_core::generated::envelope::Response {
+        crate::verbs::capture_trace::capture_trace_response(
+            args,
+            self.vault_root.clone(),
+            self.config.clone(),
+        )
+        .await
+    }
+
+    async fn forget(
+        &self,
+        args: cairn_core::generated::verbs::forget::ForgetArgs,
+    ) -> cairn_core::generated::envelope::Response {
+        crate::verbs::forget::forget_response(args, self.vault_root.clone(), self.config.clone())
+            .await
+    }
+}
+
 /// Outcome of resolving the `[mcp.stdio]` block into runtime components.
 pub struct ResolvedMcpScope {
     /// The scope resolver derived from the configured principal.
@@ -377,7 +440,14 @@ pub fn run(
                     expiration: config.expiration.enabled,
                     evaluation: config.evaluation.enabled,
                 };
-                let serve_result = cairn_mcp::serve_stdio_with_store_workflows_ready(
+                // Mutating verbs (`ingest`, `capture_trace`, `forget`)
+                // dispatch through the CLI's signed verb runtime via
+                // `CliMutationHost` — same domain logic as the CLI verbs,
+                // WAL admission included (brief §5.6).
+                let mutation_host: Arc<dyn cairn_mcp::MutatingVerbHost> = Arc::new(
+                    CliMutationHost::new(vault_root.to_path_buf(), config.clone()),
+                );
+                let serve_result = cairn_mcp::serve_stdio_with_store_workflows_ready_and_mutation_host(
                     store,
                     sqlite_store,
                     resolver,
@@ -385,6 +455,7 @@ pub fn run(
                     principal,
                     Some(vault_root.to_path_buf()),
                     readiness,
+                    Some(mutation_host),
                 )
                 .await;
 

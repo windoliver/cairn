@@ -639,10 +639,6 @@ fn emit_internal(json: bool, message: &str, policy_trace: Vec<ResponsePolicyTrac
     ExitCode::FAILURE
 }
 
-#[allow(
-    clippy::too_many_lines,
-    reason = "signed ingest CLI flow is guard, prepare, authorize, persist, and emit in source order"
-)]
 async fn run_async(
     sub: &ArgMatches,
     vault_root: PathBuf,
@@ -651,23 +647,62 @@ async fn run_async(
     body: String,
 ) -> ExitCode {
     let args = ingest_args_from_matches(sub, body);
+    let session_requested = args.session_id.is_some();
+    let out = ingest_body_response(args, vault_root, config).await;
+    if json {
+        emit_json(&out.response);
+    } else if session_requested {
+        human_error(
+            "ingest",
+            "InvalidArgs",
+            "`--session` ingest is not supported until signed intents carry a session scope dimension",
+            &out.response.operation_id,
+        );
+    }
+    out.exit
+}
+
+/// Outcome of the signed body-ingest path: the generated response envelope
+/// plus the historical per-branch CLI exit code (64 invalid args, 65 filter
+/// rejection, 78 context/abort, 1 store failure).
+pub(crate) struct IngestVerbOutcome {
+    /// Generated response envelope (shared with the MCP surface).
+    pub(crate) response: Response,
+    /// CLI exit code preserving the pre-refactor per-branch mapping.
+    pub(crate) exit: ExitCode,
+}
+
+/// Run the signed body-ingest path and return the response envelope.
+///
+/// This is the single body-ingest implementation behind both `cairn ingest
+/// --body` and the MCP `ingest` tool (via
+/// [`crate::mcp::CliMutationHost`]) — one verb path, two surfaces
+/// (CLAUDE.md §4 invariant 3). Only `args.body` ingest is supported here;
+/// file/folder/url/jsonl/recording sources are CLI-side resolvers.
+#[allow(
+    clippy::too_many_lines,
+    reason = "signed ingest flow is guard, prepare, authorize, persist, and emit in source order"
+)]
+pub(crate) async fn ingest_body_response(
+    args: IngestArgs,
+    vault_root: PathBuf,
+    config: cairn_core::config::CairnConfig,
+) -> IngestVerbOutcome {
     if args.session_id.is_some() {
         let reason = "`--session` ingest is not supported until signed intents carry a session scope dimension";
         let resp = super::envelope::invalid_args_response(ResponseVerb::Ingest, "session", reason);
-        if json {
-            emit_json(&resp);
-        } else {
-            human_error("ingest", "InvalidArgs", reason, &resp.operation_id);
-        }
-        return ExitCode::from(64);
+        return IngestVerbOutcome {
+            response: resp,
+            exit: ExitCode::from(64),
+        };
     }
     let ctx = match super::signed::open_context(ResponseVerb::Ingest, &vault_root, config).await {
         Ok(ctx) => ctx,
         Err(resp) => {
-            if json {
-                emit_json(&resp);
-            }
-            return ExitCode::from(78);
+            return IngestVerbOutcome {
+                response: resp,
+                exit: ExitCode::from(78),
+            };
         }
     };
     let issuer_wire =
@@ -675,11 +710,10 @@ async fn run_async(
     let prepared = match cairn_core::verbs::ingest::prepare_ingest_body(&args, &issuer_wire) {
         Ok(p) => p,
         Err(e) => {
-            let resp = super::signed::rejected_from_domain(ResponseVerb::Ingest, e);
-            if json {
-                emit_json(&resp);
-            }
-            return ExitCode::from(64);
+            return IngestVerbOutcome {
+                response: super::signed::rejected_from_domain(ResponseVerb::Ingest, e),
+                exit: ExitCode::from(64),
+            };
         }
     };
     match prepared {
@@ -691,10 +725,10 @@ async fn run_async(
                 },
             );
             resp.policy_trace = policy_trace;
-            if json {
-                emit_json(&resp);
+            IngestVerbOutcome {
+                response: resp,
+                exit: ExitCode::from(65),
             }
-            ExitCode::from(65)
         }
         cairn_core::verbs::ingest::PreparedIngest::Proceed {
             record,
@@ -705,18 +739,18 @@ async fn run_async(
             let issuer = match Identity::parse(issuer_wire) {
                 Ok(issuer) => issuer,
                 Err(e) => {
-                    let resp = super::signed::rejected_from_domain(ResponseVerb::Ingest, e);
-                    if json {
-                        emit_json(&resp);
-                    }
-                    return ExitCode::from(64);
+                    return IngestVerbOutcome {
+                        response: super::signed::rejected_from_domain(ResponseVerb::Ingest, e),
+                        exit: ExitCode::from(64),
+                    };
                 }
             };
             if let Err(resp) = ensure_ingest_issuer(&ctx, &issuer).await {
-                if json {
-                    emit_json(&resp);
-                }
-                return response_exit_code(&resp);
+                let exit = response_exit_code(&resp);
+                return IngestVerbOutcome {
+                    response: resp,
+                    exit,
+                };
             }
             bind_record_scope_to_ingest_context(&mut record, &ctx);
             let record_id = cairn_core::generated::common::Ulid(record.id.as_str().to_owned());
@@ -728,11 +762,10 @@ async fn run_async(
             let payload = match canonical_bytes_signed_payload(&record) {
                 Ok(payload) => payload,
                 Err(e) => {
-                    let resp = super::signed::rejected_from_domain(ResponseVerb::Ingest, e);
-                    if json {
-                        emit_json(&resp);
-                    }
-                    return ExitCode::from(64);
+                    return IngestVerbOutcome {
+                        response: super::signed::rejected_from_domain(ResponseVerb::Ingest, e),
+                        exit: ExitCode::from(64),
+                    };
                 }
             };
             let admission =
@@ -741,10 +774,11 @@ async fn run_async(
                 {
                     Ok(admission) => admission,
                     Err(resp) => {
-                        if json {
-                            emit_json(&resp);
-                        }
-                        return response_exit_code(&resp);
+                        let exit = response_exit_code(&resp);
+                        return IngestVerbOutcome {
+                            response: resp,
+                            exit,
+                        };
                     }
                 };
             let result = ctx
@@ -773,25 +807,23 @@ async fn run_async(
                         jsonl_summary: None,
                         recording_summary: None,
                     };
-                    let resp = super::signed::committed(
+                    IngestVerbOutcome {
+                        response: super::signed::committed(
+                            ResponseVerb::Ingest,
+                            op,
+                            ResponseData::Ingest(data),
+                            policy_trace,
+                        ),
+                        exit: ExitCode::SUCCESS,
+                    }
+                }
+                Err(e) => IngestVerbOutcome {
+                    response: super::signed::aborted(
                         ResponseVerb::Ingest,
-                        op,
-                        ResponseData::Ingest(data),
-                        policy_trace,
-                    );
-                    if json {
-                        emit_json(&resp);
-                    }
-                    ExitCode::SUCCESS
-                }
-                Err(e) => {
-                    let resp =
-                        super::signed::aborted(ResponseVerb::Ingest, format!("store upsert: {e}"));
-                    if json {
-                        emit_json(&resp);
-                    }
-                    ExitCode::FAILURE
-                }
+                        format!("store upsert: {e}"),
+                    ),
+                    exit: ExitCode::FAILURE,
+                },
             }
         }
     }

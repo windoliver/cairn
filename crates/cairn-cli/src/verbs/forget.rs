@@ -867,7 +867,6 @@ impl ForgetOutcomeExt for cairn_store_sqlite::record_wal::forget::ForgetOutcome 
 
 #[allow(clippy::too_many_lines)]
 fn run_session(session_id: &str, vault_root: &Path, _config: &CairnConfig, json: bool) -> ExitCode {
-    let operation_id = new_operation_id();
     let rt = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -892,53 +891,7 @@ fn run_session(session_id: &str, vault_root: &Path, _config: &CairnConfig, json:
         }
     };
 
-    let db_path = vault_root.join(".cairn/cairn.db");
-    let result = rt.block_on(async {
-        let store = cairn_store_sqlite::open(&db_path)
-            .await
-            .map_err(|e| ForgetSessionError::Other(anyhow::anyhow!("open store: {e}")))?;
-        let backup_targets = session_target_ids_for_forget(&store, session_id).await?;
-        super::admin_snapshot::validate_registered_backups_for_targets(vault_root, &backup_targets)
-            .map_err(|e| {
-                ForgetSessionError::Other(anyhow::anyhow!(
-                    "backup.replay_tombstones preflight: {e}"
-                ))
-            })?;
-        let projection_paths = session_projection_paths_for_forget(&store, session_id).await?;
-        remove_session_projection_files(vault_root, &projection_paths)
-            .map_err(ForgetSessionError::Other)?;
-        store
-            .forget_session(session_id)
-            .await
-            .and_then(|outcome| {
-                super::admin_snapshot::rewrite_registered_backups(
-                    vault_root,
-                    &backup_targets,
-                    outcome.operation_id.as_str(),
-                )
-                .map_err(|e| cairn_store_sqlite::StoreError::Invariant {
-                    what: format!("backup.replay_tombstones: {e}"),
-                })?;
-                Ok(SessionForgetReceipt {
-                    deleted_count: outcome.deleted_count,
-                    projection_paths: outcome.projection_paths,
-                    tombstones: outcome
-                        .tombstones
-                        .into_iter()
-                        .map(|id| Ulid(id.as_str().to_owned()))
-                        .collect(),
-                })
-            })
-            .map_err(|e| match e {
-                cairn_store_sqlite::StoreError::NotFound { id } => ForgetSessionError::NotFound(id),
-                cairn_store_sqlite::StoreError::Invariant { what }
-                    if what.contains("spans multiple scope partitions") =>
-                {
-                    ForgetSessionError::AmbiguousSession(session_id.to_owned())
-                }
-                other => ForgetSessionError::Other(anyhow::anyhow!("{other}")),
-            })
-    });
+    let result = rt.block_on(run_session_receipt(session_id, vault_root));
 
     match result {
         Ok(receipt) => {
@@ -954,70 +907,192 @@ fn run_session(session_id: &str, vault_root: &Path, _config: &CairnConfig, json:
                 }
                 return ExitCode::FAILURE;
             }
-            let resp = Response {
-                contract: "cairn.mcp.v1".to_owned(),
-                data: Some(ResponseData::Forget(ForgetData {
-                    deleted_count: receipt.deleted_count,
-                    plan_ref: None,
-                    tombstones: Some(receipt.tombstones),
-                })),
-                error: None,
-                operation_id,
-                policy_trace: Vec::<ResponsePolicyTrace>::new(),
-                status: ResponseStatus::Committed,
-                target: None,
-                verb: ResponseVerb::Forget,
-            };
+            let deleted_count = receipt.deleted_count;
+            let resp = session_committed_response(receipt, new_operation_id());
             if json {
                 emit_json(&resp);
             } else {
-                println!(
-                    "cairn forget: deleted {} record versions",
-                    receipt.deleted_count
-                );
+                println!("cairn forget: deleted {deleted_count} record versions");
             }
             ExitCode::SUCCESS
         }
-        Err(ForgetSessionError::NotFound(target)) => {
-            let resp = not_found_response(
-                ResponseVerb::Forget,
-                &target,
-                &format!("target `{target}` was not found"),
-            );
+        Err(err) => {
+            let (resp, code, human_code, message) = session_error_response(err);
             if json {
                 emit_json(&resp);
             } else {
-                human_error(
-                    "forget",
-                    "NotFound",
-                    &format!("target `{target}` was not found"),
-                    &resp.operation_id,
-                );
+                human_error("forget", human_code, &message, &resp.operation_id);
             }
-            ExitCode::FAILURE
+            code
         }
-        Err(ForgetSessionError::AmbiguousSession(session_id)) => {
+    }
+}
+
+/// The store-level session forget flow shared by the CLI (`run_session`)
+/// and the MCP surface (`run_session_response`): backup preflight,
+/// projection cleanup, `forget_session`, and backup rewrite.
+async fn run_session_receipt(
+    session_id: &str,
+    vault_root: &Path,
+) -> Result<SessionForgetReceipt, ForgetSessionError> {
+    let db_path = vault_root.join(".cairn/cairn.db");
+    let store = cairn_store_sqlite::open(&db_path)
+        .await
+        .map_err(|e| ForgetSessionError::Other(anyhow::anyhow!("open store: {e}")))?;
+    let backup_targets = session_target_ids_for_forget(&store, session_id).await?;
+    super::admin_snapshot::validate_registered_backups_for_targets(vault_root, &backup_targets)
+        .map_err(|e| {
+            ForgetSessionError::Other(anyhow::anyhow!("backup.replay_tombstones preflight: {e}"))
+        })?;
+    let projection_paths = session_projection_paths_for_forget(&store, session_id).await?;
+    remove_session_projection_files(vault_root, &projection_paths)
+        .map_err(ForgetSessionError::Other)?;
+    store
+        .forget_session(session_id)
+        .await
+        .and_then(|outcome| {
+            super::admin_snapshot::rewrite_registered_backups(
+                vault_root,
+                &backup_targets,
+                outcome.operation_id.as_str(),
+            )
+            .map_err(|e| cairn_store_sqlite::StoreError::Invariant {
+                what: format!("backup.replay_tombstones: {e}"),
+            })?;
+            Ok(SessionForgetReceipt {
+                deleted_count: outcome.deleted_count,
+                projection_paths: outcome.projection_paths,
+                tombstones: outcome
+                    .tombstones
+                    .into_iter()
+                    .map(|id| Ulid(id.as_str().to_owned()))
+                    .collect(),
+            })
+        })
+        .map_err(|e| match e {
+            cairn_store_sqlite::StoreError::NotFound { id } => ForgetSessionError::NotFound(id),
+            cairn_store_sqlite::StoreError::Invariant { what }
+                if what.contains("spans multiple scope partitions") =>
+            {
+                ForgetSessionError::AmbiguousSession(session_id.to_owned())
+            }
+            other => ForgetSessionError::Other(anyhow::anyhow!("{other}")),
+        })
+}
+
+fn session_committed_response(receipt: SessionForgetReceipt, operation_id: Ulid) -> Response {
+    Response {
+        contract: "cairn.mcp.v1".to_owned(),
+        data: Some(ResponseData::Forget(ForgetData {
+            deleted_count: receipt.deleted_count,
+            plan_ref: None,
+            tombstones: Some(receipt.tombstones),
+        })),
+        error: None,
+        operation_id,
+        policy_trace: Vec::<ResponsePolicyTrace>::new(),
+        status: ResponseStatus::Committed,
+        target: None,
+        verb: ResponseVerb::Forget,
+    }
+}
+
+/// Map a session-forget error to its response envelope, CLI exit code,
+/// human error label, and human message — shared between the CLI printer
+/// and the MCP surface (which uses only the envelope).
+fn session_error_response(err: ForgetSessionError) -> (Response, ExitCode, &'static str, String) {
+    match err {
+        ForgetSessionError::NotFound(target) => {
+            let message = format!("target `{target}` was not found");
+            let resp = not_found_response(ResponseVerb::Forget, &target, &message);
+            (resp, ExitCode::FAILURE, "NotFound", message)
+        }
+        ForgetSessionError::AmbiguousSession(session_id) => {
             let message = format!(
                 "session `{session_id}` spans multiple scope partitions; specify a narrower forget target"
             );
             let resp = invalid_args_response(ResponseVerb::Forget, "session_id", &message);
-            if json {
-                emit_json(&resp);
-            } else {
-                human_error("forget", "InvalidArgs", &message, &resp.operation_id);
-            }
-            ExitCode::from(64)
+            (resp, ExitCode::from(64), "InvalidArgs", message)
         }
-        Err(err) => {
-            let resp =
-                super::envelope::internal_error_response(ResponseVerb::Forget, &err.to_string());
-            if json {
-                emit_json(&resp);
-            } else {
-                human_error("forget", "Internal", &err.to_string(), &resp.operation_id);
-            }
-            ExitCode::FAILURE
+        err @ ForgetSessionError::Other(_) => {
+            let message = err.to_string();
+            let resp = super::envelope::internal_error_response(ResponseVerb::Forget, &message);
+            (resp, ExitCode::FAILURE, "Internal", message)
         }
+    }
+}
+
+/// Session-mode forget returning the response envelope (MCP surface).
+async fn run_session_response(session_id: &str, vault_root: &Path) -> Response {
+    match run_session_receipt(session_id, vault_root).await {
+        Ok(receipt) => {
+            if let Err(e) = remove_session_projection_files(vault_root, &receipt.projection_paths) {
+                return super::envelope::internal_error_response(
+                    ResponseVerb::Forget,
+                    &format!("projection cleanup failed after committed session forget: {e}"),
+                );
+            }
+            session_committed_response(receipt, new_operation_id())
+        }
+        Err(err) => session_error_response(err).0,
+    }
+}
+
+/// Run `forget` from already-parsed generated args.
+///
+/// Single dispatch path behind both `cairn forget` and the MCP `forget`
+/// tool (via [`crate::mcp::CliMutationHost`]) — one verb implementation,
+/// two surfaces (CLAUDE.md §4 invariant 3).
+///
+/// Mode mapping mirrors the CLI dispatcher in [`run`]:
+/// - `record` → the signed WAL tombstone path ([`run_record`]).
+/// - `session` → the store-level session forget ([`run_session_response`]).
+/// - `scope` → `CapabilityUnavailable`
+///   ([`cairn_core::status::wiring::FORGET_SCOPE_WIRED`] is `false`).
+/// - `dry_run` / `human_review` flush-plan modes are CLI-only placeholder
+///   planners (`ingest_plan_stub` writes vault-local plan files); they fail
+///   closed here rather than pretending a plan was produced.
+pub(crate) async fn forget_response(
+    args: cairn_core::generated::verbs::forget::ForgetArgs,
+    vault_root: PathBuf,
+    config: CairnConfig,
+) -> Response {
+    use cairn_core::generated::verbs::forget::ForgetArgs as Args;
+
+    let flush_plan_requested = match &args {
+        Args::Record {
+            dry_run,
+            human_review,
+            ..
+        }
+        | Args::Session {
+            dry_run,
+            human_review,
+            ..
+        }
+        | Args::Scope {
+            dry_run,
+            human_review,
+            ..
+        } => dry_run.unwrap_or(false) || human_review.unwrap_or(false),
+        _ => false,
+    };
+    if flush_plan_requested {
+        return invalid_args_response(
+            ResponseVerb::Forget,
+            "dry_run|human_review",
+            "flush-plan forget modes are not yet supported over MCP",
+        );
+    }
+
+    match args {
+        Args::Record { record_id, .. } => run_record(record_id.0, vault_root, config).await,
+        Args::Session { session_id, .. } => run_session_response(&session_id, &vault_root).await,
+        Args::Scope { .. } => {
+            capability_unavailable_response(ResponseVerb::Forget, "cairn.mcp.v1.forget.scope")
+        }
+        // Fail closed on future IDL modes this build does not know.
+        _ => invalid_args_response(ResponseVerb::Forget, "mode", "unknown forget mode"),
     }
 }
 

@@ -155,7 +155,9 @@ pub struct FederationState {
 ///
 /// Implements [`rmcp::ServerHandler`]. When constructed with
 /// [`CairnMcpHandler::with_store`] the `search` tool dispatches through
-/// [`cairn_core::verbs::search::run`]; all other tools fall back to
+/// [`cairn_core::verbs::search::run`]; the mutating verbs (`ingest`,
+/// `capture_trace`, `forget`) dispatch through a host injected via
+/// [`CairnMcpHandler::with_mutation_host`]; remaining tools fall back to
 /// [`dispatch_stub`] until their real dispatch lands in a follow-up PR.
 // One bool per workflow's runtime-ready advertisement gate; collapsing
 // into a single struct doesn't add clarity here.
@@ -195,6 +197,11 @@ pub struct CairnMcpHandler {
     /// AND `federation` is `Some`. Controls federation capability
     /// advertisement.
     federation_runtime_ready: bool,
+    /// Host-injected dispatch for the mutating verbs (`ingest`,
+    /// `capture_trace`, `forget`). When `Some`, those tools route through
+    /// the host's signed write path (the same domain logic the CLI verbs
+    /// use); when `None`, they keep the fail-closed typed aborted stub.
+    mutation_host: Option<Arc<dyn crate::mutation_host::MutatingVerbHost>>,
 }
 
 impl Default for CairnMcpHandler {
@@ -236,6 +243,7 @@ impl CairnMcpHandler {
             evaluation_runtime_ready: false,
             federation: None,
             federation_runtime_ready: false,
+            mutation_host: None,
         }
     }
 
@@ -260,6 +268,7 @@ impl CairnMcpHandler {
             evaluation_runtime_ready: false,
             federation: None,
             federation_runtime_ready: false,
+            mutation_host: None,
         }
     }
 
@@ -288,6 +297,7 @@ impl CairnMcpHandler {
             evaluation_runtime_ready: false,
             federation: None,
             federation_runtime_ready: false,
+            mutation_host: None,
         }
     }
 
@@ -318,6 +328,7 @@ impl CairnMcpHandler {
             evaluation_runtime_ready: false,
             federation: None,
             federation_runtime_ready: false,
+            mutation_host: None,
         }
     }
 
@@ -348,6 +359,7 @@ impl CairnMcpHandler {
             evaluation_runtime_ready: false,
             federation: None,
             federation_runtime_ready: false,
+            mutation_host: None,
         }
     }
 
@@ -415,6 +427,21 @@ impl CairnMcpHandler {
     #[must_use]
     pub fn with_federation_runtime_ready(mut self, ready: bool) -> Self {
         self.federation_runtime_ready = ready;
+        self
+    }
+
+    /// Wire a [`crate::mutation_host::MutatingVerbHost`] into this handler.
+    ///
+    /// When set, the `ingest`, `capture_trace`, and `forget` tools dispatch
+    /// through the host's signed write path after the generated arg parsers
+    /// validate the payload. When absent, those tools keep the fail-closed
+    /// typed aborted stub ([`dispatch_stub`]).
+    #[must_use]
+    pub fn with_mutation_host(
+        mut self,
+        host: Arc<dyn crate::mutation_host::MutatingVerbHost>,
+    ) -> Self {
+        self.mutation_host = Some(host);
         self
     }
 
@@ -607,17 +634,22 @@ impl CairnMcpHandler {
 
         // Post-filter capabilities whose shared core wiring flags are true
         // for another surface but not yet honored by this MCP transport.
-        // MCP non-search verbs still fall through `dispatch_stub`; do not
-        // advertise them until MCP dispatch can honor them end-to-end.
+        // Retrieve verbs still fall through `dispatch_stub`; `forget` is
+        // honored only when a `MutatingVerbHost` is wired (the host routes
+        // it through the same signed write path the CLI uses). Do not
+        // advertise what this transport cannot honor end-to-end (brief §15).
+        let forget_honored = self.mutation_host.is_some();
         let mut capabilities = cairn_core::status::advertise(&gates);
         capabilities.retain(|c| {
-            !matches!(
+            !(matches!(
                 c,
-                cairn_core::generated::common::Capabilities::CairnMcpV1ForgetRecord
-                    | cairn_core::generated::common::Capabilities::CairnMcpV1RetrieveSession
+                cairn_core::generated::common::Capabilities::CairnMcpV1RetrieveSession
                     | cairn_core::generated::common::Capabilities::CairnMcpV1RetrieveTurn
                     | cairn_core::generated::common::Capabilities::CairnMcpV1RetrieveToolCall
-            )
+            ) || (matches!(
+                c,
+                cairn_core::generated::common::Capabilities::CairnMcpV1ForgetRecord
+            ) && !forget_honored))
         });
 
         // Post-filter replay capabilities to keep status advertisement and
@@ -847,8 +879,11 @@ impl ServerHandler for CairnMcpHandler {
     /// [`crate::graph_tools::dispatch`]. Validates that the requested verb
     /// exists in [`TOOLS`] for non-graph tools. When the verb is `"search"`
     /// and a store is wired, dispatches through
-    /// [`cairn_core::verbs::search::run`]. All other verbs (or `"search"` with
-    /// no store wired) fall back to [`dispatch_stub`].
+    /// [`cairn_core::verbs::search::run`]. The mutating verbs (`ingest`,
+    /// `capture_trace`, `forget`) dispatch through the wired
+    /// [`crate::mutation_host::MutatingVerbHost`] after generated arg
+    /// validation. All other verbs (or wired verbs whose runtime dependency
+    /// is absent) fall back to [`dispatch_stub`].
     #[allow(
         clippy::too_many_lines,
         reason = "central MCP dispatch table keeps tool routing auditable"
@@ -869,7 +904,12 @@ impl ServerHandler for CairnMcpHandler {
         async move {
             let verb_name = name.to_string();
             let started = Instant::now();
-            let call = async {
+            // Boxed: the dispatch future embeds every verb's arg/response
+            // state and trips `clippy::large_futures` at each `serve()`
+            // call site once it crosses the size threshold. Boxing keeps
+            // the outer `call_tool` future small regardless of how many
+            // verbs gain real dispatch paths.
+            let call = Box::pin(async {
                 // Prelude tool routing (`handshake`) — accept the call iff
                 // (a) the tool name is in PRELUDE_TOOLS, AND
                 // (b) a sqlite store is wired, AND
@@ -987,6 +1027,35 @@ impl ServerHandler for CairnMcpHandler {
                     }
                 };
 
+                // Mutating verbs route through the host-injected signed
+                // write path (issue: wire ingest/capture_trace/forget over
+                // MCP). The host runs the same domain logic the CLI verbs
+                // use — WAL admission included (brief §5.6) — so no write
+                // logic lives in this adapter. Arg validation already
+                // happened above; without a wired host these verbs fall
+                // through to the fail-closed stub below.
+                if matches!(name.as_ref(), "ingest" | "capture_trace" | "forget")
+                    && let Some(host) = self.mutation_host.as_ref()
+                {
+                    let response = match typed_args {
+                        cairn_core::generated::envelope::RequestArgs::Ingest(args) => {
+                            host.ingest(args).await
+                        }
+                        cairn_core::generated::envelope::RequestArgs::CaptureTrace(args) => {
+                            host.capture_trace(args).await
+                        }
+                        cairn_core::generated::envelope::RequestArgs::Forget(args) => {
+                            host.forget(args).await
+                        }
+                        _ => crate::verb_envelope::invalid_args_response(
+                            crate::verb_envelope::response_verb(request_verb),
+                            "args",
+                            "argument payload does not match verb",
+                        ),
+                    };
+                    return Ok(crate::verb_envelope::call_result_from_response(&response));
+                }
+
                 if name.as_ref() == "search"
                     && let Some(store) = store
                 {
@@ -1035,7 +1104,7 @@ impl ServerHandler for CairnMcpHandler {
                 }
 
                 Ok(dispatch_stub(&name))
-            };
+            });
             let result = if metric_config.observability.enabled
                 && metric_config.observability.local_traces
             {
