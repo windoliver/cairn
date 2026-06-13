@@ -142,6 +142,11 @@ fn cairn_mcp_subprocess_advertises_generated_tool_descriptions_byte_for_byte() {
     run_mcp_subprocess("e2e-cli-descriptions", run_tool_description_protocol);
 }
 
+#[test]
+fn cairn_mcp_subprocess_ingest_search_forget_round_trip() {
+    run_mcp_subprocess("e2e-cli-mutations", run_mutation_round_trip_protocol);
+}
+
 fn run_mcp_subprocess(tenant: &str, protocol: fn(&mut Child) -> Result<(), String>) {
     let vault = synth_vault(tenant);
     let child = Command::new(cli_bin())
@@ -149,6 +154,14 @@ fn run_mcp_subprocess(tenant: &str, protocol: fn(&mut Child) -> Result<(), Strin
         .arg(vault.path())
         .arg("mcp")
         .env_remove("CAIRN_VAULT")
+        // Offline file keystore: the signed-ingest path (round-trip test)
+        // provisions an identity on first ingest. The default OS keychain
+        // serializes through a system daemon, which under full-workspace
+        // `nextest` parallelism stalls the subprocess past FRAME_DEADLINE.
+        // The file keystore is deterministic, offline, and matches CI's
+        // ubuntu config (`CAIRN_KEYSTORE: file`). Harmless for the
+        // read-only protocols.
+        .env("CAIRN_KEYSTORE", "file")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -399,6 +412,109 @@ fn run_assemble_hot_protocol(child: &mut Child) -> Result<(), String> {
         .is_some_and(Value::is_array)
     {
         return Err(format!("assemble_hot must emit segments; got {envelope}"));
+    }
+
+    client.close_stdin();
+    Ok(())
+}
+
+/// Committed-envelope helper for the mutation round-trip: assert the call
+/// is a non-error result whose text content parses as a committed cairn
+/// envelope for `verb`, and return the parsed envelope JSON.
+fn committed_envelope(call_resp: &Value, label: &str, verb: &str) -> Result<Value, String> {
+    let is_error = call_resp
+        .pointer("/result/isError")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    if is_error {
+        return Err(format!("{label} should commit; got {call_resp}"));
+    }
+    let text = first_text_content(call_resp)
+        .ok_or_else(|| format!("{label} response missing text content: {call_resp}"))?;
+    let envelope: Value = serde_json::from_str(text)
+        .map_err(|e| format!("{label} text must parse as JSON: {e}; text={text}"))?;
+    if envelope["contract"] != "cairn.mcp.v1"
+        || envelope["verb"] != verb
+        || envelope["status"] != "committed"
+    {
+        return Err(format!(
+            "{label} must return a committed cairn envelope; got {envelope}"
+        ));
+    }
+    Ok(envelope)
+}
+
+/// Full mutating round-trip over the real `cairn mcp` subprocess —
+/// the exact flow the desk-daemon `CairnMemoryAdapter` drives:
+/// `ingest` commits a record, `search` finds it, `forget` tombstones it,
+/// and a second `search` comes back empty.
+fn run_mutation_round_trip_protocol(child: &mut Child) -> Result<(), String> {
+    let mut client = ProtocolClient::new(child)?;
+    client.initialize("cli-e2e-mutations")?;
+
+    // ── ingest ───────────────────────────────────────────────────────────
+    client.send(
+        r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"ingest","arguments":{"kind":"reference","body":"Acme renewal terms land in Q3.","frontmatter":{"source":"e2e"}}}}"#,
+    )?;
+    let ingest_env = committed_envelope(&client.recv("ingest")?, "ingest", "ingest")?;
+    let record_id = ingest_env
+        .pointer("/data/record_id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| format!("ingest envelope missing data.record_id: {ingest_env}"))?
+        .to_owned();
+    if record_id.len() != 26 {
+        return Err(format!("ingest record_id must be a ULID; got {record_id}"));
+    }
+
+    // ── search round-trip ────────────────────────────────────────────────
+    client.send(
+        r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"search","arguments":{"query":"acme","mode":"keyword","limit":10}}}"#,
+    )?;
+    let search_env = committed_envelope(&client.recv("search")?, "search", "search")?;
+    let hit_ids: Vec<&str> = search_env
+        .pointer("/data/hits")
+        .and_then(Value::as_array)
+        .map(|hits| {
+            hits.iter()
+                .filter_map(|h| h.get("record_id").and_then(Value::as_str))
+                .collect()
+        })
+        .unwrap_or_default();
+    if !hit_ids.contains(&record_id.as_str()) {
+        return Err(format!(
+            "keyword search must find the ingested record {record_id}; got hits {hit_ids:?} in {search_env}"
+        ));
+    }
+
+    // ── forget ───────────────────────────────────────────────────────────
+    let forget_call = format!(
+        r#"{{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{{"name":"forget","arguments":{{"mode":"record","record_id":"{record_id}"}}}}}}"#
+    );
+    client.send(&forget_call)?;
+    let forget_env = committed_envelope(&client.recv("forget")?, "forget", "forget")?;
+    if forget_env
+        .pointer("/data/deleted_count")
+        .and_then(Value::as_u64)
+        .is_none_or(|n| n < 1)
+    {
+        return Err(format!(
+            "forget must report at least one deleted version; got {forget_env}"
+        ));
+    }
+
+    // ── search again: record is gone ─────────────────────────────────────
+    client.send(
+        r#"{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"search","arguments":{"query":"acme","mode":"keyword","limit":10}}}"#,
+    )?;
+    let search_env = committed_envelope(&client.recv("search-after-forget")?, "search", "search")?;
+    let hits_after = search_env
+        .pointer("/data/hits")
+        .and_then(Value::as_array)
+        .map_or(0, Vec::len);
+    if hits_after != 0 {
+        return Err(format!(
+            "search after forget must return no hits; got {search_env}"
+        ));
     }
 
     client.close_stdin();

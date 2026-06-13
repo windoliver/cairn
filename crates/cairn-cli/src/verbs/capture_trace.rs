@@ -1821,6 +1821,48 @@ pub fn run(sub: &ArgMatches, vault_root: PathBuf, config: CairnConfig) -> ExitCo
     response_exit_code(&resp)
 }
 
+/// Run `capture_trace` from already-parsed generated args.
+///
+/// Single dispatch path behind both `cairn capture_trace` and the MCP
+/// `capture_trace` tool (via [`crate::mcp::CliMutationHost`]) — one verb
+/// implementation, two surfaces (CLAUDE.md §4 invariant 3). The arg→input
+/// mapping mirrors the CLI matcher in [`run`], including the `@path` prefix
+/// normalization the IDL documents for `blocks`.
+pub(crate) async fn capture_trace_response(
+    args: cairn_core::generated::verbs::capture_trace::CaptureTraceArgs,
+    vault_root: PathBuf,
+    config: CairnConfig,
+) -> Response {
+    let from = args.from.map(|p| normalize_cli_path(Path::new(&p)));
+    let blocks = args.blocks.map(|p| normalize_cli_path(Path::new(&p)));
+    let input = match (from, blocks, args.session_id) {
+        (Some(from), None, None) => CaptureTraceInput::Jsonl(from),
+        (None, Some(path), Some(session_id)) => CaptureTraceInput::Blocks { path, session_id },
+        (Some(_), None, Some(_)) => {
+            return invalid_args_response(
+                ResponseVerb::CaptureTrace,
+                "session_id",
+                "session-scoped trace import is not yet supported for JSONL capture_trace",
+            );
+        }
+        (None, Some(_), None) => {
+            return invalid_args_response(
+                ResponseVerb::CaptureTrace,
+                "session_id",
+                "required when using --blocks",
+            );
+        }
+        _ => {
+            return invalid_args_response(
+                ResponseVerb::CaptureTrace,
+                "from|blocks",
+                "exactly one input mode is required",
+            );
+        }
+    };
+    run_async(input, vault_root, config).await
+}
+
 async fn run_async(input: CaptureTraceInput, vault_root: PathBuf, config: CairnConfig) -> Response {
     let ctx =
         match super::signed::open_context(ResponseVerb::CaptureTrace, &vault_root, config).await {

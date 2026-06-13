@@ -18,12 +18,14 @@ pub mod federation_tools;
 pub mod generated;
 pub mod graph_tools;
 pub mod handler;
+pub mod mutation_host;
 pub mod prelude_tools;
 pub mod relay;
 pub mod verb_envelope;
 
 pub use error::TransportError;
 pub use handler::{CairnMcpHandler, FederationState};
+pub use mutation_host::MutatingVerbHost;
 
 use std::{path::PathBuf, sync::Arc};
 
@@ -205,12 +207,24 @@ pub async fn serve_stdio_with_store_consolidation_ready(
         vault_root,
         tokio::io::stdin(),
         tokio::io::stdout(),
-        WorkflowReadiness {
-            consolidation: true,
-            ..WorkflowReadiness::default()
+        ServeOptions {
+            readiness: WorkflowReadiness {
+                consolidation: true,
+                ..WorkflowReadiness::default()
+            },
+            mutation_host: None,
         },
     ))
     .await
+}
+
+/// Handler wiring carried by [`serve_stdio_with_store_io_inner`] beyond the
+/// store/scope/config baseline: workflow-readiness advertisement flags and
+/// the optional mutating-verb host.
+#[derive(Default)]
+struct ServeOptions {
+    readiness: WorkflowReadiness,
+    mutation_host: Option<Arc<dyn MutatingVerbHost>>,
 }
 
 /// Per-workflow runtime-readiness flags. Passed by `cairn mcp serve`
@@ -248,6 +262,40 @@ pub async fn serve_stdio_with_store_workflows_ready(
     vault_root: Option<PathBuf>,
     readiness: WorkflowReadiness,
 ) -> Result<(), TransportError> {
+    serve_stdio_with_store_workflows_ready_and_mutation_host(
+        store,
+        sqlite_store,
+        scope,
+        config,
+        principal,
+        vault_root,
+        readiness,
+        None,
+    )
+    .await
+}
+
+/// Run the MCP stdio server with workflow-readiness flags and an optional
+/// [`MutatingVerbHost`] that dispatches `ingest`, `capture_trace`, and
+/// `forget` through the embedder's signed write path. Pass `None` to keep
+/// the mutating verbs on the fail-closed stub.
+///
+/// # Errors
+/// Same as [`serve_stdio_with_store`].
+#[allow(
+    clippy::too_many_arguments,
+    reason = "entry point mirrors serve_stdio_with_store_workflows_ready plus the host gate"
+)]
+pub async fn serve_stdio_with_store_workflows_ready_and_mutation_host(
+    store: Arc<dyn cairn_core::contract::memory_store::MemoryStore>,
+    sqlite_store: Arc<cairn_store_sqlite::SqliteMemoryStore>,
+    scope: Arc<dyn cairn_core::mcp_auth::McpSessionScope>,
+    config: cairn_core::config::CairnConfig,
+    principal: cairn_core::domain::ScopeTuple,
+    vault_root: Option<PathBuf>,
+    readiness: WorkflowReadiness,
+    mutation_host: Option<Arc<dyn MutatingVerbHost>>,
+) -> Result<(), TransportError> {
     Box::pin(serve_stdio_with_store_io_inner(
         store,
         sqlite_store,
@@ -257,7 +305,10 @@ pub async fn serve_stdio_with_store_workflows_ready(
         vault_root,
         tokio::io::stdin(),
         tokio::io::stdout(),
-        readiness,
+        ServeOptions {
+            readiness,
+            mutation_host,
+        },
     ))
     .await
 }
@@ -292,7 +343,7 @@ where
         None,
         input,
         output,
-        WorkflowReadiness::default(),
+        ServeOptions::default(),
     ))
     .await
 }
@@ -330,7 +381,7 @@ where
         Some(vault_root),
         input,
         output,
-        WorkflowReadiness::default(),
+        ServeOptions::default(),
     ))
     .await
 }
@@ -349,7 +400,7 @@ async fn serve_stdio_with_store_io_inner<I, O>(
     vault_root: Option<PathBuf>,
     input: I,
     output: O,
-    readiness: WorkflowReadiness,
+    options: ServeOptions,
 ) -> Result<(), TransportError>
 where
     I: AsyncRead + Unpin + Send + 'static,
@@ -360,7 +411,8 @@ where
     let (framer_reader, relay_writer) = tokio::io::duplex(64 * 1024);
     let mut relay_task = tokio::spawn(async move { relay::run_relay(input, relay_writer).await });
 
-    let handler = if let Some(vault_root) = vault_root {
+    let readiness = options.readiness;
+    let mut handler = if let Some(vault_root) = vault_root {
         CairnMcpHandler::with_store_scope_sqlite_and_vault(
             store,
             sqlite_store,
@@ -377,6 +429,9 @@ where
     .with_dream_runtime_ready(readiness.dream)
     .with_expiration_runtime_ready(readiness.expiration)
     .with_evaluation_runtime_ready(readiness.evaluation);
+    if let Some(host) = options.mutation_host {
+        handler = handler.with_mutation_host(host);
+    }
 
     // rmcp's `IntoTransport` is implemented for `(R, W)` tuples where R:
     // `AsyncRead + Unpin + Send + 'static` and W: `AsyncWrite + Unpin + Send +
