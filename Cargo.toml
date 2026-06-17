@@ -133,6 +133,7 @@ cairn-frontend-vscode = { path = "crates/cairn-frontend-vscode", version = "0.0.
 cairn-frontend-logseq = { path = "crates/cairn-frontend-logseq", version = "0.0.1" }
 cairn-connectors-core = { path = "crates/cairn-connectors-core", version = "0.0.1" }
 cairn-connectors-github = { path = "crates/cairn-connectors-github", version = "0.0.1" }
+cairn-connectors-webclip = { path = "crates/cairn-connectors-webclip", version = "0.0.1" }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
