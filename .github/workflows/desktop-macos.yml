@@ -25,7 +25,7 @@ jobs:
     env:
       CARGO_TERM_COLOR: always
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Install Rust toolchain
         run: |
@@ -120,7 +120,7 @@ jobs:
     permissions:
       contents: write  # required only for the GitHub Release upload
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: actions/download-artifact@v4
         with:
           name: cairn-macos-dmg
